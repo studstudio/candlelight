@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>E-Ink Dither Tester</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #eee; margin: 0; padding: 16px; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  p { font-size: 13px; color: #aaa; margin-top: 0; }
+  .controls { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+  label { font-size: 13px; display: flex; justify-content: space-between; }
+  select, input[type=file] { padding: 8px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; width: 100%; box-sizing: border-box; }
+  input[type=range] { width: 100%; }
+  canvas { width: 100%; border: 1px solid #444; border-radius: 8px; margin-top: 12px; image-rendering: pixelated; background: #fff; }
+  button { width: 100%; padding: 12px; margin-top: 12px; border-radius: 8px; border: none; background: #4a7; color: #fff; font-size: 15px; font-weight: 600; }
+  button:active { background: #396; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+</style>
+</head>
+<body>
+
+<h1>E-Ink Dither Tester</h1>
+<p>Pick a photo, preview the dithered result, save it to test sending through Messages.</p>
+
+<input type="file" id="fileInput" accept="image/*">
+
+<div class="controls">
+  <div class="row">
+    <div>
+      <label>Width <span id="wVal">400</span>px</label>
+      <input type="range" id="width" min="100" max="800" value="400">
+    </div>
+    <div>
+      <label>Height <span id="hVal">300</span>px</label>
+      <input type="range" id="height" min="100" max="800" value="300">
+    </div>
+  </div>
+  <label>Dither algorithm
+    <select id="algo">
+      <option value="floyd">Floyd–Steinberg</option>
+      <option value="atkinson">Atkinson</option>
+      <option value="none">None (plain grayscale)</option>
+    </select>
+  </label>
+  <label>Gray levels (bit depth) <span id="levelsVal">2 (1-bit)</span>
+    <input type="range" id="levels" min="2" max="16" value="2">
+  </label>
+</div>
+
+<canvas id="canvas"></canvas>
+<button id="downloadBtn">Save Image</button>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const widthSlider = document.getElementById('width');
+const heightSlider = document.getElementById('height');
+const algoSelect = document.getElementById('algo');
+const levelsSlider = document.getElementById('levels');
+let currentImg = null;
+
+widthSlider.oninput = () => { document.getElementById('wVal').textContent = widthSlider.value; render(); };
+heightSlider.oninput = () => { document.getElementById('hVal').textContent = heightSlider.value; render(); };
+algoSelect.onchange = render;
+levelsSlider.oninput = () => {
+  const n = parseInt(levelsSlider.value);
+  document.getElementById('levelsVal').textContent = n === 2 ? '2 (1-bit)' : n + ' levels';
+  render();
+};
+
+fileInput.onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => { currentImg = img; render(); };
+  img.src = URL.createObjectURL(file);
+};
+
+function render() {
+  if (!currentImg) return;
+  const W = parseInt(widthSlider.value);
+  const H = parseInt(heightSlider.value);
+  canvas.width = W;
+  canvas.height = H;
+
+  const scale = Math.max(W / currentImg.width, H / currentImg.height);
+  const sw = W / scale, sh = H / scale;
+  const sx = (currentImg.width - sw) / 2, sy = (currentImg.height - sh) / 2;
+  ctx.drawImage(currentImg, sx, sy, sw, sh, 0, 0, W, H);
+
+  const imgData = ctx.getImageData(0, 0, W, H);
+  const data = imgData.data;
+  const gray = new Float32Array(W * H);
+
+  for (let i = 0; i < W * H; i++) {
+    const r = data[i*4], g = data[i*4+1], b = data[i*4+2];
+    gray[i] = 0.299*r + 0.587*g + 0.114*b;
+  }
+
+  const algo = algoSelect.value;
+  const levels = parseInt(levelsSlider.value);
+  const step = 255 / (levels - 1);
+
+  function quantize(val) {
+    val = Math.max(0, Math.min(255, val));
+    return Math.round(Math.round(val / step) * step);
+  }
+
+  if (algo === 'none') {
+    for (let i = 0; i < W*H; i++) gray[i] = quantize(gray[i]);
+  } else if (algo === 'floyd') {
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y*W+x;
+        const old = gray[idx];
+        const newVal = quantize(old);
+        gray[idx] = newVal;
+        const err = old - newVal;
+        if (x+1 < W) gray[idx+1] += err * 7/16;
+        if (y+1 < H) {
+          if (x-1 >= 0) gray[idx+W-1] += err * 3/16;
+          gray[idx+W] += err * 5/16;
+          if (x+1 < W) gray[idx+W+1] += err * 1/16;
+        }
+      }
+    }
+  } else if (algo === 'atkinson') {
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y*W+x;
+        const old = gray[idx];
+        const newVal = quantize(old);
+        gray[idx] = newVal;
+        const err = (old - newVal) / 8;
+        if (x+1 < W) gray[idx+1] += err;
+        if (x+2 < W) gray[idx+2] += err;
+        if (y+1 < H) {
+          if (x-1 >= 0) gray[idx+W-1] += err;
+          gray[idx+W] += err;
+          if (x+1 < W) gray[idx+W+1] += err;
+        }
+        if (y+2 < H) gray[idx+2*W] += err;
+      }
+    }
+  }
+
+  for (let i = 0; i < W*H; i++) {
+    const v = Math.max(0, Math.min(255, gray[i]));
+    data[i*4] = v; data[i*4+1] = v; data[i*4+2] = v; data[i*4+3] = 255;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+document.getElementById('downloadBtn').onclick = () => {
+  const link = document.createElement('a');
+  link.download = 'dithered.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+};
+</script>
+
+</body>
+</html>

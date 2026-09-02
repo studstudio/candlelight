@@ -257,7 +257,14 @@ const modalSave = document.getElementById('modalSave');
 const modalCancel = document.getElementById('modalCancel');
 const modalRemove = document.getElementById('modalRemove');
 
-let targetW = 400, targetH = 300;
+// ============================================================
+// PANEL HARDWARE CONFIG: matches a 4.2" e-ink module (400x300).
+// Change these if you're targeting a different panel size later —
+// e.g. 296x128 for a 2.9", or 800x480 for a 7.5".
+// ============================================================
+const PANEL_W = 400, PANEL_H = 300;
+
+let targetW = PANEL_W, targetH = PANEL_H; // fixed to the real panel resolution, not derived from the crop box
 let naturalW = 0, naturalH = 0;
 let hasPhoto = false;
 let editingContactIdx = null;
@@ -374,13 +381,24 @@ async function checkLastSeen(lampId) {
   } catch { lastSeen.textContent = ''; }
 }
 
-// ---------- orientation presets (just set an initial box shape, not a lock) ----------
+// ---------- orientation: which way the physical panel is mounted ----------
+// This now sets the ACTUAL fixed output resolution (matching the real e-ink
+// hardware), not just a starting box shape. The crop box can still be any
+// shape — whatever region you select gets stretched/squashed to fit this
+// fixed pixel count, same as it will be on the real panel.
 function setOrientation(landscape) {
-  if (landscape) { btnLandscape.classList.add('active'); btnPortrait.classList.remove('active'); presetAspect = 4/3; }
-  else { btnPortrait.classList.add('active'); btnLandscape.classList.remove('active'); presetAspect = 3/4; }
-  if (naturalW) { initBox(); updateTargetFromBox(); render(); }
+  if (landscape) {
+    btnLandscape.classList.add('active'); btnPortrait.classList.remove('active');
+    targetW = PANEL_W; targetH = PANEL_H; presetAspect = PANEL_W / PANEL_H;
+  } else {
+    btnPortrait.classList.add('active'); btnLandscape.classList.remove('active');
+    targetW = PANEL_H; targetH = PANEL_W; presetAspect = PANEL_H / PANEL_W;
+  }
+  liveCanvas.width = targetW;
+  liveCanvas.height = targetH;
+  if (naturalW) { initBox(); render(); }
 }
-let presetAspect = 4/3;
+let presetAspect = PANEL_W / PANEL_H;
 btnLandscape.onclick = () => setOrientation(true);
 btnPortrait.onclick = () => setOrientation(false);
 
@@ -402,7 +420,6 @@ fileInput.onchange = (e) => {
     requestAnimationFrame(() => {
       updateCoverFit();
       initBox();
-      updateTargetFromBox();
       render();
       lastWrapW = photoWrap.clientWidth;
     });
@@ -448,16 +465,6 @@ function applyBoxStyle() {
   cropBox.style.top = box.top + 'px';
   cropBox.style.width = box.width + 'px';
   cropBox.style.height = box.height + 'px';
-}
-
-// output pixel dimensions follow the crop box's actual natural-pixel size —
-// any shape is allowed, the ESP32 just reads whatever width/height it's given
-function updateTargetFromBox() {
-  const MAX_DIM = 700, MIN_DIM = 40;
-  targetW = Math.round(Math.max(MIN_DIM, Math.min(MAX_DIM, box.width / coverScale)));
-  targetH = Math.round(Math.max(MIN_DIM, Math.min(MAX_DIM, box.height / coverScale)));
-  liveCanvas.width = targetW;
-  liveCanvas.height = targetH;
 }
 
 // ---------- drag to move box (single touch only) ----------
@@ -536,7 +543,6 @@ document.querySelectorAll('.handle').forEach(handle => {
     box.height = Math.abs(fixed.y - movingY);
 
     applyBoxStyle();
-    updateTargetFromBox();
     render();
   }, { passive: false });
 
@@ -560,7 +566,6 @@ window.addEventListener('resize', () => {
   box.width = Math.min(box.width, wrapW);
   box.height = Math.min(box.height, wrapH);
   applyBoxStyle();
-  updateTargetFromBox();
   render();
 });
 
@@ -599,7 +604,9 @@ function render() {
 }
 
 // ---------- scrub vertically on preview to adjust gray levels (replaces slider) ----------
-const LEVEL_STEPS = [2,4,5,6,7,8,9,10,11,12,13,14,15,16];
+// most affordable e-ink panels max out at 4 gray levels (2bpp); higher grayscale
+// exists but needs pricier/slower hardware not suited to this power budget
+const LEVEL_STEPS = [2, 4];
 function levelIndex(v) { return LEVEL_STEPS.indexOf(v); }
 
 let scrubState = null;
@@ -616,7 +623,7 @@ previewWrap.addEventListener('touchmove', (e) => {
   const t = e.touches[0];
   const dy = t.clientY - scrubState.startY;
   // dragging UP increases levels (more gradation), dragging DOWN decreases — sensitized to ~12px per step
-  const stepsMoved = Math.round(-dy / 12);
+  const stepsMoved = Math.round(-dy / 45);
   let newIdx = Math.max(0, Math.min(LEVEL_STEPS.length - 1, scrubState.startIdx + stepsMoved));
   const newLevel = LEVEL_STEPS[newIdx];
   if (newLevel !== levels) {

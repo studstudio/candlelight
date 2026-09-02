@@ -121,6 +121,18 @@
 
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
+  .postcard-row { display: flex; gap: 8px; margin-top: 12px; }
+  .postcard-row input[type=text] {
+    flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg-elevated); color: var(--cream); font-size: 13px;
+  }
+  .postcard-row input[type=text]::placeholder { color: var(--cream-dim); opacity: 0.6; }
+  .postcard-pos-btn {
+    flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg-elevated); color: var(--cream-dim);
+    display: flex; align-items: center; justify-content: center;
+  }
+
   .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cream-dim); margin-bottom: 10px; }
   .contacts-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
   .contact-chip {
@@ -206,10 +218,18 @@
   <canvas id="liveCanvas"></canvas>
   <div class="scrub-label" id="scrubLabel">2 · standard</div>
 </div>
-<div style="display:flex; justify-content:center; margin-top:10px;">
+<div style="display:flex; justify-content:center; gap:8px; margin-top:10px;">
   <button class="pill" id="invertBtn">invert</button>
+  <button class="pill" id="patternBtn">floyd–steinberg</button>
 </div>
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag up/down on preview for shading</p>
+
+<div class="postcard-row">
+  <input type="text" id="postcardInput" placeholder="add a short message (optional)" maxlength="60">
+  <button class="postcard-pos-btn" id="postcardPosBtn" title="move message to top/bottom">
+    <svg viewBox="0 0 24 24" width="16" height="16"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="4.5" y="15" width="15" height="5.5" rx="1" fill="currentColor" id="postcardPosIcon"/></svg>
+  </button>
+</div>
 
 <hr class="divider">
 
@@ -270,6 +290,10 @@ const lctx = liveCanvas.getContext('2d');
 const previewWrap = document.getElementById('previewWrap');
 const scrubLabel = document.getElementById('scrubLabel');
 const invertBtn = document.getElementById('invertBtn');
+const patternBtn = document.getElementById('patternBtn');
+const postcardInput = document.getElementById('postcardInput');
+const postcardPosBtn = document.getElementById('postcardPosBtn');
+const postcardPosIcon = document.getElementById('postcardPosIcon');
 const sendBtn = document.getElementById('sendBtn');
 const sendStatus = document.getElementById('sendStatus');
 const lastSeen = document.getElementById('lastSeen');
@@ -610,7 +634,7 @@ window.addEventListener('resize', () => {
   render();
 });
 
-// ---------- live render: crop + grayscale + floyd-steinberg dither ----------
+// ---------- live render: crop + postcard bar + grayscale + tone curve + dither ----------
 function render() {
   if (!naturalW) return;
 
@@ -624,6 +648,30 @@ function render() {
   const W = targetW, H = targetH;
   lctx.clearRect(0,0,W,H);
   lctx.drawImage(sourceImg, sx, sy, sw, sh, 0, 0, W, H);
+
+  // draw the postcard text bar directly onto the RGBA canvas, BEFORE we extract
+  // grayscale — this means it rides through the exact same tone curve, dither
+  // pattern, and invert as the photo itself, with no separate logic needed
+  const text = postcardText.trim();
+  if (text) {
+    const lines = text.split('\n').slice(0, 2);
+    const barH = H * (lines.length > 1 ? 0.26 : 0.16);
+    const barY = postcardPosition === 'top' ? 0 : H - barH;
+    lctx.save();
+    lctx.fillStyle = 'rgba(0,0,0,0.55)';
+    lctx.fillRect(0, barY, W, barH);
+    lctx.fillStyle = '#ffffff';
+    lctx.textAlign = 'center';
+    lctx.textBaseline = 'middle';
+    const lineH = barH / lines.length;
+    const fontSize = Math.max(8, Math.floor(lineH * 0.55));
+    lctx.font = `600 ${fontSize}px -apple-system, sans-serif`;
+    lines.forEach((line, i) => {
+      const cy = barY + lineH * (i + 0.5);
+      lctx.fillText(line, W / 2, cy, W * 0.92);
+    });
+    lctx.restore();
+  }
 
   const imgData = lctx.getImageData(0,0,W,H);
   const data = imgData.data;
@@ -661,11 +709,11 @@ function render() {
   const step = 255/(levelCount-1);
   function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
 
-  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
-    const idx=y*W+x, old=gray[idx], nv=quantize(old); gray[idx]=nv; const err=old-nv;
-    if(x+1<W) gray[idx+1]+=err*7/16;
-    if(y+1<H){ if(x-1>=0) gray[idx+W-1]+=err*3/16; gray[idx+W]+=err*5/16; if(x+1<W) gray[idx+W+1]+=err*1/16; }
-  }
+  // dither: pattern is user-selectable (Floyd–Steinberg / Atkinson / Ordered),
+  // strength is baked into the step progression — lower strength = harder,
+  // more graphic edges; full strength = smoothest photographic gradation
+  const strength = cfg.ditherStrength;
+  applyDither(gray, W, H, quantize, step, ditherPattern, strength);
 
   // invert swaps black<->white on the already-dithered result, so the pattern
   // itself is unchanged — just which physical e-ink state (black or white)
@@ -677,6 +725,40 @@ function render() {
   for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,gray[i])); data[i*4]=v;data[i*4+1]=v;data[i*4+2]=v;data[i*4+3]=255; }
   lctx.putImageData(imgData,0,0);
   liveCanvas._grayCache = gray;
+}
+
+// ---------- dither implementations ----------
+const BAYER4 = [
+  [0,8,2,10],
+  [12,4,14,6],
+  [3,11,1,9],
+  [15,7,13,5]
+];
+
+function applyDither(gray, W, H, quantize, step, pattern, strength) {
+  if (pattern === 'floyd') {
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const idx=y*W+x, old=gray[idx], nv=quantize(old); gray[idx]=nv;
+      const err=(old-nv)*strength;
+      if(x+1<W) gray[idx+1]+=err*7/16;
+      if(y+1<H){ if(x-1>=0) gray[idx+W-1]+=err*3/16; gray[idx+W]+=err*5/16; if(x+1<W) gray[idx+W+1]+=err*1/16; }
+    }
+  } else if (pattern === 'atkinson') {
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const idx=y*W+x, old=gray[idx], nv=quantize(old); gray[idx]=nv;
+      const err=(old-nv)/8*strength;
+      if(x+1<W) gray[idx+1]+=err;
+      if(x+2<W) gray[idx+2]+=err;
+      if(y+1<H){ if(x-1>=0) gray[idx+W-1]+=err; gray[idx+W]+=err; if(x+1<W) gray[idx+W+1]+=err; }
+      if(y+2<H) gray[idx+2*W]+=err;
+    }
+  } else { // 'ordered' — Bayer 4x4, no error diffusion, texture amplitude scaled by strength
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const idx=y*W+x;
+      const offset = (BAYER4[y%4][x%4]/16 - 0.5) * step * strength;
+      gray[idx] = quantize(gray[idx] + offset);
+    }
+  }
 }
 
 // ---------- scrub vertically on preview to adjust "look" (replaces slider) ----------
@@ -698,7 +780,7 @@ function render() {
 // changing — instead of stacking a tone-curve jump on top of it.
 function generateSteps() {
   const TIERS = [2, 3, 4];   // real gray levels available on the hardware
-  const PER_TIER = 12;       // sub-steps within each level count, for smoothness
+  const PER_TIER = 16;       // sub-steps within each level count, for smoothness
   const steps = [];
   TIERS.forEach((levelCount, tierIdx) => {
     const ascending = tierIdx % 2 === 0; // alternate direction so tier edges connect
@@ -710,8 +792,9 @@ function generateSteps() {
       const whitePoint = 255 - Math.round(p * 50);
       const shadowGamma = 1 + p * 0.7;      // 1.0 .. 1.7 — crushes shadow detail as p rises
       const highlightGamma = 1 + p * 0.7;   // 1.0 .. 1.7 — rolls off highlight detail as p rises
+      const ditherStrength = 1 - p * 0.6;   // 1.0 .. 0.4 — punchier steps dither less (harder, more graphic edges)
       const pct = Math.round(contrast * 100);
-      steps.push({ levels: levelCount, contrast, blackPoint, whitePoint, shadowGamma, highlightGamma, label: `${levelCount} gray · ${pct}%` });
+      steps.push({ levels: levelCount, contrast, blackPoint, whitePoint, shadowGamma, highlightGamma, ditherStrength, label: `${levelCount} gray · ${pct}%` });
     }
   });
   return steps;
@@ -722,6 +805,9 @@ let stepIndex = STEPS.reduce((best, cur, idx) =>
   (cur.levels === 2 && Math.abs(cur.contrast - 1) < Math.abs(STEPS[best].contrast - 1)) ? idx : best, 0);
 
 let invert = false; // false = black content on white e-ink, true = white content on black
+let ditherPattern = 'floyd'; // 'floyd' | 'atkinson' | 'ordered' — cycled via the pattern button
+let postcardText = '';
+let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
 let scrubState = null;
 let scrubLabelTimeout = null;
@@ -737,7 +823,7 @@ previewWrap.addEventListener('touchmove', (e) => {
   const t = e.touches[0];
   const dy = t.clientY - scrubState.startY;
   // dragging UP moves toward finer/punchier steps, DOWN toward fewer/softer — ~28px per step
-  const stepsMoved = Math.round(-dy / 20);
+  const stepsMoved = Math.round(-dy / 16);
   const newIdx = Math.max(0, Math.min(STEPS.length - 1, scrubState.startIdx + stepsMoved));
   if (newIdx !== stepIndex) {
     stepIndex = newIdx;
@@ -753,6 +839,28 @@ previewWrap.addEventListener('touchend', () => {
 invertBtn.onclick = () => {
   invert = !invert;
   invertBtn.classList.toggle('active', invert);
+  if (naturalW) render();
+};
+
+// cycles through the three dither patterns on tap
+const PATTERN_LABELS = { floyd: 'floyd–steinberg', atkinson: 'atkinson', ordered: 'ordered' };
+const PATTERN_ORDER = ['floyd', 'atkinson', 'ordered'];
+patternBtn.onclick = () => {
+  const i = PATTERN_ORDER.indexOf(ditherPattern);
+  ditherPattern = PATTERN_ORDER[(i + 1) % PATTERN_ORDER.length];
+  patternBtn.textContent = PATTERN_LABELS[ditherPattern];
+  if (naturalW) render();
+};
+
+// postcard text — rendered live as you type, baked into the same canvas
+// pipeline so it inherits tone curve, dither pattern, and invert automatically
+postcardInput.oninput = () => {
+  postcardText = postcardInput.value;
+  if (naturalW) render();
+};
+postcardPosBtn.onclick = () => {
+  postcardPosition = postcardPosition === 'bottom' ? 'top' : 'bottom';
+  postcardPosIcon.setAttribute('y', postcardPosition === 'bottom' ? '15' : '3');
   if (naturalW) render();
 };
 

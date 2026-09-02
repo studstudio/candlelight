@@ -23,13 +23,14 @@
     background: radial-gradient(ellipse at top, #1c150f 0%, var(--bg) 60%);
     color: var(--cream);
     margin: 0;
-    padding: 20px 18px 40px;
+    padding: 12px 18px 40px;
     min-height: 100vh;
   }
   h1 {
-    font-size: 15px; font-weight: 500; letter-spacing: 0.03em; color: var(--cream-dim);
-    text-align: center; margin: 4px 0 20px; text-transform: lowercase;
+    font-size: 13px; font-weight: 500; letter-spacing: 0.03em; color: var(--cream-dim);
+    text-align: center; margin: 0 0 12px; text-transform: lowercase;
   }
+  .footer-row { text-align: center; opacity: 0.85; }
   h3 { font-size: 12px; font-weight: 600; color: var(--cream-dim); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; }
 
   input[type=file] { display: none; }
@@ -45,9 +46,13 @@
   .photo-wrap {
     position: relative; width: 100%; overflow: hidden;
     background: #000; border: 1px solid var(--line); border-bottom: none;
-    border-radius: 14px 14px 0 0; min-height: 120px;
+    border-radius: 14px 14px 0 0;
+    height: 30vh; min-height: 160px;
   }
-  .photo-wrap img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; pointer-events: none; }
+  .photo-wrap img {
+    display: block; width: 100%; height: 100%; object-fit: cover;
+    user-select: none; -webkit-user-select: none; pointer-events: none;
+  }
   .empty-state {
     position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 10px; color: var(--cream-dim); font-size: 13px; padding: 30px 0;
@@ -74,11 +79,17 @@
   .crop-hint { font-size: 11px; color: var(--cream-dim); text-align: center; margin-top: 8px; opacity: 0.7; }
 
   /* --- live dithered preview, scrub to adjust --- */
-  .preview-wrap { position: relative; touch-action: none; }
-  .preview-wrap canvas {
-    width: 100%; height: auto; border-radius: 0 0 14px 14px;
+  .preview-wrap {
+    position: relative; touch-action: none;
+    height: 30vh; min-height: 160px;
+    border-radius: 0 0 14px 14px; overflow: hidden;
     border: 1px solid var(--line); border-top: 1px solid var(--ember-dim);
-    image-rendering: pixelated; background: #fff; display: block;
+    background: #fff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .preview-wrap canvas {
+    max-width: 100%; max-height: 100%; width: auto; height: auto;
+    image-rendering: pixelated; display: block;
   }
   .scrub-label {
     position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
@@ -149,13 +160,6 @@
 </head>
 <body>
 
-<h1>send today's light</h1>
-
-<div class="orientation-row">
-  <button class="pill active" id="btnLandscape">landscape</button>
-  <button class="pill" id="btnPortrait">portrait</button>
-</div>
-
 <div class="photo-wrap" id="photoWrap">
   <img id="sourceImg" src="" style="display:none;">
   <div class="empty-state" id="emptyState">
@@ -197,6 +201,16 @@
   </button>
   <div class="send-status" id="sendStatus"></div>
   <div class="last-seen" id="lastSeen"></div>
+</div>
+
+<hr class="divider">
+
+<div class="footer-row">
+  <h1>send today's light</h1>
+  <div class="orientation-row">
+    <button class="pill active" id="btnLandscape">landscape</button>
+    <button class="pill" id="btnPortrait">portrait</button>
+  </div>
 </div>
 
 <div class="modal-backdrop" id="modalBackdrop">
@@ -385,15 +399,33 @@ fileInput.onchange = (e) => {
     cropBox.style.display = 'block';
     cropHint.style.display = 'block';
     hasPhoto = true;
-    requestAnimationFrame(() => { initBox(); updateTargetFromBox(); render(); lastWrapW = photoWrap.clientWidth; });
+    requestAnimationFrame(() => {
+      updateCoverFit();
+      initBox();
+      updateTargetFromBox();
+      render();
+      lastWrapW = photoWrap.clientWidth;
+    });
     updateSendState();
   };
   img.src = URL.createObjectURL(file);
 };
 
+// the container has a FIXED height (30vh via CSS) and the photo fills it via
+// object-fit: cover — these three values describe exactly how the browser
+// is rendering that cover-fit, so we can map container coords <-> natural pixel coords
+let coverScale = 1, coverX0 = 0, coverY0 = 0;
+function updateCoverFit() {
+  const containerW = photoWrap.clientWidth;
+  const containerH = photoWrap.clientHeight;
+  coverScale = Math.max(containerW / naturalW, containerH / naturalH);
+  coverX0 = (containerW - naturalW * coverScale) / 2;
+  coverY0 = (containerH - naturalH * coverScale) / 2;
+}
+
 function initBox() {
   const wrapW = photoWrap.clientWidth;
-  const wrapH = sourceImg.clientHeight; // displayed height after width:100% scaling
+  const wrapH = photoWrap.clientHeight;
   const aspect = presetAspect;
 
   let boxW, boxH;
@@ -421,11 +453,9 @@ function applyBoxStyle() {
 // output pixel dimensions follow the crop box's actual natural-pixel size —
 // any shape is allowed, the ESP32 just reads whatever width/height it's given
 function updateTargetFromBox() {
-  const wrapW = photoWrap.clientWidth;
-  const scaleFactor = naturalW / wrapW;
   const MAX_DIM = 700, MIN_DIM = 40;
-  targetW = Math.round(Math.max(MIN_DIM, Math.min(MAX_DIM, box.width * scaleFactor)));
-  targetH = Math.round(Math.max(MIN_DIM, Math.min(MAX_DIM, box.height * scaleFactor)));
+  targetW = Math.round(Math.max(MIN_DIM, Math.min(MAX_DIM, box.width / coverScale)));
+  targetH = Math.round(Math.max(MIN_DIM, Math.min(MAX_DIM, box.height / coverScale)));
   liveCanvas.width = targetW;
   liveCanvas.height = targetH;
 }
@@ -443,7 +473,7 @@ cropBox.addEventListener('touchmove', (e) => {
   if (!dragState) return;
   e.preventDefault();
   const t = e.touches[0];
-  const wrapW = photoWrap.clientWidth, wrapH = sourceImg.clientHeight;
+  const wrapW = photoWrap.clientWidth, wrapH = photoWrap.clientHeight;
   let newLeft = dragState.startLeft + (t.clientX - dragState.startX);
   let newTop = dragState.startTop + (t.clientY - dragState.startY);
   newLeft = Math.max(0, Math.min(wrapW - box.width, newLeft));
@@ -482,7 +512,7 @@ document.querySelectorAll('.handle').forEach(handle => {
     e.preventDefault();
     e.stopPropagation();
     const t = e.touches[0];
-    const wrapW = photoWrap.clientWidth, wrapH = sourceImg.clientHeight;
+    const wrapW = photoWrap.clientWidth, wrapH = photoWrap.clientHeight;
     const { fixed, startMoving, startX, startY } = cornerState;
 
     let movingX = startMoving.x + (t.clientX - startX);
@@ -521,9 +551,10 @@ document.querySelectorAll('.handle').forEach(handle => {
 let lastWrapW = 0;
 window.addEventListener('resize', () => {
   if (!naturalW) return;
-  const wrapW = photoWrap.clientWidth, wrapH = sourceImg.clientHeight;
+  const wrapW = photoWrap.clientWidth, wrapH = photoWrap.clientHeight;
   if (lastWrapW && wrapW === lastWrapW) return; // width unchanged, likely just a toolbar show/hide — ignore
   lastWrapW = wrapW;
+  updateCoverFit();
   box.left = Math.max(0, Math.min(box.left, wrapW - box.width));
   box.top = Math.max(0, Math.min(box.top, wrapH - box.height));
   box.width = Math.min(box.width, wrapW);
@@ -536,14 +567,13 @@ window.addEventListener('resize', () => {
 // ---------- live render: crop + grayscale + floyd-steinberg dither ----------
 function render() {
   if (!naturalW) return;
-  const wrapW = photoWrap.clientWidth;
-  const wrapH = sourceImg.clientHeight;
-  const scaleFactor = naturalW / wrapW; // natural px per displayed px
 
-  const sx = box.left * scaleFactor;
-  const sy = box.top * scaleFactor;
-  const sw = box.width * scaleFactor;
-  const sh = box.height * scaleFactor;
+  // map crop box (container coordinates) back to natural image pixel coordinates
+  // using the same cover-fit math the browser used to render the photo
+  const sx = (box.left - coverX0) / coverScale;
+  const sy = (box.top - coverY0) / coverScale;
+  const sw = box.width / coverScale;
+  const sh = box.height / coverScale;
 
   const W = targetW, H = targetH;
   lctx.clearRect(0,0,W,H);

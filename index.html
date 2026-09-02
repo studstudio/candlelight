@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Send to Lamp</title>
 <style>
   :root {
@@ -56,7 +56,22 @@
 
   .level-control { margin-top: 16px; padding: 0 4px; }
   .level-control label { font-size: 12px; color: var(--cream-dim); display: flex; justify-content: space-between; margin-bottom: 6px; }
-  input[type=range] { width: 100%; accent-color: var(--ember); }
+  input[type=range] {
+    width: 100%; accent-color: var(--ember);
+    touch-action: pan-x;
+    height: 32px;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px; background: var(--line);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--ember);
+    border: 2px solid var(--ember-glow);
+    margin-top: -11px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
 
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
@@ -395,8 +410,15 @@ cropFrame.addEventListener('touchmove', (e) => {
 cropFrame.addEventListener('touchend', () => { touchState = null; }, { passive:false });
 window.addEventListener('resize', layoutFrame);
 
+let prevLevel = 2;
 levelsSlider.oninput = () => {
-  document.getElementById('levelsVal').textContent = levelsSlider.value;
+  let v = parseInt(levelsSlider.value);
+  if (v === 3) {
+    v = (v > prevLevel) ? 4 : 2;
+    levelsSlider.value = v;
+  }
+  prevLevel = v;
+  document.getElementById('levelsVal').textContent = v;
   render();
 };
 
@@ -501,6 +523,15 @@ sendBtn.onclick = async () => {
   }
   sendBtn.disabled = false;
 };
+
+// Block Safari's native page pinch-zoom so our custom pinch handler
+// on the crop frame is the only thing that responds to a two-finger gesture.
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('gesturechange', (e) => e.preventDefault());
+document.addEventListener('gestureend', (e) => e.preventDefault());
+document.addEventListener('touchmove', (e) => {
+  if (e.touches.length > 1) e.preventDefault();
+}, { passive: false });
 
 renderContacts();
 layoutFrame();

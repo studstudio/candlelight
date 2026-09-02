@@ -187,6 +187,9 @@
   <canvas id="liveCanvas"></canvas>
   <div class="scrub-label" id="scrubLabel">2 · standard</div>
 </div>
+<div style="display:flex; justify-content:center; margin-top:10px;">
+  <button class="pill" id="invertBtn">invert</button>
+</div>
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag up/down on preview for shading</p>
 
 <hr class="divider">
@@ -250,6 +253,7 @@ const liveCanvas = document.getElementById('liveCanvas');
 const lctx = liveCanvas.getContext('2d');
 const previewWrap = document.getElementById('previewWrap');
 const scrubLabel = document.getElementById('scrubLabel');
+const invertBtn = document.getElementById('invertBtn');
 const sendBtn = document.getElementById('sendBtn');
 const sendStatus = document.getElementById('sendStatus');
 const lastSeen = document.getElementById('lastSeen');
@@ -633,6 +637,13 @@ function render() {
     if(y+1<H){ if(x-1>=0) gray[idx+W-1]+=err*3/16; gray[idx+W]+=err*5/16; if(x+1<W) gray[idx+W+1]+=err*1/16; }
   }
 
+  // invert swaps black<->white on the already-dithered result, so the pattern
+  // itself is unchanged — just which physical e-ink state (black or white)
+  // each dithered pixel maps to
+  if (invert) {
+    for (let i=0;i<W*H;i++){ gray[i] = 255 - gray[i]; }
+  }
+
   for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,gray[i])); data[i*4]=v;data[i*4+1]=v;data[i*4+2]=v;data[i*4+3]=255; }
   lctx.putImageData(imgData,0,0);
   liveCanvas._grayCache = gray;
@@ -647,17 +658,38 @@ function render() {
 //
 // contrast: 1.0 = neutral, >1 = punchier, <1 = flatter/softer
 // blackPoint/whitePoint: 0-255, pulls in the tonal range before mapping to levels
-const STEPS = [
-  { levels: 2, contrast: 1.5, blackPoint: 50, whitePoint: 205, label: '2 · high contrast' },
-  { levels: 2, contrast: 1.0, blackPoint: 0,  whitePoint: 255, label: '2 · standard' },
-  { levels: 3, contrast: 1.25, blackPoint: 25, whitePoint: 230, label: '3 · punchy' },
-  { levels: 3, contrast: 1.0, blackPoint: 0,  whitePoint: 255, label: '3 · standard' },
-  { levels: 3, contrast: 0.8, blackPoint: 0,  whitePoint: 255, label: '3 · soft' },
-  { levels: 4, contrast: 1.2, blackPoint: 15, whitePoint: 240, label: '4 · punchy' },
-  { levels: 4, contrast: 1.0, blackPoint: 0,  whitePoint: 255, label: '4 · standard' },
-  { levels: 4, contrast: 0.8, blackPoint: 0,  whitePoint: 255, label: '4 · soft' }
-];
-let stepIndex = 1; // default: "2 · standard", matches your original preference
+// contrast: 1.0 = neutral, >1 = punchier, <1 = flatter/softer
+// blackPoint/whitePoint: 0-255, pulls in the tonal range before mapping to levels
+//
+// Rather than hand-picked presets (which jumped abruptly), generate a continuous
+// zigzag: contrast/black-point ramps smoothly across each gray-level tier, and the
+// ramp direction ALTERNATES per tier so the value at each tier boundary matches
+// exactly. That isolates the one unavoidable jump — the level count itself
+// changing — instead of stacking a tone-curve jump on top of it.
+function generateSteps() {
+  const TIERS = [2, 3, 4];   // real gray levels available on the hardware
+  const PER_TIER = 7;        // sub-steps within each level count, for smoothness
+  const steps = [];
+  TIERS.forEach((levelCount, tierIdx) => {
+    const ascending = tierIdx % 2 === 0; // alternate direction so tier edges connect
+    for (let j = 0; j < PER_TIER; j++) {
+      let p = j / (PER_TIER - 1); // 0 (soft) .. 1 (punchy)
+      if (!ascending) p = 1 - p;
+      const contrast = 0.8 + p * 0.7;      // 0.8 .. 1.5
+      const blackPoint = Math.round(p * 50);
+      const whitePoint = 255 - Math.round(p * 50);
+      const pct = Math.round(contrast * 100);
+      steps.push({ levels: levelCount, contrast, blackPoint, whitePoint, label: `${levelCount} gray · ${pct}%` });
+    }
+  });
+  return steps;
+}
+const STEPS = generateSteps();
+// default: first tier (2 gray), contrast closest to neutral (100%)
+let stepIndex = STEPS.reduce((best, cur, idx) =>
+  (cur.levels === 2 && Math.abs(cur.contrast - 1) < Math.abs(STEPS[best].contrast - 1)) ? idx : best, 0);
+
+let invert = false; // false = black content on white e-ink, true = white content on black
 
 let scrubState = null;
 let scrubLabelTimeout = null;
@@ -672,8 +704,8 @@ previewWrap.addEventListener('touchmove', (e) => {
   if (!scrubState) return;
   const t = e.touches[0];
   const dy = t.clientY - scrubState.startY;
-  // dragging UP moves toward finer/punchier steps, DOWN toward fewer/softer — ~30px per step
-  const stepsMoved = Math.round(-dy / 30);
+  // dragging UP moves toward finer/punchier steps, DOWN toward fewer/softer — ~28px per step
+  const stepsMoved = Math.round(-dy / 28);
   const newIdx = Math.max(0, Math.min(STEPS.length - 1, scrubState.startIdx + stepsMoved));
   if (newIdx !== stepIndex) {
     stepIndex = newIdx;
@@ -685,6 +717,12 @@ previewWrap.addEventListener('touchend', () => {
   scrubState = null;
   scrubLabelTimeout = setTimeout(() => scrubLabel.classList.remove('visible'), 700);
 });
+
+invertBtn.onclick = () => {
+  invert = !invert;
+  invertBtn.classList.toggle('active', invert);
+  if (naturalW) render();
+};
 
 // ---------- crc32 + PNG chunk embed ----------
 const crcTable = (() => { const t=[]; for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++){c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);}t[n]=c;} return t; })();

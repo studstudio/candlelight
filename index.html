@@ -652,38 +652,27 @@ function render() {
   // draw the postcard text bar directly onto the RGBA canvas, BEFORE we extract
   // grayscale — this means it rides through the exact same tone curve, dither
   // pattern, and invert as the photo itself, with no separate logic needed.
-  // The bar is a soft gradient fade (no hard edge) and the text stays small/light.
+  // The bar is a clearly defined light-grey box (no fade/blend).
   const text = postcardText.trim();
   if (text) {
     const lines = text.split('\n').slice(0, 2);
-    const barH = H * (lines.length > 1 ? 0.13 : 0.08); // half the previous height
+    const barH = H * (lines.length > 1 ? 0.13 : 0.08);
     const barY = postcardPosition === 'top' ? 0 : H - barH;
     lctx.save();
 
-    // gradient fade: fully transparent at the inner edge (toward center of photo),
-    // building to a soft dark wash at the outer edge (canvas border) — no hard line
-    const grad = postcardPosition === 'top'
-      ? lctx.createLinearGradient(0, 0, 0, barH)
-      : lctx.createLinearGradient(0, H - barH, 0, H);
-    if (postcardPosition === 'top') {
-      grad.addColorStop(0, 'rgba(0,0,0,0.4)');
-      grad.addColorStop(1, 'rgba(0,0,0,0)');
-    } else {
-      grad.addColorStop(0, 'rgba(0,0,0,0)');
-      grad.addColorStop(1, 'rgba(0,0,0,0.4)');
-    }
-    lctx.fillStyle = grad;
+    lctx.fillStyle = 'rgba(190,190,190,0.85)'; // light grey, clearly defined edge
     lctx.fillRect(0, barY, W, barH);
 
-    lctx.fillStyle = 'rgba(255,255,255,0.88)';
-    lctx.textAlign = 'center';
+    lctx.fillStyle = 'rgba(20,20,20,0.9)'; // dark text for contrast against light grey
+    lctx.textAlign = 'left';
     lctx.textBaseline = 'middle';
     const lineH = barH / lines.length;
     const fontSize = Math.max(6, Math.floor(lineH * 0.4)); // smaller, more delicate
-    lctx.font = `300 ${fontSize}px -apple-system, sans-serif`; // light weight
+    lctx.font = `300 ${fontSize}px Georgia, 'Times New Roman', serif`; // light serif
+    const leftMargin = W * 0.05;
     lines.forEach((line, i) => {
       const cy = barY + lineH * (i + 0.5);
-      lctx.fillText(line, W / 2, cy, W * 0.92);
+      lctx.fillText(line, leftMargin, cy, W * 0.9);
     });
     lctx.restore();
   }

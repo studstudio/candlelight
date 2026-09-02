@@ -185,7 +185,7 @@
 </div>
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
-  <div class="scrub-label" id="scrubLabel">2</div>
+  <div class="scrub-label" id="scrubLabel">2 · standard</div>
 </div>
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag up/down on preview for shading</p>
 
@@ -277,7 +277,7 @@ let naturalW = 0, naturalH = 0;
 let hasPhoto = false;
 let editingContactIdx = null;
 let selectedContact = null;
-let levels = 2;
+// gray-level/tone-curve state now lives in STEPS + stepIndex, defined near the scrub handler below
 
 // crop box state, in DISPLAYED (CSS) pixel coordinates relative to photoWrap
 let box = { left: 0, top: 0, width: 0, height: 0 };
@@ -610,7 +610,21 @@ function render() {
   const gray = new Float32Array(W*H);
   for (let i=0;i<W*H;i++){ gray[i]=0.299*data[i*4]+0.587*data[i*4+1]+0.114*data[i*4+2]; }
 
-  const step = 255/(levels-1);
+  // apply the current step's tone curve (black/white point + contrast) before
+  // quantizing — this is what gives finer variation than raw level count alone,
+  // same effect as adjusting contrast/black point in Photos before uploading
+  const cfg = STEPS[stepIndex];
+  const range = Math.max(1, cfg.whitePoint - cfg.blackPoint);
+  for (let i=0;i<W*H;i++){
+    let t = (gray[i] - cfg.blackPoint) / range;
+    t = Math.max(0, Math.min(1, t));
+    t = (t - 0.5) * cfg.contrast + 0.5;
+    t = Math.max(0, Math.min(1, t));
+    gray[i] = t * 255;
+  }
+
+  const levelCount = cfg.levels;
+  const step = 255/(levelCount-1);
   function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
 
   for(let y=0;y<H;y++) for(let x=0;x<W;x++){
@@ -624,18 +638,33 @@ function render() {
   liveCanvas._grayCache = gray;
 }
 
-// ---------- scrub vertically on preview to adjust gray levels (replaces slider) ----------
-// most affordable e-ink panels max out at 4 gray levels (2bpp); higher grayscale
-// exists but needs pricier/slower hardware not suited to this power budget
-const LEVEL_STEPS = [2, 3, 4];
-function levelIndex(v) { return LEVEL_STEPS.indexOf(v); }
+// ---------- scrub vertically on preview to adjust "look" (replaces slider) ----------
+// Most affordable e-ink panels max out at 4 real gray levels — we can't add more
+// physical shades, but a tone curve (contrast + black/white point) applied BEFORE
+// dithering changes how a photo maps onto those levels, the same way editing
+// contrast/black point in Photos before uploading changed your results. Combining
+// both gives a finer, more varied progression from one gesture than levels alone.
+//
+// contrast: 1.0 = neutral, >1 = punchier, <1 = flatter/softer
+// blackPoint/whitePoint: 0-255, pulls in the tonal range before mapping to levels
+const STEPS = [
+  { levels: 2, contrast: 1.5, blackPoint: 50, whitePoint: 205, label: '2 · high contrast' },
+  { levels: 2, contrast: 1.0, blackPoint: 0,  whitePoint: 255, label: '2 · standard' },
+  { levels: 3, contrast: 1.25, blackPoint: 25, whitePoint: 230, label: '3 · punchy' },
+  { levels: 3, contrast: 1.0, blackPoint: 0,  whitePoint: 255, label: '3 · standard' },
+  { levels: 3, contrast: 0.8, blackPoint: 0,  whitePoint: 255, label: '3 · soft' },
+  { levels: 4, contrast: 1.2, blackPoint: 15, whitePoint: 240, label: '4 · punchy' },
+  { levels: 4, contrast: 1.0, blackPoint: 0,  whitePoint: 255, label: '4 · standard' },
+  { levels: 4, contrast: 0.8, blackPoint: 0,  whitePoint: 255, label: '4 · soft' }
+];
+let stepIndex = 1; // default: "2 · standard", matches your original preference
 
 let scrubState = null;
 let scrubLabelTimeout = null;
 previewWrap.addEventListener('touchstart', (e) => {
   if (!naturalW || e.touches.length !== 1) return;
   const t = e.touches[0];
-  scrubState = { startY: t.clientY, startIdx: levelIndex(levels) };
+  scrubState = { startY: t.clientY, startIdx: stepIndex };
   scrubLabel.classList.add('visible');
   clearTimeout(scrubLabelTimeout);
 }, { passive: true });
@@ -643,13 +672,12 @@ previewWrap.addEventListener('touchmove', (e) => {
   if (!scrubState) return;
   const t = e.touches[0];
   const dy = t.clientY - scrubState.startY;
-  // dragging UP increases levels (more gradation), dragging DOWN decreases — sensitized to ~12px per step
-  const stepsMoved = Math.round(-dy / 45);
-  let newIdx = Math.max(0, Math.min(LEVEL_STEPS.length - 1, scrubState.startIdx + stepsMoved));
-  const newLevel = LEVEL_STEPS[newIdx];
-  if (newLevel !== levels) {
-    levels = newLevel;
-    scrubLabel.textContent = levels;
+  // dragging UP moves toward finer/punchier steps, DOWN toward fewer/softer — ~30px per step
+  const stepsMoved = Math.round(-dy / 30);
+  const newIdx = Math.max(0, Math.min(STEPS.length - 1, scrubState.startIdx + stepsMoved));
+  if (newIdx !== stepIndex) {
+    stepIndex = newIdx;
+    scrubLabel.textContent = STEPS[stepIndex].label;
     render();
   }
 }, { passive: true });

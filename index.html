@@ -38,12 +38,24 @@
 
   input[type=file] { display: none; }
 
-  .orientation-row { display: flex; gap: 8px; margin-bottom: 14px; justify-content: center; }
   .pill {
     padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line);
     background: transparent; color: var(--cream-dim); font-size: 12px; letter-spacing: 0.02em;
   }
   .pill.active { background: var(--ember); border-color: var(--ember); color: #1a1108; font-weight: 600; }
+
+  /* orientation icon buttons — sit in the letterbox space beside the photo */
+  .orient-btn {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    width: 34px; height: 34px; border-radius: 8px;
+    background: rgba(30,23,18,0.75); border: 1px solid var(--line);
+    color: var(--cream-dim);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 6;
+  }
+  .orient-btn.active { background: var(--ember); border-color: var(--ember); color: #1a1108; }
+  .orient-btn-left { left: 8px; }
+  .orient-btn-right { right: 8px; }
 
   /* --- full photo + crop box --- */
   .photo-wrap {
@@ -182,6 +194,13 @@
   </div>
   <input type="file" id="fileInput" accept="image/*">
   <div class="tap-target" id="tapTarget"></div>
+
+  <button class="orient-btn orient-btn-left active" id="btnLandscape" title="landscape">
+    <svg viewBox="0 0 24 24" width="16" height="16"><rect x="2" y="6" width="20" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+  </button>
+  <button class="orient-btn orient-btn-right" id="btnPortrait" title="portrait">
+    <svg viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="2" width="12" height="20" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+  </button>
 </div>
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
@@ -218,11 +237,8 @@
 
 <div class="footer-row">
   <h1>send today's light</h1>
-  <div class="orientation-row">
-    <button class="pill active" id="btnLandscape">landscape</button>
-    <button class="pill" id="btnPortrait">portrait</button>
-  </div>
 </div>
+
 
 <div class="modal-backdrop" id="modalBackdrop">
   <div class="modal-sheet">
@@ -614,14 +630,28 @@ function render() {
   const gray = new Float32Array(W*H);
   for (let i=0;i<W*H;i++){ gray[i]=0.299*data[i*4]+0.587*data[i*4+1]+0.114*data[i*4+2]; }
 
-  // apply the current step's tone curve (black/white point + contrast) before
-  // quantizing — this is what gives finer variation than raw level count alone,
-  // same effect as adjusting contrast/black point in Photos before uploading
+  // apply the current step's full tone curve — black/white point, then
+  // shadow/highlight shaping, then contrast — before quantizing. This is what
+  // gives finer variation than raw level count alone, same effect as adjusting
+  // contrast/black point/shadows/highlights in Photos before uploading
   const cfg = STEPS[stepIndex];
   const range = Math.max(1, cfg.whitePoint - cfg.blackPoint);
   for (let i=0;i<W*H;i++){
     let t = (gray[i] - cfg.blackPoint) / range;
     t = Math.max(0, Math.min(1, t));
+
+    // shadow/highlight shaping: crush shadow detail and roll off highlight
+    // detail independently, applied on either side of the midpoint
+    if (t < 0.5) {
+      let tt = t / 0.5;
+      tt = Math.pow(tt, cfg.shadowGamma);
+      t = tt * 0.5;
+    } else {
+      let tt = (t - 0.5) / 0.5;
+      tt = 1 - Math.pow(1 - tt, cfg.highlightGamma);
+      t = 0.5 + tt * 0.5;
+    }
+
     t = (t - 0.5) * cfg.contrast + 0.5;
     t = Math.max(0, Math.min(1, t));
     gray[i] = t * 255;
@@ -658,28 +688,30 @@ function render() {
 //
 // contrast: 1.0 = neutral, >1 = punchier, <1 = flatter/softer
 // blackPoint/whitePoint: 0-255, pulls in the tonal range before mapping to levels
-// contrast: 1.0 = neutral, >1 = punchier, <1 = flatter/softer
-// blackPoint/whitePoint: 0-255, pulls in the tonal range before mapping to levels
+// shadowGamma/highlightGamma: >1 crushes shadows / rolls off highlights (punchier),
+// 1.0 = neutral, tied to the same "punch" value as contrast so they move together
 //
 // Rather than hand-picked presets (which jumped abruptly), generate a continuous
-// zigzag: contrast/black-point ramps smoothly across each gray-level tier, and the
+// zigzag: all tone parameters ramp smoothly across each gray-level tier, and the
 // ramp direction ALTERNATES per tier so the value at each tier boundary matches
 // exactly. That isolates the one unavoidable jump — the level count itself
 // changing — instead of stacking a tone-curve jump on top of it.
 function generateSteps() {
   const TIERS = [2, 3, 4];   // real gray levels available on the hardware
-  const PER_TIER = 7;        // sub-steps within each level count, for smoothness
+  const PER_TIER = 12;       // sub-steps within each level count, for smoothness
   const steps = [];
   TIERS.forEach((levelCount, tierIdx) => {
     const ascending = tierIdx % 2 === 0; // alternate direction so tier edges connect
     for (let j = 0; j < PER_TIER; j++) {
       let p = j / (PER_TIER - 1); // 0 (soft) .. 1 (punchy)
       if (!ascending) p = 1 - p;
-      const contrast = 0.8 + p * 0.7;      // 0.8 .. 1.5
+      const contrast = 0.8 + p * 0.7;       // 0.8 .. 1.5
       const blackPoint = Math.round(p * 50);
       const whitePoint = 255 - Math.round(p * 50);
+      const shadowGamma = 1 + p * 0.7;      // 1.0 .. 1.7 — crushes shadow detail as p rises
+      const highlightGamma = 1 + p * 0.7;   // 1.0 .. 1.7 — rolls off highlight detail as p rises
       const pct = Math.round(contrast * 100);
-      steps.push({ levels: levelCount, contrast, blackPoint, whitePoint, label: `${levelCount} gray · ${pct}%` });
+      steps.push({ levels: levelCount, contrast, blackPoint, whitePoint, shadowGamma, highlightGamma, label: `${levelCount} gray · ${pct}%` });
     }
   });
   return steps;
@@ -705,7 +737,7 @@ previewWrap.addEventListener('touchmove', (e) => {
   const t = e.touches[0];
   const dy = t.clientY - scrubState.startY;
   // dragging UP moves toward finer/punchier steps, DOWN toward fewer/softer — ~28px per step
-  const stepsMoved = Math.round(-dy / 28);
+  const stepsMoved = Math.round(-dy / 20);
   const newIdx = Math.max(0, Math.min(STEPS.length - 1, scrubState.startIdx + stepsMoved));
   if (newIdx !== stepIndex) {
     stepIndex = newIdx;

@@ -3,442 +3,541 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>E-Ink Dither Tester + Chunk Verifier</title>
+<title>Send to Lamp</title>
 <style>
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #eee; margin: 0; padding: 16px; }
-  h1 { font-size: 18px; margin-bottom: 4px; }
-  h2 { font-size: 15px; margin: 0 0 8px; color: #9c9; }
-  p { font-size: 13px; color: #aaa; margin-top: 0; }
-  .controls { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
-  label { font-size: 13px; display: flex; justify-content: space-between; }
-  select, input[type=file] { padding: 8px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; width: 100%; box-sizing: border-box; }
-  input[type=range] { width: 100%; }
+  :root {
+    --bg: #14100d;
+    --bg-elevated: #1e1712;
+    --ember: #e8834a;
+    --ember-dim: #a85c30;
+    --ember-glow: #ff9d5c;
+    --cream: #f0e6d8;
+    --cream-dim: #b8ac9c;
+    --line: #332a22;
+    --success: #7fae7a;
+    --fail: #c46a5f;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: radial-gradient(ellipse at top, #1c150f 0%, var(--bg) 60%);
+    color: var(--cream);
+    margin: 0;
+    padding: 20px 18px 40px;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    color: var(--cream-dim);
+    text-align: center;
+    margin: 4px 0 20px;
+    text-transform: lowercase;
+  }
 
-  .orientation-row { display: flex; gap: 8px; }
-  .orientation-row button { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; font-size: 14px; }
-  .orientation-row button.active { background: #4a7; border-color: #4a7; color: #fff; font-weight: 600; }
-
-  .crop-frame { position: relative; overflow: hidden; margin-top: 12px; border: 1px solid #444; border-radius: 8px; background: #000; touch-action: none; }
+  /* --- crop stage --- */
+  .stage-wrap { position: relative; }
+  .crop-frame {
+    position: relative;
+    overflow: hidden;
+    border-radius: 14px;
+    background: #000;
+    border: 1px solid var(--line);
+    touch-action: none;
+    box-shadow: 0 0 40px rgba(232,131,74,0.06) inset;
+  }
   .crop-frame img#sourceImg { position: absolute; user-select: none; -webkit-user-select: none; pointer-events: none; }
-  .crop-hint { font-size: 12px; color: #888; text-align: center; margin-top: 6px; }
+  .empty-state {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; color: var(--cream-dim); font-size: 13px; pointer-events: none;
+  }
+  .empty-state svg { opacity: 0.5; }
 
-  button.primary { width: 100%; padding: 12px; margin-top: 12px; border-radius: 8px; border: none; background: #4a7; color: #fff; font-size: 15px; font-weight: 600; }
-  button.primary:active { background: #396; }
+  input[type=file] { display: none; }
+  .tap-target { position: absolute; inset: 0; z-index: 5; }
 
-  .result-wrap { margin-top: 16px; }
-  .result-wrap img { width: 100%; border: 1px solid #444; border-radius: 8px; image-rendering: pixelated; background: #fff; }
-  .save-hint { font-size: 13px; color: #aaa; text-align: center; margin-top: 8px; }
-  .size-info { font-size: 12px; color: #6c6; text-align: center; margin-top: 6px; }
+  .orientation-row { display: flex; gap: 8px; margin-top: 12px; justify-content: center; }
+  .pill {
+    padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line);
+    background: transparent; color: var(--cream-dim); font-size: 12px; letter-spacing: 0.02em;
+  }
+  .pill.active { background: var(--ember); border-color: var(--ember); color: #1a1108; font-weight: 600; }
 
-  hr { border: none; border-top: 1px solid #333; margin: 28px 0; }
+  details.advanced { margin-top: 14px; }
+  details.advanced summary {
+    font-size: 12px; color: var(--cream-dim); text-align: center; list-style: none; cursor: pointer; padding: 6px;
+  }
+  details.advanced summary::-webkit-details-marker { display: none; }
+  .adv-controls { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; padding: 12px; background: var(--bg-elevated); border-radius: 10px; }
+  .adv-controls label { font-size: 12px; color: var(--cream-dim); display: flex; justify-content: space-between; }
+  select, input[type=range] { width: 100%; accent-color: var(--ember); }
+  select { padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--cream); }
 
-  .verify-box { background: #222; border: 1px solid #444; border-radius: 8px; padding: 12px; margin-top: 12px; font-size: 13px; }
-  .verify-box.pass { border-color: #4a7; background: #16281f; }
-  .verify-box.fail { border-color: #a44; background: #281616; }
-  .verify-canvas { width: 100%; border: 1px solid #444; border-radius: 8px; margin-top: 10px; image-rendering: pixelated; background: #fff; }
+  hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
+
+  /* --- contacts --- */
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cream-dim); margin-bottom: 10px; }
+  .contacts-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .contact-chip {
+    flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 4px; border-radius: 12px; opacity: 0.55;
+  }
+  .contact-chip.selected { opacity: 1; }
+  .contact-avatar {
+    width: 52px; height: 52px; border-radius: 50%; background: var(--bg-elevated);
+    border: 2px solid var(--line); display: flex; align-items: center; justify-content: center;
+    font-size: 18px; color: var(--cream-dim);
+  }
+  .contact-chip.selected .contact-avatar { border-color: var(--ember); color: var(--ember-glow); }
+  .contact-name { font-size: 11px; color: var(--cream-dim); max-width: 60px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contact-chip.selected .contact-name { color: var(--cream); }
+  .add-chip .contact-avatar { border-style: dashed; font-size: 22px; }
+
+  /* --- send button --- */
+  .send-zone { display: flex; flex-direction: column; align-items: center; margin-top: 32px; }
+  .send-btn {
+    width: 96px; height: 96px; border-radius: 50%; border: none;
+    background: radial-gradient(circle at 35% 30%, var(--ember-glow), var(--ember) 55%, var(--ember-dim) 100%);
+    box-shadow: 0 0 0 6px rgba(232,131,74,0.08), 0 8px 24px rgba(232,131,74,0.25);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.15s ease;
+  }
+  .send-btn:active { transform: scale(0.94); }
+  .send-btn:disabled { opacity: 0.3; box-shadow: none; }
+  .send-btn svg { width: 30px; height: 30px; }
+  .send-status { margin-top: 14px; font-size: 12px; color: var(--cream-dim); text-align: center; min-height: 16px; }
+  .send-status.success { color: var(--success); }
+  .send-status.fail { color: var(--fail); }
+
+  .last-seen { font-size: 11px; color: var(--cream-dim); text-align: center; margin-top: 6px; opacity: 0.7; }
+
+  /* --- add contact modal --- */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none;
+    align-items: flex-end; justify-content: center; z-index: 50;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal-sheet {
+    background: var(--bg-elevated); border-radius: 18px 18px 0 0; padding: 22px 20px 32px;
+    width: 100%; max-width: 480px; border-top: 1px solid var(--line);
+  }
+  .modal-sheet h2 { font-size: 15px; font-weight: 600; margin: 0 0 16px; color: var(--cream); }
+  .modal-sheet label { font-size: 12px; color: var(--cream-dim); display: block; margin-bottom: 6px; }
+  .modal-sheet input[type=text] {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--cream); font-size: 14px; margin-bottom: 14px;
+  }
+  .modal-actions { display: flex; gap: 10px; margin-top: 4px; }
+  .modal-actions button {
+    flex: 1; padding: 12px; border-radius: 10px; border: none; font-size: 14px; font-weight: 600;
+  }
+  .btn-cancel { background: var(--line); color: var(--cream-dim); }
+  .btn-save { background: var(--ember); color: #1a1108; }
+  .btn-remove { background: transparent; color: var(--fail); font-size: 12px; border: none; margin-top: 10px; padding: 6px; width: 100%; }
 </style>
 </head>
 <body>
 
-<h1>E-Ink Dither Tester</h1>
-<p>Pick a photo, pinch/drag to frame it, then long-press the result to save or share. Raw 1-bit pixel data is hidden inside a custom PNG chunk so the ESP32 can skip decoding.</p>
+<h1>send today's light</h1>
 
-<input type="file" id="fileInput" accept="image/*">
-
-<div class="controls">
-  <label>Orientation</label>
-  <div class="orientation-row">
-    <button id="btnLandscape" class="active">Landscape (400×300)</button>
-    <button id="btnPortrait">Portrait (300×400)</button>
+<div class="stage-wrap">
+  <div class="crop-frame" id="cropFrame">
+    <img id="sourceImg" src="" style="display:none;">
+    <div class="empty-state" id="emptyState">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3.5"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/></svg>
+      <span>tap to choose a photo</span>
+    </div>
   </div>
+  <input type="file" id="fileInput" accept="image/*">
+  <div class="tap-target" id="tapTarget"></div>
+</div>
 
-  <label>Dither algorithm
-    <select id="algo">
-      <option value="floyd">Floyd–Steinberg</option>
+<div class="orientation-row">
+  <button class="pill active" id="btnLandscape">landscape</button>
+  <button class="pill" id="btnPortrait">portrait</button>
+</div>
+
+<details class="advanced">
+  <summary>adjust rendering</summary>
+  <div class="adv-controls">
+    <label>Dither <select id="algo">
+      <option value="floyd" selected>Floyd–Steinberg</option>
       <option value="atkinson">Atkinson</option>
-      <option value="none">None (plain grayscale)</option>
-    </select>
-  </label>
-  <label>Gray levels (bit depth) <span id="levelsVal">2 (1-bit)</span>
-    <input type="range" id="levels" min="2" max="16" value="2">
-  </label>
+      <option value="none">None</option>
+    </select></label>
+    <label>Gray levels <span id="levelsVal">2</span>
+      <input type="range" id="levels" min="2" max="16" value="2">
+    </label>
+  </div>
+</details>
+
+<hr class="divider">
+
+<div class="section-label">send to</div>
+<div class="contacts-row" id="contactsRow">
+  <div class="contact-chip add-chip" id="addContactBtn">
+    <div class="contact-avatar">+</div>
+    <div class="contact-name">add lamp</div>
+  </div>
 </div>
 
-<div class="crop-frame" id="cropFrame">
-  <img id="sourceImg" src="" style="display:none;">
+<div class="send-zone">
+  <button class="send-btn" id="sendBtn" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="#1a1108" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2c1.5 3 1.5 5-.5 7-1.5 1.5-1.5 3 0 4.5" opacity="0"/>
+      <path d="M12 3c2 2.5 3.5 5 3.5 7.5A3.5 3.5 0 0 1 8.5 12C8.5 9 10 5.5 12 3z"/>
+      <path d="M12 21a4 4 0 0 0 4-4c0-1.5-1-2.5-2-3.5"/>
+    </svg>
+  </button>
+  <div class="send-status" id="sendStatus"></div>
+  <div class="last-seen" id="lastSeen"></div>
 </div>
-<p class="crop-hint">Pinch to zoom · drag to reposition</p>
 
-<button class="primary" id="renderBtn">Render Dithered Image</button>
-
-<div class="result-wrap" id="resultWrap" style="display:none;">
-  <img id="resultImg" alt="Dithered result">
-  <p class="save-hint">Long-press the image above to Save or Share</p>
-  <p class="size-info" id="sizeInfo"></p>
+<!-- add/edit contact modal -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal-sheet">
+    <h2 id="modalTitle">add a lamp</h2>
+    <label>name</label>
+    <input type="text" id="contactName" placeholder="Sarah">
+    <label>lamp id</label>
+    <input type="text" id="contactId" placeholder="paste the code they gave you">
+    <div class="modal-actions">
+      <button class="btn-cancel" id="modalCancel">cancel</button>
+      <button class="btn-save" id="modalSave">save</button>
+    </div>
+    <button class="btn-remove" id="modalRemove" style="display:none;">remove this lamp</button>
+  </div>
 </div>
 
-<hr>
-
-<h2>Step 2: Verify the chunk survived</h2>
-<p>Send the saved image through Messages/Mail to yourself, save what arrives, then upload THAT file here to check if the hidden data made it through.</p>
-<input type="file" id="verifyInput" accept="image/*">
-<div id="verifyResult"></div>
-
-<!-- hidden working canvas, never shown -->
 <canvas id="workCanvas" style="display:none;"></canvas>
 
 <script>
+// ============================================================
+// CONFIGURE ONCE: your Cloudflare Worker base URL
+// ============================================================
+const WORKER_BASE_URL = "https://your-worker-name.workers.dev"; // <-- edit this
+
+// ============================================================
 const fileInput = document.getElementById('fileInput');
+const tapTarget = document.getElementById('tapTarget');
 const cropFrame = document.getElementById('cropFrame');
 const sourceImg = document.getElementById('sourceImg');
+const emptyState = document.getElementById('emptyState');
 const algoSelect = document.getElementById('algo');
 const levelsSlider = document.getElementById('levels');
-const renderBtn = document.getElementById('renderBtn');
-const resultWrap = document.getElementById('resultWrap');
-const resultImg = document.getElementById('resultImg');
-const sizeInfo = document.getElementById('sizeInfo');
+const sendBtn = document.getElementById('sendBtn');
+const sendStatus = document.getElementById('sendStatus');
+const lastSeen = document.getElementById('lastSeen');
 const workCanvas = document.getElementById('workCanvas');
 const ctx = workCanvas.getContext('2d');
 const btnLandscape = document.getElementById('btnLandscape');
 const btnPortrait = document.getElementById('btnPortrait');
-const verifyInput = document.getElementById('verifyInput');
-const verifyResult = document.getElementById('verifyResult');
-
-const CHUNK_TYPE = 'epRb'; // custom ancillary, private chunk
+const contactsRow = document.getElementById('contactsRow');
+const addContactBtn = document.getElementById('addContactBtn');
+const modalBackdrop = document.getElementById('modalBackdrop');
+const modalTitle = document.getElementById('modalTitle');
+const contactNameInput = document.getElementById('contactName');
+const contactIdInput = document.getElementById('contactId');
+const modalSave = document.getElementById('modalSave');
+const modalCancel = document.getElementById('modalCancel');
+const modalRemove = document.getElementById('modalRemove');
 
 let targetW = 400, targetH = 300;
 let naturalW = 0, naturalH = 0;
 let baseScale = 1, x0 = 0, y0 = 0;
 let scale = 1, tx = 0, ty = 0;
 let frameW = 0, frameH = 0;
+let hasPhoto = false;
+let editingContactIdx = null;
+let selectedContact = null;
 
-levelsSlider.oninput = () => {
-  const n = parseInt(levelsSlider.value);
-  document.getElementById('levelsVal').textContent = n === 2 ? '2 (1-bit)' : n + ' levels';
+const CHUNK_TYPE = 'epRb';
+
+// ---------- contacts (stored locally, like a phone contacts list) ----------
+function loadContacts() {
+  try { return JSON.parse(localStorage.getItem('lampContacts') || '[]'); }
+  catch { return []; }
+}
+function saveContacts(list) {
+  localStorage.setItem('lampContacts', JSON.stringify(list));
+}
+function renderContacts() {
+  const contacts = loadContacts();
+  contactsRow.querySelectorAll('.contact-chip:not(.add-chip)').forEach(el => el.remove());
+  contacts.forEach((c, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'contact-chip' + (selectedContact === i ? ' selected' : '');
+    chip.innerHTML = `<div class="contact-avatar">${c.name.charAt(0).toUpperCase()}</div><div class="contact-name">${c.name}</div>`;
+    chip.onclick = () => { selectedContact = i; renderContacts(); updateSendState(); checkLastSeen(c.id); };
+    chip.ontouchstart = (() => {
+      let timer;
+      return () => { timer = setTimeout(() => openModal(i), 550); };
+    })();
+    chip.addEventListener('touchend', () => {});
+    // long-press to edit
+    let pressTimer;
+    chip.addEventListener('touchstart', () => { pressTimer = setTimeout(() => openModal(i), 550); });
+    chip.addEventListener('touchend', () => clearTimeout(pressTimer));
+    contactsRow.insertBefore(chip, addContactBtn);
+  });
+}
+function openModal(idx) {
+  editingContactIdx = idx;
+  const contacts = loadContacts();
+  if (idx !== null) {
+    modalTitle.textContent = 'edit lamp';
+    contactNameInput.value = contacts[idx].name;
+    contactIdInput.value = contacts[idx].id;
+    modalRemove.style.display = 'block';
+  } else {
+    modalTitle.textContent = 'add a lamp';
+    contactNameInput.value = '';
+    contactIdInput.value = '';
+    modalRemove.style.display = 'none';
+  }
+  modalBackdrop.classList.add('open');
+}
+addContactBtn.onclick = () => openModal(null);
+modalCancel.onclick = () => modalBackdrop.classList.remove('open');
+modalBackdrop.onclick = (e) => { if (e.target === modalBackdrop) modalBackdrop.classList.remove('open'); };
+modalSave.onclick = () => {
+  const name = contactNameInput.value.trim();
+  const id = contactIdInput.value.trim();
+  if (!name || !id) { alert('Enter both a name and the lamp id'); return; }
+  const contacts = loadContacts();
+  if (editingContactIdx !== null) {
+    contacts[editingContactIdx] = { name, id };
+  } else {
+    contacts.push({ name, id });
+    selectedContact = contacts.length - 1;
+  }
+  saveContacts(contacts);
+  modalBackdrop.classList.remove('open');
+  renderContacts();
+  updateSendState();
+};
+modalRemove.onclick = () => {
+  const contacts = loadContacts();
+  contacts.splice(editingContactIdx, 1);
+  saveContacts(contacts);
+  selectedContact = null;
+  modalBackdrop.classList.remove('open');
+  renderContacts();
+  updateSendState();
 };
 
-function setOrientation(landscape) {
-  if (landscape) {
-    targetW = 400; targetH = 300;
-    btnLandscape.classList.add('active');
-    btnPortrait.classList.remove('active');
-  } else {
-    targetW = 300; targetH = 400;
-    btnPortrait.classList.add('active');
-    btnLandscape.classList.remove('active');
+function updateSendState() {
+  sendBtn.disabled = !(hasPhoto && selectedContact !== null);
+}
+
+async function checkLastSeen(lampId) {
+  lastSeen.textContent = 'checking…';
+  try {
+    const res = await fetch(`${WORKER_BASE_URL}/lamp/${lampId}/status`);
+    if (!res.ok) throw new Error();
+    const info = await res.json();
+    if (info.lastUpload) {
+      const mins = Math.round((Date.now() - info.lastUpload) / 60000);
+      let human;
+      if (mins < 1) human = 'just now';
+      else if (mins < 60) human = `${mins}m ago`;
+      else if (mins < 1440) human = `${Math.round(mins/60)}h ago`;
+      else human = `${Math.round(mins/1440)}d ago`;
+      lastSeen.textContent = `last light sent ${human}`;
+    } else {
+      lastSeen.textContent = 'no uploads yet';
+    }
+  } catch {
+    lastSeen.textContent = '';
   }
+}
+
+// ---------- orientation ----------
+function setOrientation(landscape) {
+  if (landscape) { targetW = 400; targetH = 300; btnLandscape.classList.add('active'); btnPortrait.classList.remove('active'); }
+  else { targetW = 300; targetH = 400; btnPortrait.classList.add('active'); btnLandscape.classList.remove('active'); }
   layoutFrame();
 }
 btnLandscape.onclick = () => setOrientation(true);
 btnPortrait.onclick = () => setOrientation(false);
 
 function layoutFrame() {
-  const maxW = cropFrame.parentElement.clientWidth || 350;
+  const maxW = cropFrame.parentElement.clientWidth || 340;
   const aspect = targetW / targetH;
-  frameW = maxW;
-  frameH = frameW / aspect;
+  frameW = maxW; frameH = frameW / aspect;
   cropFrame.style.width = frameW + 'px';
   cropFrame.style.height = frameH + 'px';
   if (naturalW) initCoverFit();
 }
-
 function initCoverFit() {
   baseScale = Math.max(frameW / naturalW, frameH / naturalH);
-  const dispW = naturalW * baseScale;
-  const dispH = naturalH * baseScale;
-  x0 = (frameW - dispW) / 2;
-  y0 = (frameH - dispH) / 2;
+  const dispW = naturalW * baseScale, dispH = naturalH * baseScale;
+  x0 = (frameW - dispW) / 2; y0 = (frameH - dispH) / 2;
   scale = 1; tx = 0; ty = 0;
   applyTransform();
 }
-
 function applyTransform() {
-  const dispW = naturalW * baseScale;
-  const dispH = naturalH * baseScale;
-  sourceImg.style.width = dispW + 'px';
-  sourceImg.style.height = dispH + 'px';
-  sourceImg.style.left = x0 + 'px';
-  sourceImg.style.top = y0 + 'px';
+  const dispW = naturalW * baseScale, dispH = naturalH * baseScale;
+  sourceImg.style.width = dispW + 'px'; sourceImg.style.height = dispH + 'px';
+  sourceImg.style.left = x0 + 'px'; sourceImg.style.top = y0 + 'px';
   sourceImg.style.transformOrigin = 'center center';
   sourceImg.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
 }
 
+tapTarget.onclick = () => fileInput.click();
 fileInput.onchange = (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const img = new Image();
   img.onload = () => {
-    naturalW = img.naturalWidth;
-    naturalH = img.naturalHeight;
-    sourceImg.src = img.src;
-    sourceImg.style.display = 'block';
+    naturalW = img.naturalWidth; naturalH = img.naturalHeight;
+    sourceImg.src = img.src; sourceImg.style.display = 'block';
+    emptyState.style.display = 'none';
+    hasPhoto = true;
     layoutFrame();
-    resultWrap.style.display = 'none';
+    updateSendState();
   };
   img.src = URL.createObjectURL(file);
 };
 
-// --- touch handling: pinch to zoom, drag to pan ---
 let touchState = null;
-
 cropFrame.addEventListener('touchstart', (e) => {
   if (!naturalW) return;
   e.preventDefault();
   if (e.touches.length === 2) {
-    const [a, b] = e.touches;
-    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-    touchState = { mode: 'pinch', startDist: dist, startScale: scale };
+    const [a,b] = e.touches;
+    touchState = { mode:'pinch', startDist: Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY), startScale: scale };
   } else if (e.touches.length === 1) {
-    touchState = { mode: 'pan', startX: e.touches[0].clientX, startY: e.touches[0].clientY, startTx: tx, startTy: ty };
+    touchState = { mode:'pan', startX: e.touches[0].clientX, startY: e.touches[0].clientY, startTx: tx, startTy: ty };
   }
-}, { passive: false });
-
+}, { passive:false });
 cropFrame.addEventListener('touchmove', (e) => {
   if (!touchState) return;
   e.preventDefault();
-  if (touchState.mode === 'pinch' && e.touches.length === 2) {
-    const [a, b] = e.touches;
-    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-    let newScale = touchState.startScale * (dist / touchState.startDist);
-    scale = Math.max(1, Math.min(5, newScale));
+  if (touchState.mode==='pinch' && e.touches.length===2) {
+    const [a,b] = e.touches;
+    const dist = Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY);
+    scale = Math.max(1, Math.min(5, touchState.startScale * (dist/touchState.startDist)));
     applyTransform();
-  } else if (touchState.mode === 'pan' && e.touches.length === 1) {
-    const dx = e.touches[0].clientX - touchState.startX;
-    const dy = e.touches[0].clientY - touchState.startY;
-    tx = touchState.startTx + dx;
-    ty = touchState.startTy + dy;
+  } else if (touchState.mode==='pan' && e.touches.length===1) {
+    tx = touchState.startTx + (e.touches[0].clientX - touchState.startX);
+    ty = touchState.startTy + (e.touches[0].clientY - touchState.startY);
     applyTransform();
   }
-}, { passive: false });
-
-cropFrame.addEventListener('touchend', () => { touchState = null; }, { passive: false });
-
+}, { passive:false });
+cropFrame.addEventListener('touchend', () => { touchState = null; }, { passive:false });
 window.addEventListener('resize', layoutFrame);
 
-// --- CRC32 for PNG chunk integrity ---
-const crcTable = (() => {
-  const table = [];
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[n] = c;
+levelsSlider.oninput = () => { document.getElementById('levelsVal').textContent = levelsSlider.value; };
+
+// ---------- crc32 ----------
+const crcTable = (() => { const t=[]; for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++){c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);}t[n]=c;} return t; })();
+function crc32(bytes){ let c=0xFFFFFFFF; for(let i=0;i<bytes.length;i++){c=crcTable[(c^bytes[i])&0xFF]^(c>>>8);} return (c^0xFFFFFFFF)>>>0; }
+function u32be(n){ return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]); }
+
+async function buildChunkedPNG() {
+  workCanvas.width = targetW; workCanvas.height = targetH;
+  const center = { x: frameW/2, y: frameH/2 };
+  function frameToNatural(qx,qy){
+    const px = center.x + (qx - tx - center.x)/scale;
+    const py = center.y + (qy - ty - center.y)/scale;
+    return { x:(px-x0)/baseScale, y:(py-y0)/baseScale };
   }
-  return table;
-})();
-function crc32(bytes) {
-  let c = 0xFFFFFFFF;
-  for (let i = 0; i < bytes.length; i++) {
-    c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
-  }
-  return (c ^ 0xFFFFFFFF) >>> 0;
-}
-function u32be(n) {
-  return new Uint8Array([(n>>>24)&255, (n>>>16)&255, (n>>>8)&255, n&255]);
-}
+  const tl = frameToNatural(0,0), br = frameToNatural(frameW,frameH);
+  ctx.drawImage(sourceImg, tl.x, tl.y, br.x-tl.x, br.y-tl.y, 0, 0, targetW, targetH);
 
-// --- render / dither ---
-renderBtn.onclick = async () => {
-  if (!naturalW) { alert('Pick a photo first'); return; }
-
-  workCanvas.width = targetW;
-  workCanvas.height = targetH;
-
-  const center = { x: frameW / 2, y: frameH / 2 };
-  function frameToNatural(qx, qy) {
-    const px = center.x + (qx - tx - center.x) / scale;
-    const py = center.y + (qy - ty - center.y) / scale;
-    return { x: (px - x0) / baseScale, y: (py - y0) / baseScale };
-  }
-  const topLeft = frameToNatural(0, 0);
-  const bottomRight = frameToNatural(frameW, frameH);
-  const sx = topLeft.x, sy = topLeft.y;
-  const sw = bottomRight.x - topLeft.x, sh = bottomRight.y - topLeft.y;
-
-  ctx.drawImage(sourceImg, sx, sy, sw, sh, 0, 0, targetW, targetH);
-
-  const imgData = ctx.getImageData(0, 0, targetW, targetH);
+  const imgData = ctx.getImageData(0,0,targetW,targetH);
   const data = imgData.data;
-  const gray = new Float32Array(targetW * targetH);
-
-  for (let i = 0; i < targetW * targetH; i++) {
-    const r = data[i*4], g = data[i*4+1], b = data[i*4+2];
-    gray[i] = 0.299*r + 0.587*g + 0.114*b;
-  }
+  const W=targetW, H=targetH;
+  const gray = new Float32Array(W*H);
+  for (let i=0;i<W*H;i++){ gray[i]=0.299*data[i*4]+0.587*data[i*4+1]+0.114*data[i*4+2]; }
 
   const algo = algoSelect.value;
   const levels = parseInt(levelsSlider.value);
-  const step = 255 / (levels - 1);
-  function quantize(val) {
-    val = Math.max(0, Math.min(255, val));
-    return Math.round(Math.round(val / step) * step);
-  }
+  const step = 255/(levels-1);
+  function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
 
-  const W = targetW, H = targetH;
-  if (algo === 'none') {
-    for (let i = 0; i < W*H; i++) gray[i] = quantize(gray[i]);
-  } else if (algo === 'floyd') {
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const idx = y*W+x;
-        const old = gray[idx];
-        const newVal = quantize(old);
-        gray[idx] = newVal;
-        const err = old - newVal;
-        if (x+1 < W) gray[idx+1] += err * 7/16;
-        if (y+1 < H) {
-          if (x-1 >= 0) gray[idx+W-1] += err * 3/16;
-          gray[idx+W] += err * 5/16;
-          if (x+1 < W) gray[idx+W+1] += err * 1/16;
-        }
-      }
+  if (algo==='none') { for(let i=0;i<W*H;i++) gray[i]=quantize(gray[i]); }
+  else if (algo==='floyd') {
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const idx=y*W+x, old=gray[idx], nv=quantize(old); gray[idx]=nv; const err=old-nv;
+      if(x+1<W) gray[idx+1]+=err*7/16;
+      if(y+1<H){ if(x-1>=0) gray[idx+W-1]+=err*3/16; gray[idx+W]+=err*5/16; if(x+1<W) gray[idx+W+1]+=err*1/16; }
     }
-  } else if (algo === 'atkinson') {
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const idx = y*W+x;
-        const old = gray[idx];
-        const newVal = quantize(old);
-        gray[idx] = newVal;
-        const err = (old - newVal) / 8;
-        if (x+1 < W) gray[idx+1] += err;
-        if (x+2 < W) gray[idx+2] += err;
-        if (y+1 < H) {
-          if (x-1 >= 0) gray[idx+W-1] += err;
-          gray[idx+W] += err;
-          if (x+1 < W) gray[idx+W+1] += err;
-        }
-        if (y+2 < H) gray[idx+2*W] += err;
-      }
+  } else if (algo==='atkinson') {
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const idx=y*W+x, old=gray[idx], nv=quantize(old); gray[idx]=nv; const err=(old-nv)/8;
+      if(x+1<W) gray[idx+1]+=err;
+      if(x+2<W) gray[idx+2]+=err;
+      if(y+1<H){ if(x-1>=0) gray[idx+W-1]+=err; gray[idx+W]+=err; if(x+1<W) gray[idx+W+1]+=err; }
+      if(y+2<H) gray[idx+2*W]+=err;
     }
   }
+  for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,gray[i])); data[i*4]=v;data[i*4+1]=v;data[i*4+2]=v;data[i*4+3]=255; }
+  ctx.putImageData(imgData,0,0);
 
-  for (let i = 0; i < W*H; i++) {
-    const v = Math.max(0, Math.min(255, gray[i]));
-    data[i*4] = v; data[i*4+1] = v; data[i*4+2] = v; data[i*4+3] = 255;
+  const bytesPerRow = Math.ceil(W/8);
+  const packed = new Uint8Array(bytesPerRow*H);
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    if (gray[y*W+x] > 127) packed[y*bytesPerRow+(x>>3)] |= (0x80 >> (x&7));
   }
-  ctx.putImageData(imgData, 0, 0);
+  const header = new Uint8Array([(W>>8)&255,W&255,(H>>8)&255,H&255]);
+  const chunkData = new Uint8Array(header.length+packed.length);
+  chunkData.set(header,0); chunkData.set(packed,header.length);
 
-  // --- build packed 1-bit raw bytes (row-aligned, MSB first, 1=white/0=black) ---
-  const bytesPerRow = Math.ceil(W / 8);
-  const packed = new Uint8Array(bytesPerRow * H);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const v = gray[y*W+x] > 127 ? 1 : 0;
-      if (v) {
-        packed[y*bytesPerRow + (x >> 3)] |= (0x80 >> (x & 7));
-      }
-    }
-  }
-
-  // chunk data = 2-byte width + 2-byte height + packed bytes
-  const header = new Uint8Array([ (W>>8)&255, W&255, (H>>8)&255, H&255 ]);
-  const chunkData = new Uint8Array(header.length + packed.length);
-  chunkData.set(header, 0);
-  chunkData.set(packed, header.length);
-
-  // --- get canvas PNG bytes, insert custom chunk before IEND ---
-  const blob = await new Promise(res => workCanvas.toBlob(res, 'image/png'));
+  const blob = await new Promise(res => workCanvas.toBlob(res,'image/png'));
   const pngBytes = new Uint8Array(await blob.arrayBuffer());
-
-  // find IEND chunk offset (scan from byte 8 after signature)
-  let offset = 8;
-  let iendOffset = -1;
-  while (offset < pngBytes.length) {
-    const len = (pngBytes[offset]<<24 | pngBytes[offset+1]<<16 | pngBytes[offset+2]<<8 | pngBytes[offset+3]) >>> 0;
-    const type = String.fromCharCode(pngBytes[offset+4], pngBytes[offset+5], pngBytes[offset+6], pngBytes[offset+7]);
-    if (type === 'IEND') { iendOffset = offset; break; }
-    offset += 8 + len + 4; // length + type + data + crc
+  let offset=8, iendOffset=-1;
+  while(offset<pngBytes.length){
+    const len=(pngBytes[offset]<<24|pngBytes[offset+1]<<16|pngBytes[offset+2]<<8|pngBytes[offset+3])>>>0;
+    const type=String.fromCharCode(pngBytes[offset+4],pngBytes[offset+5],pngBytes[offset+6],pngBytes[offset+7]);
+    if(type==='IEND'){ iendOffset=offset; break; }
+    offset += 8+len+4;
   }
-  if (iendOffset === -1) { alert('Could not locate IEND chunk'); return; }
-
-  const typeBytes = new Uint8Array([CHUNK_TYPE.charCodeAt(0), CHUNK_TYPE.charCodeAt(1), CHUNK_TYPE.charCodeAt(2), CHUNK_TYPE.charCodeAt(3)]);
-  const crcInput = new Uint8Array(typeBytes.length + chunkData.length);
-  crcInput.set(typeBytes, 0);
-  crcInput.set(chunkData, typeBytes.length);
+  const typeBytes = new Uint8Array([CHUNK_TYPE.charCodeAt(0),CHUNK_TYPE.charCodeAt(1),CHUNK_TYPE.charCodeAt(2),CHUNK_TYPE.charCodeAt(3)]);
+  const crcInput = new Uint8Array(typeBytes.length+chunkData.length);
+  crcInput.set(typeBytes,0); crcInput.set(chunkData,typeBytes.length);
   const crc = crc32(crcInput);
+  const newChunk = new Uint8Array(4+4+chunkData.length+4);
+  newChunk.set(u32be(chunkData.length),0);
+  newChunk.set(typeBytes,4);
+  newChunk.set(chunkData,8);
+  newChunk.set(u32be(crc),8+chunkData.length);
 
-  const newChunk = new Uint8Array(4 + 4 + chunkData.length + 4);
-  newChunk.set(u32be(chunkData.length), 0);
-  newChunk.set(typeBytes, 4);
-  newChunk.set(chunkData, 8);
-  newChunk.set(u32be(crc), 8 + chunkData.length);
-
-  const finalBytes = new Uint8Array(pngBytes.length + newChunk.length);
-  finalBytes.set(pngBytes.slice(0, iendOffset), 0);
+  const finalBytes = new Uint8Array(pngBytes.length+newChunk.length);
+  finalBytes.set(pngBytes.slice(0,iendOffset),0);
   finalBytes.set(newChunk, iendOffset);
-  finalBytes.set(pngBytes.slice(iendOffset), iendOffset + newChunk.length);
+  finalBytes.set(pngBytes.slice(iendOffset), iendOffset+newChunk.length);
+  return new Blob([finalBytes], { type:'image/png' });
+}
 
-  const finalBlob = new Blob([finalBytes], { type: 'image/png' });
-  const finalUrl = URL.createObjectURL(finalBlob);
-  resultImg.src = finalUrl;
-  resultWrap.style.display = 'block';
-
-  const rawKB = (packed.length / 1024).toFixed(1);
-  const totalKB = (finalBytes.length / 1024).toFixed(1);
-  sizeInfo.textContent = `${W}×${H} · raw data ~${rawKB}KB · full PNG ~${totalKB}KB`;
-
-  resultWrap.scrollIntoView({ behavior: 'smooth' });
+sendBtn.onclick = async () => {
+  if (sendBtn.disabled) return;
+  const contacts = loadContacts();
+  const target = contacts[selectedContact];
+  sendStatus.className = 'send-status';
+  sendStatus.textContent = 'sending…';
+  sendBtn.disabled = true;
+  try {
+    const blob = await buildChunkedPNG();
+    const res = await fetch(`${WORKER_BASE_URL}/lamp/${target.id}/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob
+    });
+    if (!res.ok) throw new Error('Upload failed');
+    sendStatus.textContent = `sent to ${target.name}`;
+    sendStatus.classList.add('success');
+    checkLastSeen(target.id);
+  } catch (err) {
+    sendStatus.textContent = 'could not send — check connection';
+    sendStatus.classList.add('fail');
+  }
+  sendBtn.disabled = false;
 };
 
-// --- verifier: check if custom chunk survived a round trip ---
-verifyInput.onchange = async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const bytes = new Uint8Array(await file.arrayBuffer());
-
-  let offset = 8;
-  let found = null;
-  while (offset < bytes.length - 8) {
-    const len = (bytes[offset]<<24 | bytes[offset+1]<<16 | bytes[offset+2]<<8 | bytes[offset+3]) >>> 0;
-    const type = String.fromCharCode(bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]);
-    if (type === CHUNK_TYPE) {
-      found = bytes.slice(offset+8, offset+8+len);
-      break;
-    }
-    if (type === 'IEND') break;
-    offset += 8 + len + 4;
-  }
-
-  verifyResult.innerHTML = '';
-  const box = document.createElement('div');
-  if (!found) {
-    box.className = 'verify-box fail';
-    box.innerHTML = '<strong>❌ Chunk not found.</strong> The custom data did not survive — Messages/Mail stripped it. We\'ll need the file-attachment approach instead of photo-sharing.';
-    verifyResult.appendChild(box);
-    return;
-  }
-
-  const w = (found[0]<<8) | found[1];
-  const h = (found[2]<<8) | found[3];
-  const packedData = found.slice(4);
-  const bytesPerRow = Math.ceil(w/8);
-  const expectedLen = bytesPerRow * h;
-
-  box.className = 'verify-box pass';
-  box.innerHTML = `<strong>✅ Chunk survived!</strong> Found ${w}×${h} raw data, ${found.length} bytes total (expected ${4+expectedLen}). Rendering it below from the raw bits only (not the visible PNG image) to confirm it decodes correctly:`;
-  verifyResult.appendChild(box);
-
-  // render the raw bits back to a canvas to visually confirm correctness
-  const vCanvas = document.createElement('canvas');
-  vCanvas.className = 'verify-canvas';
-  vCanvas.width = w; vCanvas.height = h;
-  const vctx = vCanvas.getContext('2d');
-  const vImgData = vctx.createImageData(w, h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const bit = (packedData[y*bytesPerRow + (x>>3)] >> (7 - (x&7))) & 1;
-      const v = bit ? 255 : 0;
-      const idx = (y*w+x)*4;
-      vImgData.data[idx] = v; vImgData.data[idx+1] = v; vImgData.data[idx+2] = v; vImgData.data[idx+3] = 255;
-    }
-  }
-  vctx.putImageData(vImgData, 0, 0);
-  verifyResult.appendChild(vCanvas);
-};
-
+renderContacts();
 layoutFrame();
 </script>
 

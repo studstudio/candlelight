@@ -94,7 +94,7 @@
     display: flex; align-items: center; justify-content: center;
   }
   .preview-wrap canvas {
-    width: 100%; height: auto; display: block;
+    max-width: 100%; height: auto; display: block;
     image-rendering: pixelated;
     image-rendering: -webkit-optimize-contrast;
     background: #fff;
@@ -627,7 +627,7 @@ function render() {
 // ---------- scrub vertically on preview to adjust gray levels (replaces slider) ----------
 // most affordable e-ink panels max out at 4 gray levels (2bpp); higher grayscale
 // exists but needs pricier/slower hardware not suited to this power budget
-const LEVEL_STEPS = [2, 4];
+const LEVEL_STEPS = [2, 3, 4];
 function levelIndex(v) { return LEVEL_STEPS.indexOf(v); }
 
 let scrubState = null;

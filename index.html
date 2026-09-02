@@ -171,14 +171,11 @@
   <input type="file" id="fileInput" accept="image/*">
   <div class="tap-target" id="tapTarget"></div>
 </div>
-<p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag any corner to resize freely</p>
-
-<h3>preview</h3>
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
   <div class="scrub-label" id="scrubLabel">2</div>
 </div>
-<p class="crop-hint">drag up/down on the preview to adjust shading</p>
+<p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag up/down on preview for shading</p>
 
 <hr class="divider">
 
@@ -388,7 +385,7 @@ fileInput.onchange = (e) => {
     cropBox.style.display = 'block';
     cropHint.style.display = 'block';
     hasPhoto = true;
-    requestAnimationFrame(() => { initBox(); updateTargetFromBox(); render(); });
+    requestAnimationFrame(() => { initBox(); updateTargetFromBox(); render(); lastWrapW = photoWrap.clientWidth; });
     updateSendState();
   };
   img.src = URL.createObjectURL(file);
@@ -519,7 +516,22 @@ document.querySelectorAll('.handle').forEach(handle => {
   }, { passive: false });
 });
 
-window.addEventListener('resize', () => { if (naturalW) { initBox(); updateTargetFromBox(); render(); } });
+// mobile Safari fires 'resize' when the address bar collapses/expands on scroll —
+// we must NOT reset the box in that case, only reclamp it if the wrap actually got narrower
+let lastWrapW = 0;
+window.addEventListener('resize', () => {
+  if (!naturalW) return;
+  const wrapW = photoWrap.clientWidth, wrapH = sourceImg.clientHeight;
+  if (lastWrapW && wrapW === lastWrapW) return; // width unchanged, likely just a toolbar show/hide — ignore
+  lastWrapW = wrapW;
+  box.left = Math.max(0, Math.min(box.left, wrapW - box.width));
+  box.top = Math.max(0, Math.min(box.top, wrapH - box.height));
+  box.width = Math.min(box.width, wrapW);
+  box.height = Math.min(box.height, wrapH);
+  applyBoxStyle();
+  updateTargetFromBox();
+  render();
+});
 
 // ---------- live render: crop + grayscale + floyd-steinberg dither ----------
 function render() {

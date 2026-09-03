@@ -77,13 +77,11 @@
   .orient-btn-right { right: 8px; }
 
   /* tone/filter indicator pill — pops up during scrub, sits in the photo's
-     letterbox near its bottom edge (flush against the preview panel below),
-     fades out shortly after interaction ends */
+     fades out shortly after interaction ends, sits with the other buttons
+     below the preview rather than overlaid on the photo */
   .scrub-pill {
-    position: absolute; bottom: 8px; left: 8px; z-index: 7;
-    background: rgba(20,16,13,0.85); border: 1px solid var(--line);
-    padding: 6px 12px; border-radius: 999px;
-    display: flex; align-items: center; gap: 12px;
+    display: flex; justify-content: center; align-items: center; gap: 14px;
+    min-height: 34px; margin-top: 12px;
     opacity: 0; transition: opacity 0.2s; pointer-events: none;
   }
   .scrub-pill.visible { opacity: 1; }
@@ -241,24 +239,24 @@
   <button class="orient-btn orient-btn-right" id="btnPortrait" title="portrait">
     <svg viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="2" width="12" height="20" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
   </button>
-
-  <div class="scrub-pill" id="scrubPill">
-    <svg id="toneIndicator" viewBox="0 0 32 32" width="28" height="28">
-      <circle id="toneRing3" cx="16" cy="16" r="13" fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
-      <circle id="toneRing2" cx="16" cy="16" r="9"  fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
-      <circle id="toneRing1" cx="16" cy="16" r="5"  fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
-      <circle cx="16" cy="16" r="2.4" fill="var(--neutral-grey)"></circle>
-    </svg>
-    <svg id="filterIndicator" viewBox="0 0 32 32" width="28" height="28">
-      <!-- center square, always neutral grey -->
-      <rect x="11.5" y="11.5" width="9" height="9" fill="var(--neutral-grey)"></rect>
-      <!-- single line, left side only — color swaps per active filter -->
-      <line id="filterLine" x1="9" y1="11.5" x2="9" y2="20.5" stroke="#e2584a" stroke-width="1.4" opacity="0"></line>
-    </svg>
-  </div>
 </div>
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
+</div>
+
+<div class="scrub-pill" id="scrubPill">
+  <svg id="toneIndicator" viewBox="0 0 32 32" width="28" height="28">
+    <circle id="toneRing3" cx="16" cy="16" r="13" fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
+    <circle id="toneRing2" cx="16" cy="16" r="9"  fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
+    <circle id="toneRing1" cx="16" cy="16" r="5"  fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
+    <circle cx="16" cy="16" r="2.4" fill="var(--neutral-grey)"></circle>
+  </svg>
+  <svg id="filterIndicator" viewBox="0 0 32 32" width="28" height="28">
+    <!-- center square, always neutral grey -->
+    <rect x="11.5" y="11.5" width="9" height="9" fill="var(--neutral-grey)"></rect>
+    <!-- single line, left side only — color swaps per active filter -->
+    <line id="filterLine" x1="9" y1="11.5" x2="9" y2="20.5" stroke="#e2584a" stroke-width="1.4" opacity="0"></line>
+  </svg>
 </div>
 
 <div style="display:flex; justify-content:center; gap:8px; margin-top:14px;">
@@ -952,35 +950,29 @@ let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
 // each ring corresponds to one gray-level tier (ring1=2gray, ring2=3gray,
-// ring3=4gray). Rather than a full ring drawing itself out, each is a fixed
-// quarter-arc segment that ROTATES around its circular path as you scrub
-// through that tier — like a sweeping loading-spinner segment. Once a tier is
-// completed, its arc freezes in place (rotation = 1 full turn) and the next
-// tier's arc begins sweeping from its own start.
+// ring3=4gray), all on concentric tracks. Every arc is the SAME fixed length
+// (not proportional to its radius) — it starts as nothing and draws itself
+// out to that fixed length as you scrub through its tier (reversible: drag
+// back and it shrinks away again). All three rotate together continuously,
+// driven by the same overall progress value, so none of them ever freezes —
+// they keep moving in tandem for as long as you keep dragging.
+const ARC_LENGTH = 7; // px, same for every ring regardless of radius
 const TONE_RINGS = [
-  { el: toneRing1, radius: 5 },
-  { el: toneRing2, radius: 9 },
-  { el: toneRing3, radius: 13 }
+  { el: toneRing1, radius: 5,  tier: 0 },
+  { el: toneRing2, radius: 9,  tier: 1 },
+  { el: toneRing3, radius: 13, tier: 2 }
 ];
-TONE_RINGS.forEach(({ el, radius }) => {
-  const c = 2 * Math.PI * radius;
-  const quarter = c / 4;
-  el.style.strokeDasharray = `${quarter} ${c - quarter}`; // quarter visible, rest gap
-  el.style.strokeDashoffset = '0';
-  el.style.opacity = '0'; // hidden until its tier is reached
-});
 
 function setToneRings(cyclesValue) {
-  let tier = Math.floor(cyclesValue);
-  let localFrac = cyclesValue - tier;
-  if (tier >= 3) { tier = 2; localFrac = 1; } // clamp at the very last step
-
-  TONE_RINGS.forEach(({ el, radius }, i) => {
-    if (i > tier) { el.style.opacity = '0'; return; } // not reached yet
-    el.style.opacity = '1';
+  TONE_RINGS.forEach(({ el, radius, tier }) => {
     const c = 2 * Math.PI * radius;
-    const rotationFrac = i < tier ? 1 : localFrac; // completed tiers freeze at a full turn
-    el.style.strokeDashoffset = `${-rotationFrac * c}`;
+    const growFrac = Math.max(0, Math.min(1, cyclesValue - tier)); // 0 until its tier starts, grows to 1 across that tier
+    const arcLen = ARC_LENGTH * growFrac;
+    el.style.strokeDasharray = `${arcLen} ${c - arcLen}`;
+    // continuous tandem rotation — same driving value for every ring, so
+    // they all move together and never lock in place
+    el.style.strokeDashoffset = `${-cyclesValue * c}`;
+    el.style.opacity = growFrac > 0 ? '1' : '0';
   });
 }
 

@@ -132,10 +132,12 @@
   .scrub-label {
     position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
     background: rgba(20,16,13,0.85); border: 1px solid var(--ember);
-    color: var(--ember-glow); font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    padding: 5px 12px; border-radius: 999px;
     opacity: 0; transition: opacity 0.2s; pointer-events: none;
+    display: flex; align-items: center;
   }
   .scrub-label.visible { opacity: 1; }
+  .scrub-label svg circle { transition: opacity 0.15s; }
 
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
@@ -235,7 +237,17 @@
 </div>
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
-  <div class="scrub-label" id="scrubLabel">2 · standard</div>
+  <div class="scrub-label" id="scrubLabel">
+    <svg viewBox="0 0 132 26" width="132" height="26">
+      <path id="sinePath" fill="none" stroke="var(--ember-glow)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <g id="filterRings" transform="translate(114,13)">
+        <circle id="ringOuter" r="10" fill="none" stroke-width="1.4" opacity="0"></circle>
+        <circle id="ringMid" r="7" fill="none" stroke-width="1.4" opacity="0"></circle>
+        <circle id="ringInner" r="4.2" fill="none" stroke-width="1.4" opacity="0"></circle>
+        <circle id="centerDot" r="2.4"></circle>
+      </g>
+    </svg>
+  </div>
 </div>
 <div style="display:flex; justify-content:center; gap:8px; margin-top:10px;">
   <button class="pill" id="invertBtn">invert</button>
@@ -314,6 +326,11 @@ const liveCanvas = document.getElementById('liveCanvas');
 const lctx = liveCanvas.getContext('2d');
 const previewWrap = document.getElementById('previewWrap');
 const scrubLabel = document.getElementById('scrubLabel');
+const sinePathEl = document.getElementById('sinePath');
+const ringOuterEl = document.getElementById('ringOuter');
+const ringMidEl = document.getElementById('ringMid');
+const ringInnerEl = document.getElementById('ringInner');
+const centerDotEl = document.getElementById('centerDot');
 const invertBtn = document.getElementById('invertBtn');
 const patternBtn = document.getElementById('patternBtn');
 const filterButtons = document.querySelectorAll('.filter-pill');
@@ -864,6 +881,27 @@ function generateSteps() {
   return steps;
 }
 const STEPS = generateSteps();
+// tier boundaries — used to map stepIndex to "how many gray-level tiers have
+// been crossed", so the sine wave icon completes exactly 1 cycle per tier
+// (2 gray, 3 gray, 4 gray), regardless of how many sub-steps live in each
+const TIER_BOUNDARIES = (() => {
+  const bounds = [0];
+  let lastLevel = STEPS[0].levels;
+  for (let i = 1; i < STEPS.length; i++) {
+    if (STEPS[i].levels !== lastLevel) { bounds.push(i); lastLevel = STEPS[i].levels; }
+  }
+  bounds.push(STEPS.length);
+  return bounds;
+})();
+function toneCycles(idx) {
+  let t = 0;
+  for (let i = 0; i < TIER_BOUNDARIES.length - 1; i++) {
+    if (idx >= TIER_BOUNDARIES[i] && idx < TIER_BOUNDARIES[i + 1]) { t = i; break; }
+  }
+  const tierStart = TIER_BOUNDARIES[t], tierEnd = TIER_BOUNDARIES[t + 1] - 1;
+  const localFrac = tierEnd > tierStart ? (idx - tierStart) / (tierEnd - tierStart) : 0;
+  return t + localFrac; // 0 (start of 2-gray) .. 3 (end of 4-gray)
+}
 // default: first tier (2 gray), contrast closest to neutral (100%)
 let stepIndex = STEPS.reduce((best, cur, idx) =>
   (cur.levels === 2 && Math.abs(cur.contrast - 1) < Math.abs(STEPS[best].contrast - 1)) ? idx : best, 0);
@@ -905,6 +943,36 @@ let filterStepIndex = 0; // starts at 'standard'
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
+const FILTER_COLOR_HEX = {
+  standard: '#ff9d5c', // ember-glow
+  red: '#e2584a',
+  green: '#5ec48f',
+  blue: '#5b9fe0'
+};
+
+// build the sine wave path once (static geometry — 3 full cycles across a
+// fixed width) and measure its real length so we can reveal/erase it with
+// stroke-dasharray as the tone drag moves through the 2→3→4 gray progression
+function buildSineD(width, height, cycles, amplitude, samples) {
+  const midY = height / 2;
+  let d = `M 0 ${midY}`;
+  for (let i = 1; i <= samples; i++) {
+    const x = width * i / samples;
+    const y = midY - amplitude * Math.sin(2 * Math.PI * cycles * (x / width));
+    d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }
+  return d;
+}
+sinePathEl.setAttribute('d', buildSineD(94, 26, 3, 8, 150));
+const sineLength = sinePathEl.getTotalLength();
+sinePathEl.style.strokeDasharray = `${sineLength}`;
+sinePathEl.style.strokeDashoffset = `${sineLength}`; // fully hidden until first drag
+
+function setSineReveal(cyclesValue) {
+  const frac = Math.max(0, Math.min(1, cyclesValue / 3));
+  sinePathEl.style.strokeDashoffset = `${sineLength * (1 - frac)}`;
+}
+
 let scrubState = null;
 let scrubLabelTimeout = null;
 previewWrap.addEventListener('touchstart', (e) => {
@@ -916,6 +984,7 @@ previewWrap.addEventListener('touchstart', (e) => {
   };
   scrubLabel.classList.add('visible');
   clearTimeout(scrubLabelTimeout);
+  updateScrubLabel();
 }, { passive: true });
 previewWrap.addEventListener('touchmove', (e) => {
   if (!scrubState) return;
@@ -949,9 +1018,26 @@ previewWrap.addEventListener('touchend', () => {
   scrubLabelTimeout = setTimeout(() => scrubLabel.classList.remove('visible'), 700);
 });
 function updateScrubLabel() {
+  // sine wave: reveals proportionally to how far through the 2→3→4 gray
+  // progression the current step is — exactly 1 full cycle per tier
+  const cycles = toneCycles(stepIndex);
+  setSineReveal(cycles);
+
+  // rings: dot alone = standard; +1 ring = light, +2 = medium, +3 = strong;
+  // resets to a single ring whenever the color changes
   const f = FILTER_STEPS[filterStepIndex];
-  const filterSuffix = f.label === 'standard' ? '' : ` · ${f.label}`;
-  scrubLabel.textContent = STEPS[stepIndex].label + filterSuffix;
+  let colorName = 'standard', levelNum = 0;
+  if (f.label !== 'standard') {
+    const parts = f.label.split(' · ');
+    colorName = parts[0];
+    levelNum = INTENSITY_LABELS.indexOf(parts[1]) + 1; // 1, 2, or 3
+  }
+  const hex = FILTER_COLOR_HEX[colorName];
+  [ringOuterEl, ringMidEl, ringInnerEl, centerDotEl].forEach(el => el.setAttribute('stroke', hex));
+  centerDotEl.setAttribute('fill', hex);
+  ringInnerEl.setAttribute('opacity', levelNum >= 1 ? '1' : '0');
+  ringMidEl.setAttribute('opacity', levelNum >= 2 ? '1' : '0');
+  ringOuterEl.setAttribute('opacity', levelNum >= 3 ? '1' : '0');
 }
 
 invertBtn.onclick = () => {
@@ -1072,6 +1158,7 @@ document.addEventListener('gestureend', (e) => e.preventDefault());
 
 renderContacts();
 liveCanvas.width = targetW; liveCanvas.height = targetH;
+updateScrubLabel(); // sync the sine/ring indicator to the default state
 
 // canvas text doesn't auto-refresh when a web font finishes loading, so once
 // (if) the real Mondwest font files are added and load successfully, force

@@ -129,15 +129,12 @@
     image-rendering: -webkit-optimize-contrast;
     background: #fff;
   }
-  .scrub-label {
-    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-    background: rgba(20,16,13,0.85); border: 1px solid var(--ember);
-    padding: 5px 12px; border-radius: 999px;
-    opacity: 0; transition: opacity 0.2s; pointer-events: none;
-    display: flex; align-items: center;
+  .indicator-row {
+    display: flex; align-items: center; gap: 18px;
+    margin-top: 12px; padding-left: 4px;
   }
-  .scrub-label.visible { opacity: 1; }
-  .scrub-label svg circle { transition: opacity 0.15s; }
+  .indicator-row svg rect,
+  .indicator-row svg circle { transition: opacity 0.15s, stroke-dashoffset 0.05s linear; }
 
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
@@ -237,19 +234,24 @@
 </div>
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
-  <div class="scrub-label" id="scrubLabel">
-    <svg viewBox="0 0 132 26" width="132" height="26">
-      <path id="sinePath" fill="none" stroke="var(--ember-glow)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-      <g id="filterRings" transform="translate(114,13)">
-        <circle id="ringOuter" r="10" fill="none" stroke-width="1.4" opacity="0"></circle>
-        <circle id="ringMid" r="7" fill="none" stroke-width="1.4" opacity="0"></circle>
-        <circle id="ringInner" r="4.2" fill="none" stroke-width="1.4" opacity="0"></circle>
-        <circle id="centerDot" r="2.4"></circle>
-      </g>
-    </svg>
-  </div>
 </div>
-<div style="display:flex; justify-content:center; gap:8px; margin-top:10px;">
+
+<div class="indicator-row">
+  <svg id="toneIndicator" viewBox="0 0 42 42" width="42" height="42">
+    <circle id="toneRing3" cx="21" cy="21" r="19" fill="none" stroke="var(--ember)" stroke-width="2" stroke-dasharray="0" stroke-dashoffset="0"></circle>
+    <circle id="toneRing2" cx="21" cy="21" r="14" fill="none" stroke="var(--ember)" stroke-width="2" stroke-dasharray="0" stroke-dashoffset="0"></circle>
+    <circle id="toneRing1" cx="21" cy="21" r="9"  fill="none" stroke="var(--ember)" stroke-width="2" stroke-dasharray="0" stroke-dashoffset="0"></circle>
+    <circle cx="21" cy="21" r="4" fill="var(--ember)"></circle>
+  </svg>
+  <svg id="filterIndicator" viewBox="0 0 42 42" width="42" height="42">
+    <rect id="filterRing3" x="2"  y="2"  width="38" height="38" fill="none" stroke-width="2" opacity="0"></rect>
+    <rect id="filterRing2" x="7"  y="7"  width="28" height="28" fill="none" stroke-width="2" opacity="0"></rect>
+    <rect id="filterRing1" x="12" y="12" width="18" height="18" fill="none" stroke-width="2" opacity="0"></rect>
+    <rect x="17.5" y="17.5" width="7" height="7" fill="var(--ember)"></rect>
+  </svg>
+</div>
+
+<div style="display:flex; justify-content:center; gap:8px; margin-top:14px;">
   <button class="pill" id="invertBtn">invert</button>
   <button class="pill" id="patternBtn">floyd–steinberg</button>
 </div>
@@ -325,12 +327,12 @@ const cropHint = document.getElementById('cropHint');
 const liveCanvas = document.getElementById('liveCanvas');
 const lctx = liveCanvas.getContext('2d');
 const previewWrap = document.getElementById('previewWrap');
-const scrubLabel = document.getElementById('scrubLabel');
-const sinePathEl = document.getElementById('sinePath');
-const ringOuterEl = document.getElementById('ringOuter');
-const ringMidEl = document.getElementById('ringMid');
-const ringInnerEl = document.getElementById('ringInner');
-const centerDotEl = document.getElementById('centerDot');
+const toneRing1 = document.getElementById('toneRing1');
+const toneRing2 = document.getElementById('toneRing2');
+const toneRing3 = document.getElementById('toneRing3');
+const filterRing1 = document.getElementById('filterRing1');
+const filterRing2 = document.getElementById('filterRing2');
+const filterRing3 = document.getElementById('filterRing3');
 const invertBtn = document.getElementById('invertBtn');
 const patternBtn = document.getElementById('patternBtn');
 const filterButtons = document.querySelectorAll('.filter-pill');
@@ -950,31 +952,37 @@ const FILTER_COLOR_HEX = {
   blue: '#5b9fe0'
 };
 
-// build the sine wave path once (static geometry — 3 full cycles across a
-// fixed width) and measure its real length so we can reveal/erase it with
-// stroke-dasharray as the tone drag moves through the 2→3→4 gray progression
-function buildSineD(width, height, cycles, amplitude, samples) {
-  const midY = height / 2;
-  let d = `M 0 ${midY}`;
-  for (let i = 1; i <= samples; i++) {
-    const x = width * i / samples;
-    const y = midY - amplitude * Math.sin(2 * Math.PI * cycles * (x / width));
-    d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-  }
-  return d;
-}
-sinePathEl.setAttribute('d', buildSineD(94, 26, 3, 8, 150));
-const sineLength = sinePathEl.getTotalLength();
-sinePathEl.style.strokeDasharray = `${sineLength}`;
-sinePathEl.style.strokeDashoffset = `${sineLength}`; // fully hidden until first drag
+// each ring corresponds to one gray-level tier (ring1=2gray, ring2=3gray,
+// ring3=4gray) and draws itself out as you scrub through that tier, staying
+// fully drawn once you've passed it — same "one cycle per tier" idea as
+// before, just as concentric rings instead of a sine wave
+const TONE_RINGS = [
+  { el: toneRing1, radius: 9 },
+  { el: toneRing2, radius: 14 },
+  { el: toneRing3, radius: 19 }
+];
+TONE_RINGS.forEach(({ el, radius }) => {
+  const c = 2 * Math.PI * radius;
+  el.style.strokeDasharray = `${c}`;
+  el.style.strokeDashoffset = `${c}`; // start fully hidden
+});
 
-function setSineReveal(cyclesValue) {
-  const frac = Math.max(0, Math.min(1, cyclesValue / 3));
-  sinePathEl.style.strokeDashoffset = `${sineLength * (1 - frac)}`;
+function setToneRings(cyclesValue) {
+  let tier = Math.floor(cyclesValue);
+  let localFrac = cyclesValue - tier;
+  if (tier >= 3) { tier = 2; localFrac = 1; } // clamp at the very last step
+
+  TONE_RINGS.forEach(({ el, radius }, i) => {
+    const c = 2 * Math.PI * radius;
+    let reveal;
+    if (i < tier) reveal = 1;
+    else if (i === tier) reveal = localFrac;
+    else reveal = 0;
+    el.style.strokeDashoffset = `${c * (1 - reveal)}`;
+  });
 }
 
 let scrubState = null;
-let scrubLabelTimeout = null;
 previewWrap.addEventListener('touchstart', (e) => {
   if (!naturalW || e.touches.length !== 1) return;
   const t = e.touches[0];
@@ -982,9 +990,6 @@ previewWrap.addEventListener('touchstart', (e) => {
     startX: t.clientX, startY: t.clientY,
     startIdx: stepIndex, maxMove: 0
   };
-  scrubLabel.classList.add('visible');
-  clearTimeout(scrubLabelTimeout);
-  updateScrubLabel();
 }, { passive: true });
 previewWrap.addEventListener('touchmove', (e) => {
   if (!scrubState) return;
@@ -999,7 +1004,7 @@ previewWrap.addEventListener('touchmove', (e) => {
   const newIdx = Math.max(0, Math.min(STEPS.length - 1, scrubState.startIdx + stepsMoved));
   if (newIdx !== stepIndex) {
     stepIndex = newIdx;
-    updateScrubLabel();
+    updateIndicators();
     render();
   }
 }, { passive: true });
@@ -1010,21 +1015,19 @@ previewWrap.addEventListener('touchend', () => {
     const label = FILTER_STEPS[filterStepIndex].label;
     const anchorName = label.split(' · ')[0];
     filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === anchorName));
-    updateScrubLabel();
-    scrubLabel.classList.add('visible');
+    updateIndicators();
     render();
   }
   scrubState = null;
-  scrubLabelTimeout = setTimeout(() => scrubLabel.classList.remove('visible'), 700);
 });
-function updateScrubLabel() {
-  // sine wave: reveals proportionally to how far through the 2→3→4 gray
-  // progression the current step is — exactly 1 full cycle per tier
+function updateIndicators() {
+  // tone rings: one ring completes per gray-level tier crossed (2→3→4),
+  // always ember-colored, no color change here
   const cycles = toneCycles(stepIndex);
-  setSineReveal(cycles);
+  setToneRings(cycles);
 
-  // rings: dot alone = standard; +1 ring = light, +2 = medium, +3 = strong;
-  // resets to a single ring whenever the color changes
+  // filter rings: center square always stays ember; only the ring outlines
+  // change color, and ring count encodes intensity (1=light, 2=medium, 3=strong)
   const f = FILTER_STEPS[filterStepIndex];
   let colorName = 'standard', levelNum = 0;
   if (f.label !== 'standard') {
@@ -1033,11 +1036,10 @@ function updateScrubLabel() {
     levelNum = INTENSITY_LABELS.indexOf(parts[1]) + 1; // 1, 2, or 3
   }
   const hex = FILTER_COLOR_HEX[colorName];
-  [ringOuterEl, ringMidEl, ringInnerEl, centerDotEl].forEach(el => el.setAttribute('stroke', hex));
-  centerDotEl.setAttribute('fill', hex);
-  ringInnerEl.setAttribute('opacity', levelNum >= 1 ? '1' : '0');
-  ringMidEl.setAttribute('opacity', levelNum >= 2 ? '1' : '0');
-  ringOuterEl.setAttribute('opacity', levelNum >= 3 ? '1' : '0');
+  [filterRing1, filterRing2, filterRing3].forEach(el => el.setAttribute('stroke', hex));
+  filterRing1.setAttribute('opacity', levelNum >= 1 ? '1' : '0');
+  filterRing2.setAttribute('opacity', levelNum >= 2 ? '1' : '0');
+  filterRing3.setAttribute('opacity', levelNum >= 3 ? '1' : '0');
 }
 
 invertBtn.onclick = () => {
@@ -1068,7 +1070,7 @@ filterButtons.forEach(btn => {
       filterStepIndex = blockStart + 1; // jump to that color's "medium" intensity
     }
     filterButtons.forEach(b => b.classList.toggle('active', b === btn));
-    updateScrubLabel();
+    updateIndicators();
     if (naturalW) render();
   };
 });
@@ -1158,7 +1160,7 @@ document.addEventListener('gestureend', (e) => e.preventDefault());
 
 renderContacts();
 liveCanvas.width = targetW; liveCanvas.height = targetH;
-updateScrubLabel(); // sync the sine/ring indicator to the default state
+updateIndicators(); // sync the ring indicators to the default state
 
 // canvas text doesn't auto-refresh when a web font finishes loading, so once
 // (if) the real Mondwest font files are added and load successfully, force

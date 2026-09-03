@@ -80,8 +80,8 @@
      fades out shortly after interaction ends, sits with the other buttons
      below the preview rather than overlaid on the photo */
   .scrub-pill {
-    display: flex; justify-content: center; align-items: center; gap: 14px;
-    min-height: 34px; margin-top: 12px;
+    display: flex; justify-content: flex-start; align-items: center; gap: 14px;
+    min-height: 34px; margin-top: 12px; padding-left: 4px;
     opacity: 0; transition: opacity 0.2s; pointer-events: none;
   }
   .scrub-pill.visible { opacity: 1; }
@@ -245,11 +245,11 @@
 </div>
 
 <div class="scrub-pill" id="scrubPill">
-  <svg id="toneIndicator" viewBox="0 0 32 32" width="28" height="28">
-    <circle id="toneRing3" cx="16" cy="16" r="13" fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
-    <circle id="toneRing2" cx="16" cy="16" r="9"  fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
-    <circle id="toneRing1" cx="16" cy="16" r="5"  fill="none" stroke="var(--neutral-grey)" stroke-width="1.2" stroke-linecap="round"></circle>
-    <circle cx="16" cy="16" r="2.4" fill="var(--neutral-grey)"></circle>
+  <svg id="toneIndicator" viewBox="0 0 44 12" width="38" height="10">
+    <circle id="tonePip0" cx="5"  cy="6" r="3.4" fill="var(--neutral-grey)"></circle>
+    <circle id="tonePip1" cx="17" cy="6" r="3.4" fill="var(--neutral-grey)" opacity="0.15"></circle>
+    <circle id="tonePip2" cx="29" cy="6" r="3.4" fill="var(--neutral-grey)" opacity="0.15"></circle>
+    <circle id="tonePip3" cx="41" cy="6" r="3.4" fill="var(--neutral-grey)" opacity="0.15"></circle>
   </svg>
   <svg id="filterIndicator" viewBox="0 0 32 32" width="28" height="28">
     <!-- center square, always neutral grey -->
@@ -336,9 +336,10 @@ const liveCanvas = document.getElementById('liveCanvas');
 const lctx = liveCanvas.getContext('2d');
 const previewWrap = document.getElementById('previewWrap');
 const scrubPill = document.getElementById('scrubPill');
-const toneRing1 = document.getElementById('toneRing1');
-const toneRing2 = document.getElementById('toneRing2');
-const toneRing3 = document.getElementById('toneRing3');
+const tonePip0 = document.getElementById('tonePip0');
+const tonePip1 = document.getElementById('tonePip1');
+const tonePip2 = document.getElementById('tonePip2');
+const tonePip3 = document.getElementById('tonePip3');
 const filterLine = document.getElementById('filterLine');
 const invertBtn = document.getElementById('invertBtn');
 const patternBtn = document.getElementById('patternBtn');
@@ -949,30 +950,17 @@ let filterStepIndex = 0; // starts at 'standard'
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
-// each ring corresponds to one gray-level tier (ring1=2gray, ring2=3gray,
-// ring3=4gray), all on concentric tracks. Every arc is the SAME fixed length
-// (not proportional to its radius) — it starts as nothing and draws itself
-// out to that fixed length as you scrub through its tier (reversible: drag
-// back and it shrinks away again). All three rotate together continuously,
-// driven by the same overall progress value, so none of them ever freezes —
-// they keep moving in tandem for as long as you keep dragging.
-const ARC_LENGTH = 7; // px, same for every ring regardless of radius
-const TONE_RINGS = [
-  { el: toneRing1, radius: 5,  tier: 0 },
-  { el: toneRing2, radius: 9,  tier: 1 },
-  { el: toneRing3, radius: 13, tier: 2 }
-];
-
+// 4 pip dots. The first is always solid (the baseline starting state); the
+// remaining 3 fill in — one per gray-level tier (2/3/4 gray) — as you scrub.
+// Each fills smoothly (not a hard snap) proportional to progress through its
+// tier, and un-fills again if you drag back down.
+const TONE_PIPS = [tonePip0, tonePip1, tonePip2, tonePip3];
 function setToneRings(cyclesValue) {
-  TONE_RINGS.forEach(({ el, radius, tier }) => {
-    const c = 2 * Math.PI * radius;
-    const growFrac = Math.max(0, Math.min(1, cyclesValue - tier)); // 0 until its tier starts, grows to 1 across that tier
-    const arcLen = ARC_LENGTH * growFrac;
-    el.style.strokeDasharray = `${arcLen} ${c - arcLen}`;
-    // continuous tandem rotation — same driving value for every ring, so
-    // they all move together and never lock in place
-    el.style.strokeDashoffset = `${-cyclesValue * c}`;
-    el.style.opacity = growFrac > 0 ? '1' : '0';
+  TONE_PIPS.forEach((el, i) => {
+    if (i === 0) { el.style.opacity = '1'; return; } // baseline pip, always on
+    const tier = i - 1;
+    const growFrac = Math.max(0, Math.min(1, cyclesValue - tier));
+    el.style.opacity = `${0.15 + growFrac * 0.85}`;
   });
 }
 

@@ -241,6 +241,12 @@
   <button class="pill" id="invertBtn">invert</button>
   <button class="pill" id="patternBtn">floyd–steinberg</button>
 </div>
+<div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
+  <button class="pill filter-pill active" id="filterStandard" data-filter="standard">standard</button>
+  <button class="pill filter-pill" id="filterRed" data-filter="red">red filter</button>
+  <button class="pill filter-pill" id="filterGreen" data-filter="green">green filter</button>
+  <button class="pill filter-pill" id="filterBlue" data-filter="blue">blue filter</button>
+</div>
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag up/down on preview for shading</p>
 
 <div class="postcard-row">
@@ -310,6 +316,7 @@ const previewWrap = document.getElementById('previewWrap');
 const scrubLabel = document.getElementById('scrubLabel');
 const invertBtn = document.getElementById('invertBtn');
 const patternBtn = document.getElementById('patternBtn');
+const filterButtons = document.querySelectorAll('.filter-pill');
 const postcardInput = document.getElementById('postcardInput');
 const postcardPosBtn = document.getElementById('postcardPosBtn');
 const postcardPosIcon = document.getElementById('postcardPosIcon');
@@ -679,9 +686,8 @@ function render() {
     const barH = H * 0.11;
     const barY = postcardPosition === 'top' ? 0 : H - barH;
     const fontSize = Math.max(9, Math.floor(barH * 0.55));
-    const leftMargin = W * 0.05;
-    const pad = W * 0.02;
-    const maxTextWidth = W * 0.85; // hard ceiling; text squashes to fit within this
+    const leftMargin = 0; // starts at the very edge, no padding
+    const maxTextWidth = W; // can span the full canvas width if the text is long enough
 
     // "Mondwest" is PangramPangram's bitmap serif — add the trial font files to
     // /fonts on your GitHub repo (see @font-face above) and it'll be used
@@ -689,12 +695,21 @@ function render() {
     lctx.font = `${fontSize}px 'Mondwest', Georgia, 'Times New Roman', serif`;
 
     const naturalWidth = lctx.measureText(text).width;
-    const drawnWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long
-    const boxWidth = drawnWidth + pad * 2;
+    const boxWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long, no extra padding
 
     lctx.save();
-    lctx.fillStyle = 'rgba(190,190,190,0.6)'; // light grey, more transparent
-    lctx.fillRect(leftMargin - pad, barY, boxWidth, barH);
+
+    // vertical gradient: fades in from the outer edge, plateaus at 0.8 opacity,
+    // fades back out toward the inner edge — no hard top/bottom line, which
+    // gives the dither pass a smooth transition to work with instead of a
+    // single hard row boundary
+    const grad = lctx.createLinearGradient(0, barY, 0, barY + barH);
+    grad.addColorStop(0,    'rgba(190,190,190,0)');
+    grad.addColorStop(0.25, 'rgba(190,190,190,0.8)');
+    grad.addColorStop(0.75, 'rgba(190,190,190,0.8)');
+    grad.addColorStop(1,    'rgba(190,190,190,0)');
+    lctx.fillStyle = grad;
+    lctx.fillRect(0, barY, boxWidth, barH);
 
     lctx.fillStyle = 'rgba(20,20,20,0.9)'; // dark text for contrast against light grey
     lctx.textAlign = 'left';
@@ -706,7 +721,8 @@ function render() {
   const imgData = lctx.getImageData(0,0,W,H);
   const data = imgData.data;
   const gray = new Float32Array(W*H);
-  for (let i=0;i<W*H;i++){ gray[i]=0.299*data[i*4]+0.587*data[i*4+1]+0.114*data[i*4+2]; }
+  const fw = COLOR_FILTERS[colorFilter];
+  for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
 
   // apply the current step's full tone curve — black/white point, then
   // shadow/highlight shaping, then contrast — before quantizing. This is what
@@ -808,15 +824,33 @@ function applyDither(gray, W, H, quantize, step, pattern, strength) {
 // ramp direction ALTERNATES per tier so the value at each tier boundary matches
 // exactly. That isolates the one unavoidable jump — the level count itself
 // changing — instead of stacking a tone-curve jump on top of it.
+// non-uniform p sampling per tier — tier 0 (2 gray) gets extra density in the
+// 80%-98% contrast range specifically, since that's the range you liked most;
+// everything else stays evenly spaced
+function tierPValues(tierIdx) {
+  if (tierIdx === 0) {
+    const denseEnd = 0.257; // p value where contrast ≈ 0.98 (98%)
+    const denseCount = 20;
+    const coarseCount = 8;
+    const pts = [];
+    for (let i = 0; i < denseCount; i++) pts.push((i / (denseCount - 1)) * denseEnd);
+    for (let i = 1; i < coarseCount; i++) pts.push(denseEnd + (i / (coarseCount - 1)) * (1 - denseEnd));
+    return pts;
+  }
+  const PER_TIER = 16;
+  const pts = [];
+  for (let j = 0; j < PER_TIER; j++) pts.push(j / (PER_TIER - 1));
+  return pts;
+}
+
 function generateSteps() {
-  const TIERS = [2, 3, 4];   // real gray levels available on the hardware
-  const PER_TIER = 16;       // sub-steps within each level count, for smoothness
+  const TIERS = [2, 3, 4]; // real gray levels available on the hardware
   const steps = [];
   TIERS.forEach((levelCount, tierIdx) => {
     const ascending = tierIdx % 2 === 0; // alternate direction so tier edges connect
-    for (let j = 0; j < PER_TIER; j++) {
-      let p = j / (PER_TIER - 1); // 0 (soft) .. 1 (punchy)
-      if (!ascending) p = 1 - p;
+    const pValues = tierPValues(tierIdx);
+    pValues.forEach((rawP) => {
+      const p = ascending ? rawP : 1 - rawP;
       const contrast = 0.8 + p * 0.7;       // 0.8 .. 1.5
       const blackPoint = Math.round(p * 50);
       const whitePoint = 255 - Math.round(p * 50);
@@ -825,7 +859,7 @@ function generateSteps() {
       const ditherStrength = 1 - p * 0.6;   // 1.0 .. 0.4 — punchier steps dither less (harder, more graphic edges)
       const pct = Math.round(contrast * 100);
       steps.push({ levels: levelCount, contrast, blackPoint, whitePoint, shadowGamma, highlightGamma, ditherStrength, label: `${levelCount} gray · ${pct}%` });
-    }
+    });
   });
   return steps;
 }
@@ -836,6 +870,16 @@ let stepIndex = STEPS.reduce((best, cur, idx) =>
 
 let invert = false; // false = black content on white e-ink, true = white content on black
 let ditherPattern = 'floyd'; // 'floyd' | 'atkinson' | 'ordered' — cycled via the pattern button
+
+// pre-grayscale channel weighting, like classic B&W film filters — a red
+// filter lightens skin/darkens skies, etc. 'standard' is normal luminance weighting.
+const COLOR_FILTERS = {
+  standard: { r: 0.299, g: 0.587, b: 0.114 },
+  red:      { r: 0.7,   g: 0.2,   b: 0.1   },
+  green:    { r: 0.1,   g: 0.7,   b: 0.2   },
+  blue:     { r: 0.1,   g: 0.2,   b: 0.7   }
+};
+let colorFilter = 'standard';
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
@@ -881,6 +925,15 @@ patternBtn.onclick = () => {
   patternBtn.textContent = PATTERN_LABELS[ditherPattern];
   if (naturalW) render();
 };
+
+// color filter buttons — pre-grayscale channel weighting, like classic B&W film filters
+filterButtons.forEach(btn => {
+  btn.onclick = () => {
+    colorFilter = btn.dataset.filter;
+    filterButtons.forEach(b => b.classList.toggle('active', b === btn));
+    if (naturalW) render();
+  };
+});
 
 // postcard text — rendered live as you type, baked into the same canvas
 // pipeline so it inherits tone curve, dither pattern, and invert automatically

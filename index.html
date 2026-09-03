@@ -20,7 +20,8 @@
      ============================================================ */
   @font-face {
     font-family: 'Mondwest';
-    src: url('./fonts/PPMondwest-Regular.otf') format('opentype');
+    src: url('./fonts/Mondwest-Regular.woff2') format('woff2'),
+         url('./fonts/Mondwest-Regular.otf') format('opentype');
     font-weight: 400;
     font-display: swap;
   }
@@ -139,12 +140,12 @@
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
   .postcard-row { display: flex; gap: 8px; margin-top: 12px; }
-  .postcard-row textarea {
+  .postcard-row input[type=text] {
     flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
     background: var(--bg-elevated); color: var(--cream); font-size: 13px;
-    font-family: inherit; resize: none; line-height: 1.4;
+    font-family: inherit;
   }
-  .postcard-row textarea::placeholder { color: var(--cream-dim); opacity: 0.6; }
+  .postcard-row input[type=text]::placeholder { color: var(--cream-dim); opacity: 0.6; }
   .postcard-pos-btn {
     flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px;
     border: 1px solid var(--line); background: var(--bg-elevated); color: var(--cream-dim);
@@ -243,7 +244,7 @@
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag up/down on preview for shading</p>
 
 <div class="postcard-row">
-  <textarea id="postcardInput" placeholder="add a short message (optional)" rows="2"></textarea>
+  <input type="text" id="postcardInput" placeholder="add a short message (optional)" maxlength="70">
   <button class="postcard-pos-btn" id="postcardPosBtn" title="move message to top/bottom">
     <svg viewBox="0 0 24 24" width="16" height="16"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="4.5" y="15" width="15" height="5.5" rx="1" fill="currentColor" id="postcardPosIcon"/></svg>
   </button>
@@ -653,33 +654,6 @@ window.addEventListener('resize', () => {
 });
 
 // ---------- live render: crop + postcard bar + grayscale + tone curve + dither ----------
-// wraps postcard text to fit maxWidth, respecting manual line breaks first,
-// then auto-wrapping by measured width — capped at 2 lines total
-function wrapPostcardText(ctx, rawText, maxWidth) {
-  const paragraphs = rawText.split('\n');
-  const lines = [];
-  for (const para of paragraphs) {
-    const words = para.split(/\s+/).filter(Boolean);
-    if (words.length === 0) continue;
-    let current = '';
-    for (const w of words) {
-      const test = current ? current + ' ' + w : w;
-      if (ctx.measureText(test).width <= maxWidth || !current) {
-        current = test;
-      } else {
-        lines.push(current);
-        if (lines.length >= 2) return lines;
-        current = w;
-      }
-    }
-    if (current) {
-      lines.push(current);
-      if (lines.length >= 2) return lines;
-    }
-  }
-  return lines;
-}
-
 function render() {
   if (!naturalW) return;
 
@@ -694,42 +668,38 @@ function render() {
   lctx.clearRect(0,0,W,H);
   lctx.drawImage(sourceImg, sx, sy, sw, sh, 0, 0, W, H);
 
-  // draw the postcard text bar directly onto the RGBA canvas, BEFORE we extract
+  // draw the postcard text directly onto the RGBA canvas, BEFORE we extract
   // grayscale — this means it rides through the exact same tone curve, dither
   // pattern, and invert as the photo itself, with no separate logic needed.
-  // The box is a fixed size that comfortably fits two full lines; text is
-  // auto-wrapped by measured width (not just manual line breaks), and the
-  // font stack tries the real bitmap typeface first with a serif fallback.
+  // Single line only; the box hugs the actual text width instead of spanning
+  // the full canvas, and squashes horizontally (via canvas's native maxWidth
+  // behavior) rather than wrapping if the line runs long.
   const text = postcardText.trim();
   if (text) {
-    const barH = H * 0.2; // fixed, sized to fit two lines comfortably
+    const barH = H * 0.11;
     const barY = postcardPosition === 'top' ? 0 : H - barH;
-    const lineSlot = barH / 2;
-    const fontSize = Math.max(9, Math.floor(lineSlot * 0.62)); // larger, more legible
+    const fontSize = Math.max(9, Math.floor(barH * 0.55));
     const leftMargin = W * 0.05;
-    const maxTextWidth = W * 0.9;
+    const pad = W * 0.02;
+    const maxTextWidth = W * 0.85; // hard ceiling; text squashes to fit within this
 
-    lctx.save();
-    lctx.fillStyle = 'rgba(190,190,190,0.85)'; // light grey, clearly defined edge
-    lctx.fillRect(0, barY, W, barH);
-
-    lctx.fillStyle = 'rgba(20,20,20,0.9)'; // dark text for contrast against light grey
-    lctx.textAlign = 'left';
-    lctx.textBaseline = 'middle';
     // "Mondwest" is PangramPangram's bitmap serif — add the trial font files to
     // /fonts on your GitHub repo (see @font-face above) and it'll be used
     // automatically; falls back to a plain serif until then
     lctx.font = `${fontSize}px 'Mondwest', Georgia, 'Times New Roman', serif`;
 
-    const lines = wrapPostcardText(lctx, text, maxTextWidth);
-    if (lines.length === 1) {
-      lctx.fillText(lines[0], leftMargin, barY + barH / 2, maxTextWidth);
-    } else {
-      lines.forEach((line, i) => {
-        const cy = barY + lineSlot * (i + 0.5);
-        lctx.fillText(line, leftMargin, cy, maxTextWidth);
-      });
-    }
+    const naturalWidth = lctx.measureText(text).width;
+    const drawnWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long
+    const boxWidth = drawnWidth + pad * 2;
+
+    lctx.save();
+    lctx.fillStyle = 'rgba(190,190,190,0.6)'; // light grey, more transparent
+    lctx.fillRect(leftMargin - pad, barY, boxWidth, barH);
+
+    lctx.fillStyle = 'rgba(20,20,20,0.9)'; // dark text for contrast against light grey
+    lctx.textAlign = 'left';
+    lctx.textBaseline = 'middle';
+    lctx.fillText(text, leftMargin, barY + barH / 2, maxTextWidth);
     lctx.restore();
   }
 

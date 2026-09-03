@@ -247,7 +247,7 @@
   <button class="pill filter-pill" id="filterGreen" data-filter="green">green filter</button>
   <button class="pill filter-pill" id="filterBlue" data-filter="blue">blue filter</button>
 </div>
-<p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading, left/right for filter</p>
+<p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading · tap preview to cycle filter</p>
 
 <div class="postcard-row">
   <input type="text" id="postcardInput" placeholder="add a short message (optional)" maxlength="70">
@@ -872,36 +872,35 @@ let invert = false; // false = black content on white e-ink, true = white conten
 let ditherPattern = 'floyd'; // 'floyd' | 'atkinson' | 'ordered' — cycled via the pattern button
 
 // pre-grayscale channel weighting, like classic B&W film filters — a red
-// filter lightens skin/darkens skies, etc. These are the anchor points;
-// generateFilterSteps() interpolates smoothly BETWEEN them so the horizontal
-// drag feels like one continuous color sweep instead of 4 hard jumps.
+// filter lightens skin/darkens skies, etc. Tapping the preview cycles through
+// this sequence: standard → red (light/medium/strong) → green (...) → blue
+// (...) → back to standard. Each color gets 3 intensity sub-steps, blended
+// between neutral and the full color weighting.
 const FILTER_ANCHORS = [
   { name: 'standard', r: 0.299, g: 0.587, b: 0.114 },
   { name: 'red',      r: 0.7,   g: 0.2,   b: 0.1   },
   { name: 'green',    r: 0.1,   g: 0.7,   b: 0.2   },
   { name: 'blue',     r: 0.1,   g: 0.2,   b: 0.7   }
 ];
+const NEUTRAL = FILTER_ANCHORS[0];
+const INTENSITY_LABELS = ['light', 'medium', 'strong'];
 function generateFilterSteps() {
-  const SUBSTEPS = 14; // per segment, between each pair of anchors
-  const steps = [];
-  for (let i = 0; i < FILTER_ANCHORS.length; i++) {
-    const a = FILTER_ANCHORS[i];
-    const b = FILTER_ANCHORS[(i + 1) % FILTER_ANCHORS.length]; // wraps blue back to standard, closing the loop
-    for (let j = 0; j < SUBSTEPS; j++) {
-      const t = j / SUBSTEPS;
-      const label = t < 0.15 ? a.name : (t > 0.85 ? b.name : `${a.name}→${b.name}`);
+  const steps = [{ r: NEUTRAL.r, g: NEUTRAL.g, b: NEUTRAL.b, label: 'standard' }];
+  for (let a = 1; a < FILTER_ANCHORS.length; a++) {
+    const color = FILTER_ANCHORS[a];
+    for (let level = 1; level <= 3; level++) {
+      const t = level / 3; // 0.33 (light) .. 1.0 (strong)
       steps.push({
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-        nearestAnchor: t < 0.5 ? a.name : b.name,
-        label
+        r: NEUTRAL.r + (color.r - NEUTRAL.r) * t,
+        g: NEUTRAL.g + (color.g - NEUTRAL.g) * t,
+        b: NEUTRAL.b + (color.b - NEUTRAL.b) * t,
+        label: `${color.name} · ${INTENSITY_LABELS[level - 1]}`
       });
     }
   }
   return steps;
 }
-const FILTER_STEPS = generateFilterSteps();
+const FILTER_STEPS = generateFilterSteps(); // [standard, red-light, red-med, red-strong, green-light, ..., blue-strong]
 let filterStepIndex = 0; // starts at 'standard'
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
@@ -913,7 +912,7 @@ previewWrap.addEventListener('touchstart', (e) => {
   const t = e.touches[0];
   scrubState = {
     startX: t.clientX, startY: t.clientY,
-    startIdx: stepIndex, startFilterIdx: filterStepIndex
+    startIdx: stepIndex, maxMove: 0
   };
   scrubLabel.classList.add('visible');
   clearTimeout(scrubLabelTimeout);
@@ -921,39 +920,39 @@ previewWrap.addEventListener('touchstart', (e) => {
 previewWrap.addEventListener('touchmove', (e) => {
   if (!scrubState) return;
   const t = e.touches[0];
-  let changed = false;
 
   // vertical drag: tone steps (continuous — contrast/black-point/shadow/highlight/dither)
   const dy = t.clientY - scrubState.startY;
+  const dx = t.clientX - scrubState.startX;
+  scrubState.maxMove = Math.max(scrubState.maxMove, Math.abs(dy), Math.abs(dx));
+
   const stepsMoved = Math.round(-dy / 16);
   const newIdx = Math.max(0, Math.min(STEPS.length - 1, scrubState.startIdx + stepsMoved));
-  if (newIdx !== stepIndex) { stepIndex = newIdx; changed = true; }
-
-  // horizontal drag: color filter — now a continuous interpolated sweep
-  // (standard → red → green → blue → back to standard), same smoothing
-  // approach as the tone axis, just on its own dimension
-  const dx = t.clientX - scrubState.startX;
-  const filterStepsMoved = Math.round(dx / 10); // finer granularity, many subtle steps
-  let newFilterIdx = (scrubState.startFilterIdx + filterStepsMoved) % FILTER_STEPS.length;
-  if (newFilterIdx < 0) newFilterIdx += FILTER_STEPS.length; // wrap both directions since it's a closed loop
-  if (newFilterIdx !== filterStepIndex) {
-    filterStepIndex = newFilterIdx;
-    const nearest = FILTER_STEPS[filterStepIndex].nearestAnchor;
-    filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === nearest));
-    changed = true;
-  }
-
-  if (changed) {
-    const f = FILTER_STEPS[filterStepIndex];
-    const filterSuffix = f.label === 'standard' ? '' : ` · ${f.label}`;
-    scrubLabel.textContent = STEPS[stepIndex].label + filterSuffix;
+  if (newIdx !== stepIndex) {
+    stepIndex = newIdx;
+    updateScrubLabel();
     render();
   }
 }, { passive: true });
 previewWrap.addEventListener('touchend', () => {
+  // a tap (little to no movement) cycles the color filter instead of adjusting tone
+  if (scrubState && scrubState.maxMove < 10) {
+    filterStepIndex = (filterStepIndex + 1) % FILTER_STEPS.length;
+    const label = FILTER_STEPS[filterStepIndex].label;
+    const anchorName = label.split(' · ')[0];
+    filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === anchorName));
+    updateScrubLabel();
+    scrubLabel.classList.add('visible');
+    render();
+  }
   scrubState = null;
   scrubLabelTimeout = setTimeout(() => scrubLabel.classList.remove('visible'), 700);
 });
+function updateScrubLabel() {
+  const f = FILTER_STEPS[filterStepIndex];
+  const filterSuffix = f.label === 'standard' ? '' : ` · ${f.label}`;
+  scrubLabel.textContent = STEPS[stepIndex].label + filterSuffix;
+}
 
 invertBtn.onclick = () => {
   invert = !invert;
@@ -974,9 +973,16 @@ patternBtn.onclick = () => {
 // color filter buttons — pre-grayscale channel weighting, like classic B&W film filters
 filterButtons.forEach(btn => {
   btn.onclick = () => {
-    const anchorIdx = FILTER_ANCHORS.findIndex(a => a.name === btn.dataset.filter);
-    filterStepIndex = anchorIdx * (FILTER_STEPS.length / FILTER_ANCHORS.length); // exact anchor point, t=0
+    const name = btn.dataset.filter;
+    if (name === 'standard') {
+      filterStepIndex = 0;
+    } else {
+      const anchorIdx = FILTER_ANCHORS.findIndex(a => a.name === name); // 1=red, 2=green, 3=blue
+      const blockStart = 1 + (anchorIdx - 1) * 3;
+      filterStepIndex = blockStart + 1; // jump to that color's "medium" intensity
+    }
     filterButtons.forEach(b => b.classList.toggle('active', b === btn));
+    updateScrubLabel();
     if (naturalW) render();
   };
 });

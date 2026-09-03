@@ -244,9 +244,7 @@
     <circle cx="21" cy="21" r="4" fill="var(--ember)"></circle>
   </svg>
   <svg id="filterIndicator" viewBox="0 0 42 42" width="42" height="42">
-    <rect id="filterRing3" x="2"  y="2"  width="38" height="38" fill="none" stroke-width="2" opacity="0"></rect>
-    <rect id="filterRing2" x="7"  y="7"  width="28" height="28" fill="none" stroke-width="2" opacity="0"></rect>
-    <rect id="filterRing1" x="12" y="12" width="18" height="18" fill="none" stroke-width="2" opacity="0"></rect>
+    <rect id="filterRing1" x="10" y="10" width="22" height="22" fill="none" stroke-width="1" opacity="0"></rect>
     <rect x="17.5" y="17.5" width="7" height="7" fill="var(--ember)"></rect>
   </svg>
 </div>
@@ -331,8 +329,6 @@ const toneRing1 = document.getElementById('toneRing1');
 const toneRing2 = document.getElementById('toneRing2');
 const toneRing3 = document.getElementById('toneRing3');
 const filterRing1 = document.getElementById('filterRing1');
-const filterRing2 = document.getElementById('filterRing2');
-const filterRing3 = document.getElementById('filterRing3');
 const invertBtn = document.getElementById('invertBtn');
 const patternBtn = document.getElementById('patternBtn');
 const filterButtons = document.querySelectorAll('.filter-pill');
@@ -923,24 +919,21 @@ const FILTER_ANCHORS = [
   { name: 'blue',     r: 0.1,   g: 0.2,   b: 0.7   }
 ];
 const NEUTRAL = FILTER_ANCHORS[0];
-const INTENSITY_LABELS = ['light', 'medium', 'strong'];
+// tap cycles through exactly these 4 states, each at a fixed "medium" strength
+// blend between neutral and the full color weighting — no light/strong sub-steps
 function generateFilterSteps() {
-  const steps = [{ r: NEUTRAL.r, g: NEUTRAL.g, b: NEUTRAL.b, label: 'standard' }];
-  for (let a = 1; a < FILTER_ANCHORS.length; a++) {
-    const color = FILTER_ANCHORS[a];
-    for (let level = 1; level <= 3; level++) {
-      const t = level / 3; // 0.33 (light) .. 1.0 (strong)
-      steps.push({
-        r: NEUTRAL.r + (color.r - NEUTRAL.r) * t,
-        g: NEUTRAL.g + (color.g - NEUTRAL.g) * t,
-        b: NEUTRAL.b + (color.b - NEUTRAL.b) * t,
-        label: `${color.name} · ${INTENSITY_LABELS[level - 1]}`
-      });
-    }
-  }
-  return steps;
+  const MEDIUM_T = 2 / 3;
+  return FILTER_ANCHORS.map((color, i) => {
+    if (i === 0) return { r: NEUTRAL.r, g: NEUTRAL.g, b: NEUTRAL.b, label: 'standard' };
+    return {
+      r: NEUTRAL.r + (color.r - NEUTRAL.r) * MEDIUM_T,
+      g: NEUTRAL.g + (color.g - NEUTRAL.g) * MEDIUM_T,
+      b: NEUTRAL.b + (color.b - NEUTRAL.b) * MEDIUM_T,
+      label: color.name
+    };
+  });
 }
-const FILTER_STEPS = generateFilterSteps(); // [standard, red-light, red-med, red-strong, green-light, ..., blue-strong]
+const FILTER_STEPS = generateFilterSteps(); // [standard, red, green, blue]
 let filterStepIndex = 0; // starts at 'standard'
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
@@ -1012,8 +1005,7 @@ previewWrap.addEventListener('touchend', () => {
   // a tap (little to no movement) cycles the color filter instead of adjusting tone
   if (scrubState && scrubState.maxMove < 10) {
     filterStepIndex = (filterStepIndex + 1) % FILTER_STEPS.length;
-    const label = FILTER_STEPS[filterStepIndex].label;
-    const anchorName = label.split(' · ')[0];
+    const anchorName = FILTER_STEPS[filterStepIndex].label;
     filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === anchorName));
     updateIndicators();
     render();
@@ -1026,20 +1018,15 @@ function updateIndicators() {
   const cycles = toneCycles(stepIndex);
   setToneRings(cycles);
 
-  // filter rings: center square always stays ember; only the ring outlines
-  // change color, and ring count encodes intensity (1=light, 2=medium, 3=strong)
-  const f = FILTER_STEPS[filterStepIndex];
-  let colorName = 'standard', levelNum = 0;
-  if (f.label !== 'standard') {
-    const parts = f.label.split(' · ');
-    colorName = parts[0];
-    levelNum = INTENSITY_LABELS.indexOf(parts[1]) + 1; // 1, 2, or 3
+  // filter ring: center square always stays ember; the single thin ring
+  // shows/hides and changes color based on which filter is active
+  const colorName = FILTER_STEPS[filterStepIndex].label; // 'standard' | 'red' | 'green' | 'blue'
+  if (colorName === 'standard') {
+    filterRing1.setAttribute('opacity', '0');
+  } else {
+    filterRing1.setAttribute('stroke', FILTER_COLOR_HEX[colorName]);
+    filterRing1.setAttribute('opacity', '1');
   }
-  const hex = FILTER_COLOR_HEX[colorName];
-  [filterRing1, filterRing2, filterRing3].forEach(el => el.setAttribute('stroke', hex));
-  filterRing1.setAttribute('opacity', levelNum >= 1 ? '1' : '0');
-  filterRing2.setAttribute('opacity', levelNum >= 2 ? '1' : '0');
-  filterRing3.setAttribute('opacity', levelNum >= 3 ? '1' : '0');
 }
 
 invertBtn.onclick = () => {
@@ -1061,14 +1048,7 @@ patternBtn.onclick = () => {
 // color filter buttons — pre-grayscale channel weighting, like classic B&W film filters
 filterButtons.forEach(btn => {
   btn.onclick = () => {
-    const name = btn.dataset.filter;
-    if (name === 'standard') {
-      filterStepIndex = 0;
-    } else {
-      const anchorIdx = FILTER_ANCHORS.findIndex(a => a.name === name); // 1=red, 2=green, 3=blue
-      const blockStart = 1 + (anchorIdx - 1) * 3;
-      filterStepIndex = blockStart + 1; // jump to that color's "medium" intensity
-    }
+    filterStepIndex = FILTER_ANCHORS.findIndex(a => a.name === btn.dataset.filter);
     filterButtons.forEach(b => b.classList.toggle('active', b === btn));
     updateIndicators();
     if (naturalW) render();

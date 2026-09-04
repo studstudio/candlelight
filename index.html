@@ -1101,7 +1101,7 @@ previewWrap.addEventListener('touchend', () => {
     render();
   }
   scrubState = null;
-  scrubPillTimeout = setTimeout(() => scrubPill.classList.remove('visible'), 700);
+  scrubPillTimeout = setTimeout(() => scrubPill.classList.remove('visible'), 2100);
 });
 
 const FILTER_LINE_COLORS = { red: '#e2584a', green: '#5ec48f', blue: '#5b9fe0' };
@@ -1163,7 +1163,7 @@ filterButtons.forEach(btn => {
     updateIndicators();
     scrubPill.classList.add('visible');
     clearTimeout(scrubPillTimeout);
-    scrubPillTimeout = setTimeout(() => scrubPill.classList.remove('visible'), 700);
+    scrubPillTimeout = setTimeout(() => scrubPill.classList.remove('visible'), 2100);
     if (naturalW) render();
   };
 });

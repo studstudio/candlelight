@@ -12,16 +12,9 @@
      POSTCARD FONTS — 10 open-source fonts in /fonts, selectable via
      the small circular dial next to the message input.
      ============================================================ */
-  @font-face { font-family: 'BrunoAce'; src: url('./fonts/BrunoAce-Regular.ttf') format('truetype'); font-display: swap; }
-  @font-face { font-family: 'Format1452'; src: url('./fonts/Format_1452.otf') format('opentype'); font-display: swap; }
-  @font-face { font-family: 'FsInspira'; src: url('./fonts/FsInspira.ttf') format('truetype'); font-display: swap; }
   @font-face { font-family: 'GeistPixel'; src: url('./fonts/GeistPixel-Square.otf') format('opentype'); font-display: swap; }
-  @font-face { font-family: 'JetBrainsMono'; src: url('./fonts/JetBrainsMono-Regular.ttf') format('truetype'); font-display: swap; }
   @font-face { font-family: 'MW'; src: url('./fonts/MW-Regular.otf') format('opentype'); font-display: swap; }
   @font-face { font-family: 'NB'; src: url('./fonts/NB-Bold.otf') format('opentype'); font-display: swap; }
-  @font-face { font-family: 'XeDogma'; src: url('./fonts/XeDogmaRegular.ttf') format('truetype'); font-display: swap; }
-  @font-face { font-family: 'TerminalGrotesque'; src: url('./fonts/terminal-grotesque.ttf') format('truetype'); font-display: swap; }
-  @font-face { font-family: 'TerminalGrotesqueOpen'; src: url('./fonts/terminal-grotesque_open.otf') format('opentype'); font-display: swap; }
 
   :root {
     --bg: #14100d;
@@ -153,7 +146,7 @@
   .postcard-row { display: flex; gap: 8px; margin-top: 12px; }
   .postcard-row input[type=text] {
     flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
-    background: var(--bg-elevated); color: var(--cream); font-size: 13px;
+    background: var(--bg-elevated); color: var(--cream); font-size: 16px;
     font-family: inherit;
   }
   .postcard-row input[type=text]::placeholder { color: var(--cream-dim); opacity: 0.6; }
@@ -263,7 +256,7 @@
       <rect id="tonePip2" x="0" y="6"  width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
       <rect id="tonePip3" x="0" y="0"  width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
     </svg>
-    <svg id="filterIndicator" viewBox="0 0 6 23" width="4" height="20" style="margin-left:-8px;">
+    <svg id="filterIndicator" viewBox="0 0 6 23" width="4" height="20" style="margin-left:6px;">
       <!-- colored fill-line, sits flush against the bars — height always
            matches the current tone fill level, color swaps per active filter -->
       <rect id="filterFillLine" x="0" y="23" width="6" height="0" fill="#e2584a" opacity="0"></rect>
@@ -287,16 +280,9 @@
   </button>
   <button class="font-dial-btn" id="fontDialBtn" title="change font — drag around the dial">
     <svg viewBox="0 0 24 24" width="22" height="22">
-      <circle id="fontDot0" cx="12"   cy="4"    r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot1" cx="16.70" cy="5.53" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot2" cx="19.61" cy="9.53" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot3" cx="19.61" cy="14.47" r="2"   fill="var(--ember)" opacity="1"></circle>
-      <circle id="fontDot4" cx="16.70" cy="18.47" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot5" cx="12"   cy="20"    r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot6" cx="7.30" cy="18.47" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot7" cx="4.39" cy="14.47" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot8" cx="4.39" cy="9.53"  r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot9" cx="7.30" cy="5.53"  r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot0" cx="12"    cy="4"  r="2"   fill="var(--ember)" opacity="1"></circle>
+      <circle id="fontDot1" cx="18.93" cy="16" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot2" cx="5.07"  cy="16" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
     </svg>
   </button>
 </div>
@@ -379,7 +365,7 @@ const postcardInput = document.getElementById('postcardInput');
 const postcardPosBtn = document.getElementById('postcardPosBtn');
 const postcardPosIcon = document.getElementById('postcardPosIcon');
 const fontDialBtn = document.getElementById('fontDialBtn');
-const FONT_DOTS = [0,1,2,3,4,5,6,7,8,9].map(i => document.getElementById(`fontDot${i}`));
+const FONT_DOTS = [0,1,2].map(i => document.getElementById(`fontDot${i}`));
 const sendBtn = document.getElementById('sendBtn');
 const sendStatus = document.getElementById('sendStatus');
 const lastSeen = document.getElementById('lastSeen');
@@ -769,7 +755,7 @@ function render() {
     lctx.fillStyle = grad;
     lctx.fillRect(0, barY, boxWidth, barH);
 
-    lctx.fillStyle = 'rgba(75,75,75,0.9)'; // dark grey text; inverts to light grey (not stark white) via the existing invert step
+    lctx.fillStyle = 'rgba(35,35,35,0.95)'; // near-black for legibility; inverts to light grey via the existing invert step
     lctx.textAlign = 'left';
     lctx.textBaseline = 'middle';
     lctx.fillText(text, leftMargin, barY + barH / 2, maxTextWidth);
@@ -1007,12 +993,9 @@ let filterStepIndex = 0; // starts at 'standard'
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
-// order matches the 10 dots around the dial (dot0 at top, clockwise)
-const FONT_LIST = [
-  'BrunoAce', 'Format1452', 'FsInspira', 'GeistPixel', 'JetBrainsMono',
-  'MW', 'NB', 'XeDogma', 'TerminalGrotesque', 'TerminalGrotesqueOpen'
-];
-let selectedFontIndex = 3; // GeistPixel, the default
+// order matches the 3 dots around the dial (dot0 at top, clockwise)
+const FONT_LIST = ['GeistPixel', 'MW', 'NB'];
+let selectedFontIndex = 0; // GeistPixel, the default
 let gridMoireAmount = 0;   // 0..1
 let rippleMoireAmount = 0; // 0..1
 
@@ -1031,12 +1014,12 @@ function updateFontDots() {
 }
 
 // dial interaction: drag (or just tap) anywhere around the button and the
-// angle from center picks the nearest of the 10 dots — works as a genuine
+// angle from center picks the nearest of the 3 dots — works as a genuine
 // rotary drag or a single tap on the direction you want, same handler either way
 function angleToFontIndex(dx, dy) {
   const angleDeg = Math.atan2(dy, dx) * 180 / Math.PI; // -180..180, 0=right, clockwise positive (SVG y-down)
-  let idx = Math.round((angleDeg + 90) / 36); // dot0 sits at the top (-90°)
-  idx = ((idx % 10) + 10) % 10;
+  let idx = Math.round((angleDeg + 90) / 120); // dot0 sits at the top (-90°)
+  idx = ((idx % 3) + 3) % 3;
   return idx;
 }
 function updateFontFromTouch(touch) {
@@ -1191,6 +1174,18 @@ postcardInput.oninput = () => {
   postcardText = postcardInput.value;
   if (naturalW) render();
 };
+// Safari scrolls the focused input into view near the top of the visible
+// area above the keyboard, which pushes the preview out of frame. Let it do
+// its thing, then gently correct so the input sits lower and the preview
+// stays visible above it.
+postcardInput.addEventListener('focus', () => {
+  setTimeout(() => {
+    const rect = postcardInput.getBoundingClientRect();
+    const desiredTop = window.innerHeight * 0.35;
+    if (rect.top > desiredTop) return; // already fine, don't fight it unnecessarily
+    window.scrollBy({ top: rect.top - desiredTop, behavior: 'smooth' });
+  }, 300);
+});
 postcardPosBtn.onclick = () => {
   postcardPosition = postcardPosition === 'bottom' ? 'top' : 'bottom';
   postcardPosIcon.setAttribute('y', postcardPosition === 'bottom' ? '15' : '3');

@@ -9,22 +9,19 @@
 <title>Send to Lamp</title>
 <style>
   /* ============================================================
-     POSTCARD FONT: PangramPangram's "Mondwest" is the bitmap serif
-     shown in your reference images — free-to-try, but not something
-     that can be hotlinked from a CDN. To use it:
-     1. Download the free trial: https://pangrampangram.com/products/bitmap-fonts
-     2. Add the font file(s) to a /fonts folder in this repo
-     3. Update the src path(s) below to match the filename(s) you got
-     Until you do that, it falls back to Georgia/serif automatically —
-     nothing breaks either way.
+     POSTCARD FONTS — 10 open-source fonts in /fonts, selectable via
+     the small circular dial next to the message input.
      ============================================================ */
-  @font-face {
-    font-family: 'Mondwest';
-    src: url('./fonts/Mondwest-Regular.woff2') format('woff2'),
-         url('./fonts/Mondwest-Regular.otf') format('opentype');
-    font-weight: 400;
-    font-display: swap;
-  }
+  @font-face { font-family: 'BrunoAce'; src: url('./fonts/BrunoAce-Regular.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'Format1452'; src: url('./fonts/Format_1452.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'FsInspira'; src: url('./fonts/FsInspira.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'GeistPixel'; src: url('./fonts/GeistPixel-Square.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'JetBrainsMono'; src: url('./fonts/JetBrainsMono-Regular.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'MW'; src: url('./fonts/MW-Regular.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'NB'; src: url('./fonts/NB-Bold.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'XeDogma'; src: url('./fonts/XeDogmaRegular.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'TerminalGrotesque'; src: url('./fonts/terminal-grotesque.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'TerminalGrotesqueOpen'; src: url('./fonts/terminal-grotesque_open.otf') format('opentype'); font-display: swap; }
 
   :root {
     --bg: #14100d;
@@ -76,12 +73,11 @@
   .orient-btn-left { left: 8px; }
   .orient-btn-right { right: 8px; }
 
-  /* tone/filter indicator pill — pops up during scrub, sits in the photo's
-     fades out shortly after interaction ends, sits with the other buttons
-     below the preview rather than overlaid on the photo */
+  /* tone/filter indicator icons — fade in during scrub, out shortly after;
+     sit inline with the invert/pattern buttons, which stay always clickable */
   .scrub-pill {
-    display: flex; justify-content: flex-start; align-items: center; gap: 14px;
-    min-height: 34px; margin-top: 12px; padding-left: 4px;
+    display: flex; align-items: center;
+    min-height: 20px;
     opacity: 0; transition: opacity 0.2s; pointer-events: none;
   }
   .scrub-pill.visible { opacity: 1; }
@@ -146,6 +142,14 @@
 
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
+  .moire-row {
+    display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 0 2px;
+  }
+  .moire-label { font-size: 11px; color: var(--cream-dim); flex: 0 0 auto; }
+  .moire-row input[type=range] {
+    flex: 1; height: 22px; accent-color: var(--ember);
+  }
+
   .postcard-row { display: flex; gap: 8px; margin-top: 12px; }
   .postcard-row input[type=text] {
     flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
@@ -158,6 +162,13 @@
     border: 1px solid var(--line); background: var(--bg-elevated); color: var(--cream-dim);
     display: flex; align-items: center; justify-content: center;
   }
+  .font-dial-btn {
+    flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg-elevated);
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none;
+  }
+  .font-dial-btn circle { transition: opacity 0.15s, r 0.1s; }
 
   .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cream-dim); margin-bottom: 10px; }
   .contacts-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
@@ -244,25 +255,52 @@
   <canvas id="liveCanvas"></canvas>
 </div>
 
-<div class="scrub-pill" id="scrubPill">
-  <svg id="toneIndicator" viewBox="0 0 16 23" width="12" height="20">
-    <rect id="tonePip0" x="0" y="18" width="16" height="5" fill="var(--neutral-grey)"></rect>
-    <rect id="tonePip1" x="0" y="12" width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
-    <rect id="tonePip2" x="0" y="6"  width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
-    <rect id="tonePip3" x="0" y="0"  width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
-  </svg>
-  <svg id="filterIndicator" viewBox="0 0 32 32" width="28" height="28">
-    <!-- center square, always neutral grey -->
-    <rect x="11.5" y="11.5" width="9" height="9" fill="var(--neutral-grey)"></rect>
-    <!-- single line, left side only — color swaps per active filter -->
-    <line id="filterLine" x1="9" y1="11.5" x2="9" y2="20.5" stroke="#e2584a" stroke-width="1.4" opacity="0"></line>
-  </svg>
-</div>
-
-<div style="display:flex; justify-content:center; gap:8px; margin-top:14px;">
+<div style="display:flex; align-items:center; gap:10px; margin-top:14px;">
+  <div class="scrub-pill" id="scrubPill">
+    <svg id="toneIndicator" viewBox="0 0 16 23" width="12" height="20">
+      <rect id="tonePip0" x="0" y="18" width="16" height="5" fill="var(--neutral-grey)"></rect>
+      <rect id="tonePip1" x="0" y="12" width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
+      <rect id="tonePip2" x="0" y="6"  width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
+      <rect id="tonePip3" x="0" y="0"  width="16" height="5" fill="var(--neutral-grey)" opacity="0.15"></rect>
+    </svg>
+    <svg id="filterIndicator" viewBox="0 0 6 23" width="4" height="20" style="margin-left:-8px;">
+      <!-- colored fill-line, sits flush against the bars — height always
+           matches the current tone fill level, color swaps per active filter -->
+      <rect id="filterFillLine" x="0" y="23" width="6" height="0" fill="#e2584a" opacity="0"></rect>
+    </svg>
+  </div>
   <button class="pill" id="invertBtn">invert</button>
   <button class="pill" id="patternBtn">floyd–steinberg</button>
 </div>
+
+<div class="moire-row">
+  <span class="moire-label">grid</span>
+  <input type="range" id="gridMoireSlider" min="0" max="100" value="0">
+  <span class="moire-label">ripple</span>
+  <input type="range" id="rippleMoireSlider" min="0" max="100" value="0">
+</div>
+
+<div class="postcard-row">
+  <input type="text" id="postcardInput" placeholder="add a short message (optional)" maxlength="70">
+  <button class="postcard-pos-btn" id="postcardPosBtn" title="move message to top/bottom">
+    <svg viewBox="0 0 24 24" width="16" height="16"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="4.5" y="15" width="15" height="5.5" rx="1" fill="currentColor" id="postcardPosIcon"/></svg>
+  </button>
+  <button class="font-dial-btn" id="fontDialBtn" title="change font — drag around the dial">
+    <svg viewBox="0 0 24 24" width="22" height="22">
+      <circle id="fontDot0" cx="12"   cy="4"    r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot1" cx="16.70" cy="5.53" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot2" cx="19.61" cy="9.53" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot3" cx="19.61" cy="14.47" r="2"   fill="var(--ember)" opacity="1"></circle>
+      <circle id="fontDot4" cx="16.70" cy="18.47" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot5" cx="12"   cy="20"    r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot6" cx="7.30" cy="18.47" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot7" cx="4.39" cy="14.47" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot8" cx="4.39" cy="9.53"  r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot9" cx="7.30" cy="5.53"  r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+    </svg>
+  </button>
+</div>
+
 <div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
   <button class="pill filter-pill active" id="filterStandard" data-filter="standard">standard</button>
   <button class="pill filter-pill" id="filterRed" data-filter="red">red filter</button>
@@ -270,13 +308,6 @@
   <button class="pill filter-pill" id="filterBlue" data-filter="blue">blue filter</button>
 </div>
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading · tap preview to cycle filter</p>
-
-<div class="postcard-row">
-  <input type="text" id="postcardInput" placeholder="add a short message (optional)" maxlength="70">
-  <button class="postcard-pos-btn" id="postcardPosBtn" title="move message to top/bottom">
-    <svg viewBox="0 0 24 24" width="16" height="16"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="4.5" y="15" width="15" height="5.5" rx="1" fill="currentColor" id="postcardPosIcon"/></svg>
-  </button>
-</div>
 
 <hr class="divider">
 
@@ -340,13 +371,15 @@ const tonePip0 = document.getElementById('tonePip0');
 const tonePip1 = document.getElementById('tonePip1');
 const tonePip2 = document.getElementById('tonePip2');
 const tonePip3 = document.getElementById('tonePip3');
-const filterLine = document.getElementById('filterLine');
+const filterFillLine = document.getElementById('filterFillLine');
 const invertBtn = document.getElementById('invertBtn');
 const patternBtn = document.getElementById('patternBtn');
 const filterButtons = document.querySelectorAll('.filter-pill');
 const postcardInput = document.getElementById('postcardInput');
 const postcardPosBtn = document.getElementById('postcardPosBtn');
 const postcardPosIcon = document.getElementById('postcardPosIcon');
+const fontDialBtn = document.getElementById('fontDialBtn');
+const FONT_DOTS = [0,1,2,3,4,5,6,7,8,9].map(i => document.getElementById(`fontDot${i}`));
 const sendBtn = document.getElementById('sendBtn');
 const sendStatus = document.getElementById('sendStatus');
 const lastSeen = document.getElementById('lastSeen');
@@ -716,10 +749,8 @@ function render() {
     const leftMargin = 0; // starts at the very edge, no padding
     const maxTextWidth = W; // can span the full canvas width if the text is long enough
 
-    // "Mondwest" is PangramPangram's bitmap serif — add the trial font files to
-    // /fonts on your GitHub repo (see @font-face above) and it'll be used
-    // automatically; falls back to a plain serif until then
-    lctx.font = `${fontSize}px 'Mondwest', Georgia, 'Times New Roman', serif`;
+    // font chosen via the circular dial next to the message input
+    lctx.font = `${fontSize}px '${FONT_LIST[selectedFontIndex]}', Georgia, serif`;
 
     const naturalWidth = lctx.measureText(text).width;
     const boxWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long, no extra padding
@@ -738,7 +769,7 @@ function render() {
     lctx.fillStyle = grad;
     lctx.fillRect(0, barY, boxWidth, barH);
 
-    lctx.fillStyle = 'rgba(20,20,20,0.9)'; // dark text for contrast against light grey
+    lctx.fillStyle = 'rgba(75,75,75,0.9)'; // dark grey text; inverts to light grey (not stark white) via the existing invert step
     lctx.textAlign = 'left';
     lctx.textBaseline = 'middle';
     lctx.fillText(text, leftMargin, barY + barH / 2, maxTextWidth);
@@ -750,6 +781,32 @@ function render() {
   const gray = new Float32Array(W*H);
   const fw = FILTER_STEPS[filterStepIndex];
   for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
+
+  // grid/ripple moiré: overlay a periodic luminance pattern BEFORE dithering.
+  // Since the dither patterns are themselves periodic, this creates genuine
+  // interference beats baked into the actual pixel data — the same effect
+  // you saw by accident when Safari scaled the canvas at a non-integer ratio.
+  if (gridMoireAmount > 0 || rippleMoireAmount > 0) {
+    const AMPLITUDE = 55;
+    const GRID_WAVELENGTH = 4;
+    const RIPPLE_WAVELENGTH = 6;
+    const cx = W / 2, cy = H / 2;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        if (gridMoireAmount > 0) {
+          const g = Math.sin(2 * Math.PI * x / GRID_WAVELENGTH) * Math.sin(2 * Math.PI * y / GRID_WAVELENGTH);
+          gray[idx] += gridMoireAmount * AMPLITUDE * g;
+        }
+        if (rippleMoireAmount > 0) {
+          const dist = Math.hypot(x - cx, y - cy);
+          const r = Math.sin(2 * Math.PI * dist / RIPPLE_WAVELENGTH);
+          gray[idx] += rippleMoireAmount * AMPLITUDE * r;
+        }
+        gray[idx] = Math.max(0, Math.min(255, gray[idx]));
+      }
+    }
+  }
 
   // apply the current step's full tone curve — black/white point, then
   // shadow/highlight shaping, then contrast — before quantizing. This is what
@@ -950,6 +1007,63 @@ let filterStepIndex = 0; // starts at 'standard'
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
+// order matches the 10 dots around the dial (dot0 at top, clockwise)
+const FONT_LIST = [
+  'BrunoAce', 'Format1452', 'FsInspira', 'GeistPixel', 'JetBrainsMono',
+  'MW', 'NB', 'XeDogma', 'TerminalGrotesque', 'TerminalGrotesqueOpen'
+];
+let selectedFontIndex = 3; // GeistPixel, the default
+let gridMoireAmount = 0;   // 0..1
+let rippleMoireAmount = 0; // 0..1
+
+function updateFontDots() {
+  FONT_DOTS.forEach((el, i) => {
+    if (i === selectedFontIndex) {
+      el.setAttribute('fill', 'var(--ember)');
+      el.setAttribute('opacity', '1');
+      el.setAttribute('r', '2');
+    } else {
+      el.setAttribute('fill', 'var(--cream-dim)');
+      el.setAttribute('opacity', '0.4');
+      el.setAttribute('r', '1.6');
+    }
+  });
+}
+
+// dial interaction: drag (or just tap) anywhere around the button and the
+// angle from center picks the nearest of the 10 dots — works as a genuine
+// rotary drag or a single tap on the direction you want, same handler either way
+function angleToFontIndex(dx, dy) {
+  const angleDeg = Math.atan2(dy, dx) * 180 / Math.PI; // -180..180, 0=right, clockwise positive (SVG y-down)
+  let idx = Math.round((angleDeg + 90) / 36); // dot0 sits at the top (-90°)
+  idx = ((idx % 10) + 10) % 10;
+  return idx;
+}
+function updateFontFromTouch(touch) {
+  const rect = fontDialBtn.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+  const idx = angleToFontIndex(touch.clientX - cx, touch.clientY - cy);
+  if (idx !== selectedFontIndex) {
+    selectedFontIndex = idx;
+    updateFontDots();
+    if (naturalW) render();
+  }
+}
+let fontDragActive = false;
+fontDialBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  fontDragActive = true;
+  updateFontFromTouch(e.touches[0]);
+}, { passive: false });
+fontDialBtn.addEventListener('touchmove', (e) => {
+  if (!fontDragActive) return;
+  e.preventDefault();
+  updateFontFromTouch(e.touches[0]);
+}, { passive: false });
+fontDialBtn.addEventListener('touchend', () => { fontDragActive = false; });
+updateFontDots(); // sync visuals to the default selection on load
+
+
 // 4 pip dots. The first is always solid (the baseline starting state); the
 // remaining 3 fill in — one per gray-level tier (2/3/4 gray) — as you scrub.
 // Each fills smoothly (not a hard snap) proportional to progress through its
@@ -1009,19 +1123,25 @@ previewWrap.addEventListener('touchend', () => {
 
 const FILTER_LINE_COLORS = { red: '#e2584a', green: '#5ec48f', blue: '#5b9fe0' };
 function updateIndicators() {
-  // tone rings: quarter-arc per gray-level tier, sweeps as you scrub through
-  // that tier and freezes once passed — neutral grey throughout
+  // tone bars: 4 stacked bars, bottom one always on, the rest fill upward
+  // one per gray-level tier as you scrub
   const cycles = toneCycles(stepIndex);
   setToneRings(cycles);
 
-  // filter: single line, same left-side position for every color — only its
-  // color and visibility change; standard shows nothing
+  // filter fill-line: sits flush against the bar stack, its height always
+  // matches the current tone fill level (same 1-of-4 baseline + progressive
+  // fill), color swaps per active filter, hidden entirely for standard
+  const STACK_HEIGHT = 23;
+  const fillFrac = Math.min(1, (1 + cycles) / 4);
+  const lineHeight = STACK_HEIGHT * fillFrac;
   const colorName = FILTER_STEPS[filterStepIndex].label; // 'standard' | 'red' | 'green' | 'blue'
   if (colorName === 'standard') {
-    filterLine.setAttribute('opacity', '0');
+    filterFillLine.setAttribute('opacity', '0');
   } else {
-    filterLine.setAttribute('stroke', FILTER_LINE_COLORS[colorName]);
-    filterLine.setAttribute('opacity', '1');
+    filterFillLine.setAttribute('fill', FILTER_LINE_COLORS[colorName]);
+    filterFillLine.setAttribute('height', `${lineHeight}`);
+    filterFillLine.setAttribute('y', `${STACK_HEIGHT - lineHeight}`);
+    filterFillLine.setAttribute('opacity', '1');
   }
 }
 
@@ -1038,6 +1158,17 @@ patternBtn.onclick = () => {
   const i = PATTERN_ORDER.indexOf(ditherPattern);
   ditherPattern = PATTERN_ORDER[(i + 1) % PATTERN_ORDER.length];
   patternBtn.textContent = PATTERN_LABELS[ditherPattern];
+  if (naturalW) render();
+};
+
+const gridMoireSlider = document.getElementById('gridMoireSlider');
+const rippleMoireSlider = document.getElementById('rippleMoireSlider');
+gridMoireSlider.oninput = () => {
+  gridMoireAmount = gridMoireSlider.value / 100;
+  if (naturalW) render();
+};
+rippleMoireSlider.oninput = () => {
+  rippleMoireAmount = rippleMoireSlider.value / 100;
   if (naturalW) render();
 };
 
@@ -1141,12 +1272,10 @@ renderContacts();
 liveCanvas.width = targetW; liveCanvas.height = targetH;
 updateIndicators(); // sync the ring indicators to the default state
 
-// canvas text doesn't auto-refresh when a web font finishes loading, so once
-// (if) the real Mondwest font files are added and load successfully, force
-// a re-render to pick it up. Fails silently and harmlessly if not present.
-document.fonts.load("16px 'Mondwest'").then(() => {
-  if (document.fonts.check("16px 'Mondwest'") && naturalW) render();
-}).catch(() => {});
+// canvas text doesn't auto-refresh when web fonts finish loading, so once
+// they're all ready, force a re-render to pick up the real typefaces
+// instead of whatever fallback was showing during the brief load window
+document.fonts.ready.then(() => { if (naturalW) render(); });
 
 </script>
 

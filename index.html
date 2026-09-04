@@ -136,9 +136,9 @@
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
   .moire-row {
-    display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 0 2px;
+    display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 0 2px;
   }
-  .moire-label { font-size: 11px; color: var(--cream-dim); flex: 0 0 auto; }
+  .moire-label { font-size: 11px; color: var(--cream-dim); flex: 0 0 44px; }
   .moire-row input[type=range] {
     flex: 1; height: 22px; accent-color: var(--ember);
   }
@@ -266,12 +266,12 @@
   <button class="pill" id="patternBtn">floyd–steinberg</button>
 </div>
 
-<div class="moire-row">
-  <span class="moire-label">grid</span>
-  <input type="range" id="gridMoireSlider" min="0" max="100" value="0">
-  <span class="moire-label">ripple</span>
-  <input type="range" id="rippleMoireSlider" min="0" max="100" value="0">
-</div>
+<div class="moire-row"><span class="moire-label">grid</span><input type="range" id="gridSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">hatch</span><input type="range" id="hatchSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">scan</span><input type="range" id="scanSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">grain</span><input type="range" id="grainSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">spiral</span><input type="range" id="spiralSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">chroma</span><input type="range" id="chromaSlider" min="0" max="100" value="0"></div>
 
 <div class="postcard-row">
   <input type="text" id="postcardInput" placeholder="add a short message (optional)" maxlength="70">
@@ -766,28 +766,68 @@ function render() {
   const data = imgData.data;
   const gray = new Float32Array(W*H);
   const fw = FILTER_STEPS[filterStepIndex];
-  for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
 
-  // grid/ripple moiré: overlay a periodic luminance pattern BEFORE dithering.
-  // Since the dither patterns are themselves periodic, this creates genuine
-  // interference beats baked into the actual pixel data — the same effect
-  // you saw by accident when Safari scaled the canvas at a non-integer ratio.
-  if (gridMoireAmount > 0 || rippleMoireAmount > 0) {
+  // chromatic drift: sample R and B from horizontally offset positions
+  // before combining into grayscale — on contrast edges this creates ghostly
+  // fringing, like a VHS tracking error, once it hits the dither pass
+  const chromaShift = Math.round(chromaAmount * 4);
+  function sampleChannel(x, y, channel) {
+    x = Math.max(0, Math.min(W - 1, x));
+    y = Math.max(0, Math.min(H - 1, y));
+    return data[(y * W + x) * 4 + channel];
+  }
+  if (chromaShift > 0) {
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        const rVal = sampleChannel(x - chromaShift, y, 0);
+        const gVal = sampleChannel(x, y, 1);
+        const bVal = sampleChannel(x + chromaShift, y, 2);
+        gray[idx] = fw.r * rVal + fw.g * gVal + fw.b * bVal;
+      }
+    }
+  } else {
+    for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
+  }
+
+  // pre-dither texture effects: each overlays a pattern onto the luminance
+  // data BEFORE quantizing. The periodic ones (grid/hatch/scan/spiral)
+  // interfere with the dither pattern's own periodicity to create genuine
+  // moiré beats; grain is random rather than periodic, breaking up flat
+  // gradients organically instead of geometrically.
+  if (gridAmount > 0 || hatchAmount > 0 || scanAmount > 0 || spiralAmount > 0 || grainAmount > 0) {
     const AMPLITUDE = 55;
     const GRID_WAVELENGTH = 4;
-    const RIPPLE_WAVELENGTH = 6;
+    const HATCH_WAVELENGTH = 5;
+    const SCAN_WAVELENGTH = 4;
+    const SPIRAL_ARMS = 6;
+    const SPIRAL_RADIAL_WAVELENGTH = 8;
     const cx = W / 2, cy = H / 2;
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const idx = y * W + x;
-        if (gridMoireAmount > 0) {
+        if (gridAmount > 0) {
           const g = Math.sin(2 * Math.PI * x / GRID_WAVELENGTH) * Math.sin(2 * Math.PI * y / GRID_WAVELENGTH);
-          gray[idx] += gridMoireAmount * AMPLITUDE * g;
+          gray[idx] += gridAmount * AMPLITUDE * g;
         }
-        if (rippleMoireAmount > 0) {
-          const dist = Math.hypot(x - cx, y - cy);
-          const r = Math.sin(2 * Math.PI * dist / RIPPLE_WAVELENGTH);
-          gray[idx] += rippleMoireAmount * AMPLITUDE * r;
+        if (hatchAmount > 0) {
+          const proj = (x + y) / Math.SQRT2; // 45° diagonal projection
+          const h = Math.sin(2 * Math.PI * proj / HATCH_WAVELENGTH);
+          gray[idx] += hatchAmount * AMPLITUDE * h;
+        }
+        if (scanAmount > 0) {
+          const s = Math.sin(2 * Math.PI * y / SCAN_WAVELENGTH); // horizontal-only, no x term
+          gray[idx] += scanAmount * AMPLITUDE * s;
+        }
+        if (spiralAmount > 0) {
+          const dx = x - cx, dy = y - cy;
+          const angle = Math.atan2(dy, dx);
+          const radius = Math.hypot(dx, dy);
+          const sp = Math.sin(SPIRAL_ARMS * angle + radius / SPIRAL_RADIAL_WAVELENGTH);
+          gray[idx] += spiralAmount * AMPLITUDE * sp;
+        }
+        if (grainAmount > 0) {
+          gray[idx] += grainAmount * AMPLITUDE * (Math.random() * 2 - 1);
         }
         gray[idx] = Math.max(0, Math.min(255, gray[idx]));
       }
@@ -996,8 +1036,12 @@ let postcardPosition = 'bottom'; // 'top' | 'bottom'
 // order matches the 3 dots around the dial (dot0 at top, clockwise)
 const FONT_LIST = ['GeistPixel', 'MW', 'NB'];
 let selectedFontIndex = 0; // GeistPixel, the default
-let gridMoireAmount = 0;   // 0..1
-let rippleMoireAmount = 0; // 0..1
+let gridAmount = 0;    // 0..1 — 2D periodic grid, interferes with dither patterns
+let hatchAmount = 0;   // 0..1 — diagonal single-axis wave, crosshatch/engraving feel
+let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
+let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
+let spiralAmount = 0;  // 0..1 — angle+radius wave, rotating pinwheel interference
+let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
 
 function updateFontDots() {
   FONT_DOTS.forEach((el, i) => {
@@ -1144,16 +1188,21 @@ patternBtn.onclick = () => {
   if (naturalW) render();
 };
 
-const gridMoireSlider = document.getElementById('gridMoireSlider');
-const rippleMoireSlider = document.getElementById('rippleMoireSlider');
-gridMoireSlider.oninput = () => {
-  gridMoireAmount = gridMoireSlider.value / 100;
-  if (naturalW) render();
-};
-rippleMoireSlider.oninput = () => {
-  rippleMoireAmount = rippleMoireSlider.value / 100;
-  if (naturalW) render();
-};
+const EFFECT_SLIDERS = [
+  { id: 'gridSlider', setter: v => gridAmount = v },
+  { id: 'hatchSlider', setter: v => hatchAmount = v },
+  { id: 'scanSlider', setter: v => scanAmount = v },
+  { id: 'grainSlider', setter: v => grainAmount = v },
+  { id: 'spiralSlider', setter: v => spiralAmount = v },
+  { id: 'chromaSlider', setter: v => chromaAmount = v }
+];
+EFFECT_SLIDERS.forEach(({ id, setter }) => {
+  const el = document.getElementById(id);
+  el.oninput = () => {
+    setter(el.value / 100);
+    if (naturalW) render();
+  };
+});
 
 // color filter buttons — pre-grayscale channel weighting, like classic B&W film filters
 filterButtons.forEach(btn => {

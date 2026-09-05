@@ -1282,24 +1282,29 @@ postcardInput.oninput = () => {
   if (naturalW) render();
 };
 // Safari's own keyboard-avoidance scroll often overshoots badly, burying the
-// preview below the fold. 'nearest' alone doesn't fix this because Safari
-// already considers the input "visible" by then. Instead, actively pull the
-// page back up so the input sits right at the bottom of the actual visible
-// area (accounting for the keyboard via visualViewport), which keeps the
-// maximum amount of content — including the preview — visible above it.
+// preview below the fold, and its timing is unpredictable — it can happen
+// later than any single timeout, or fire more than once during the keyboard's
+// animation. Rather than guess when to correct once, keep re-asserting the
+// desired position every frame for just over a second after focus, using
+// instant (non-smooth) scrolls so repeated calls don't stack animations.
 function pinInputAboveKeyboard() {
   if (document.activeElement !== postcardInput) return;
   const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
   const rect = postcardInput.getBoundingClientRect();
   const overflow = rect.bottom - vh;
   if (overflow > 5) {
-    window.scrollBy({ top: overflow, behavior: 'smooth' });
+    window.scrollBy({ top: overflow, behavior: 'auto' });
   } else if (rect.top < 0) {
-    window.scrollBy({ top: rect.top, behavior: 'smooth' });
+    window.scrollBy({ top: rect.top, behavior: 'auto' });
   }
 }
 postcardInput.addEventListener('focus', () => {
-  setTimeout(pinInputAboveKeyboard, 350);
+  const start = performance.now();
+  function loop() {
+    pinInputAboveKeyboard();
+    if (performance.now() - start < 1200) requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
 });
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', pinInputAboveKeyboard);

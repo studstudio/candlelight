@@ -47,6 +47,13 @@
     font-size: 13px; font-weight: 500; letter-spacing: 0.03em; color: var(--cream-dim);
     text-align: center; margin: 0 0 12px; text-transform: lowercase;
   }
+  /* keeps the photo + preview pinned to the top of the viewport regardless of
+     how far the page scrolls when the keyboard opens for the text input —
+     sidesteps fighting Safari's unpredictable auto-scroll timing entirely */
+  .sticky-preview {
+    position: sticky; top: 0; z-index: 30;
+    background: var(--bg); padding-top: 2px;
+  }
   .footer-row { text-align: center; opacity: 0.85; }
   h3 { font-size: 12px; font-weight: 600; color: var(--cream-dim); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; }
 
@@ -238,6 +245,7 @@
 </head>
 <body>
 
+<div class="sticky-preview">
 <div class="photo-wrap" id="photoWrap">
   <img id="sourceImg" src="" style="display:none;">
   <div class="empty-state" id="emptyState">
@@ -268,6 +276,7 @@
 </div>
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
+</div>
 </div>
 
 <div style="display:flex; align-items:center; gap:10px; margin-top:14px;">
@@ -1281,34 +1290,9 @@ postcardInput.oninput = () => {
   postcardText = postcardInput.value;
   if (naturalW) render();
 };
-// Safari's own keyboard-avoidance scroll often overshoots badly, burying the
-// preview below the fold, and its timing is unpredictable — it can happen
-// later than any single timeout, or fire more than once during the keyboard's
-// animation. Rather than guess when to correct once, keep re-asserting the
-// desired position every frame for just over a second after focus, using
-// instant (non-smooth) scrolls so repeated calls don't stack animations.
-function pinInputAboveKeyboard() {
-  if (document.activeElement !== postcardInput) return;
-  const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-  const rect = postcardInput.getBoundingClientRect();
-  const overflow = rect.bottom - vh;
-  if (overflow > 5) {
-    window.scrollBy({ top: overflow, behavior: 'auto' });
-  } else if (rect.top < 0) {
-    window.scrollBy({ top: rect.top, behavior: 'auto' });
-  }
-}
-postcardInput.addEventListener('focus', () => {
-  const start = performance.now();
-  function loop() {
-    pinInputAboveKeyboard();
-    if (performance.now() - start < 1200) requestAnimationFrame(loop);
-  }
-  requestAnimationFrame(loop);
-});
-if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', pinInputAboveKeyboard);
-}
+// The preview is kept visible via CSS position:sticky (see .sticky-preview)
+// rather than fighting Safari's unpredictable keyboard-avoidance scroll timing
+// in JS — that approach kept overshooting and caused janky double-scrolling.
 postcardPosBtn.onclick = () => {
   postcardPosition = postcardPosition === 'bottom' ? 'top' : 'bottom';
   postcardPosIcon.setAttribute('y', postcardPosition === 'bottom' ? '15' : '3');

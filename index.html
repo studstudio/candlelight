@@ -33,9 +33,11 @@
     --fail: #c46a5f;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html { background-color: var(--bg); }
   body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    background: radial-gradient(ellipse at top, #1c150f 0%, var(--bg) 60%);
+    background-color: var(--bg);
+    background-image: radial-gradient(ellipse at top, #1c150f 0%, var(--bg) 60%);
     color: var(--cream);
     margin: 0;
     padding: 12px 18px 40px;
@@ -133,7 +135,7 @@
     max-width: 100%; height: auto; display: block;
     image-rendering: pixelated;
     image-rendering: -webkit-optimize-contrast;
-    background: #fff;
+    background: #000;
   }
 
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
@@ -143,7 +145,17 @@
   }
   .moire-label { font-size: 11px; color: var(--cream-dim); flex: 0 0 44px; }
   .moire-row input[type=range] {
-    flex: 1; height: 22px; accent-color: var(--ember);
+    flex: 1; height: 22px; accent-color: var(--neutral-grey);
+    -webkit-appearance: none; appearance: none; background: transparent;
+  }
+  .moire-row input[type=range]::-webkit-slider-runnable-track {
+    height: 3px; border-radius: 2px; background: var(--line);
+  }
+  .moire-row input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--neutral-grey); border: none;
+    margin-top: -6.5px;
   }
 
   .postcard-row { display: flex; gap: 8px; margin-top: 12px; }
@@ -1260,16 +1272,14 @@ postcardInput.oninput = () => {
   postcardText = postcardInput.value;
   if (naturalW) render();
 };
-// Safari scrolls the focused input into view near the top of the visible
-// area above the keyboard, which pushes the preview out of frame. Let it do
-// its thing, then gently correct so the input sits lower and the preview
-// stays visible above it.
+// Safari scrolls the focused input into view, often overshooting and pushing
+// the preview out of frame. Correct afterward using 'nearest' alignment,
+// which moves the minimum distance needed to reveal the input rather than
+// centering or aligning it — keeping as much of the page (the preview)
+// visible above it as possible.
 postcardInput.addEventListener('focus', () => {
   setTimeout(() => {
-    const rect = postcardInput.getBoundingClientRect();
-    const desiredTop = window.innerHeight * 0.35;
-    if (rect.top > desiredTop) return; // already fine, don't fight it unnecessarily
-    window.scrollBy({ top: rect.top - desiredTop, behavior: 'smooth' });
+    postcardInput.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, 300);
 });
 postcardPosBtn.onclick = () => {

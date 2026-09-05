@@ -68,8 +68,9 @@
     z-index: 6;
   }
   .orient-btn.active { background: var(--ember); border-color: var(--ember); color: #1a1108; }
-  .orient-btn-left { left: 8px; }
+  .orient-btn-left { left: 8px; top: 8px; transform: none; }
   .orient-btn-right { right: 8px; }
+  .replace-photo-btn { left: 8px; top: 46px; transform: none; }
 
   /* tone/filter indicator icons — fade in during scrub, out shortly after;
      sit inline with the invert/pattern buttons, which stay always clickable */
@@ -257,6 +258,12 @@
   </button>
   <button class="orient-btn orient-btn-right" id="btnPortrait" title="portrait">
     <svg viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="2" width="12" height="20" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+  </button>
+  <button class="orient-btn replace-photo-btn" id="replacePhotoBtn" title="replace photo">
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+      <path d="M21 4v5h-5"/>
+    </svg>
   </button>
 </div>
 <div class="preview-wrap" id="previewWrap">
@@ -549,6 +556,8 @@ btnPortrait.onclick = () => setOrientation(false);
 
 // ---------- photo load ----------
 tapTarget.onclick = () => fileInput.click();
+const replacePhotoBtn = document.getElementById('replacePhotoBtn');
+replacePhotoBtn.onclick = () => fileInput.click();
 fileInput.onchange = (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -1272,16 +1281,29 @@ postcardInput.oninput = () => {
   postcardText = postcardInput.value;
   if (naturalW) render();
 };
-// Safari scrolls the focused input into view, often overshooting and pushing
-// the preview out of frame. Correct afterward using 'nearest' alignment,
-// which moves the minimum distance needed to reveal the input rather than
-// centering or aligning it — keeping as much of the page (the preview)
-// visible above it as possible.
+// Safari's own keyboard-avoidance scroll often overshoots badly, burying the
+// preview below the fold. 'nearest' alone doesn't fix this because Safari
+// already considers the input "visible" by then. Instead, actively pull the
+// page back up so the input sits right at the bottom of the actual visible
+// area (accounting for the keyboard via visualViewport), which keeps the
+// maximum amount of content — including the preview — visible above it.
+function pinInputAboveKeyboard() {
+  if (document.activeElement !== postcardInput) return;
+  const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  const rect = postcardInput.getBoundingClientRect();
+  const overflow = rect.bottom - vh;
+  if (overflow > 5) {
+    window.scrollBy({ top: overflow, behavior: 'smooth' });
+  } else if (rect.top < 0) {
+    window.scrollBy({ top: rect.top, behavior: 'smooth' });
+  }
+}
 postcardInput.addEventListener('focus', () => {
-  setTimeout(() => {
-    postcardInput.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }, 300);
+  setTimeout(pinInputAboveKeyboard, 350);
 });
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', pinInputAboveKeyboard);
+}
 postcardPosBtn.onclick = () => {
   postcardPosition = postcardPosition === 'bottom' ? 'top' : 'bottom';
   postcardPosIcon.setAttribute('y', postcardPosition === 'bottom' ? '15' : '3');

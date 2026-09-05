@@ -12,13 +12,12 @@
      POSTCARD FONTS — 10 open-source fonts in /fonts, selectable via
      the small circular dial next to the message input.
      ============================================================ */
-  @font-face { font-family: 'GeistPixel'; src: url('./fonts/GeistPixel-Square.otf') format('opentype'); font-display: swap; }
-  @font-face { font-family: 'MW'; src: url('./fonts/MW-Regular.otf') format('opentype'); font-display: swap; }
-  @font-face { font-family: 'NB'; src: url('./fonts/NB-Bold.otf') format('opentype'); font-display: swap; }
-  @font-face { font-family: 'RegentUNZ'; src: url('./fonts/Regent UNZ.ttf') format('truetype'); font-display: swap; }
   @font-face { font-family: 'Pixelcastle'; src: url('./fonts/Pixelcastle.otf') format('opentype'); font-display: swap; }
-  @font-face { font-family: 'JacquardaBastard'; src: url('./fonts/Jacquarda Bastard Regular.ttf') format('truetype'); font-display: swap; }
   @font-face { font-family: 'Trathnona'; src: url('./fonts/Trathnona-Regular.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'BasteleurBold'; src: url('./fonts/Basteleur-Bold.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'BasteleurMoonlight'; src: url('./fonts/Basteleur-Moonlight.ttf') format('truetype'); font-display: swap; }
+  @font-face { font-family: 'VG5000'; src: url('./fonts/VG5000-Regular.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'ChaumontScript'; src: url('./fonts/Chaumont_script-Regular.otf') format('opentype'); font-display: swap; }
 
   :root {
     --bg: #14100d;
@@ -277,13 +276,12 @@
   </button>
   <button class="font-dial-btn" id="fontDialBtn" title="tap to cycle font">
     <svg viewBox="0 0 24 24" width="22" height="22">
-      <circle id="fontDot0" cx="12"   cy="4"    r="2"   fill="var(--ember)" opacity="1"></circle>
-      <circle id="fontDot1" cx="18.25" cy="7.01" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot2" cx="19.80" cy="13.78" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot3" cx="15.47" cy="19.21" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot4" cx="8.53"  cy="19.21" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot5" cx="4.20"  cy="13.78" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      <circle id="fontDot6" cx="5.75"  cy="7.01"  r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot0" cx="12"   cy="4"  r="2"   fill="var(--ember)" opacity="1"></circle>
+      <circle id="fontDot1" cx="18.93" cy="8" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot2" cx="18.93" cy="16" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot3" cx="12"   cy="20" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot4" cx="5.07" cy="16" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
+      <circle id="fontDot5" cx="5.07" cy="8"  r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
     </svg>
   </button>
 </div>
@@ -293,7 +291,9 @@
 <div class="moire-row"><span class="moire-label">scan</span><input type="range" id="scanSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">grain</span><input type="range" id="grainSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">chroma</span><input type="range" id="chromaSlider" min="0" max="100" value="0"></div>
-<p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: GeistPixel</p>
+<div class="moire-row"><span class="moire-label">relief</span><input type="range" id="reliefSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">tunnel</span><input type="range" id="tunnelSlider" min="0" max="100" value="0"></div>
+<p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
   <button class="pill filter-pill active" id="filterStandard" data-filter="standard">standard</button>
@@ -373,7 +373,7 @@ const postcardInput = document.getElementById('postcardInput');
 const postcardPosBtn = document.getElementById('postcardPosBtn');
 const postcardPosIcon = document.getElementById('postcardPosIcon');
 const fontDialBtn = document.getElementById('fontDialBtn');
-const FONT_DOTS = [0,1,2,3,4,5,6].map(i => document.getElementById(`fontDot${i}`));
+const FONT_DOTS = [0,1,2,3,4,5].map(i => document.getElementById(`fontDot${i}`));
 const activeFontLabel = document.getElementById('activeFontLabel');
 const sendBtn = document.getElementById('sendBtn');
 const sendStatus = document.getElementById('sendStatus');
@@ -805,16 +805,52 @@ function render() {
     for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
   }
 
+  // tunnel warp: a genuine spatial remap based on distance from center — pixels
+  // near the border sample from progressively closer to the middle, stretching
+  // outer content outward for a fisheye/vortex tunnel-vision look. Text stays
+  // untouched (rows inside the postcard bar keep their original, unwarped values).
+  if (tunnelAmount > 0) {
+    const warped = new Float32Array(W * H);
+    const cx = W / 2, cy = H / 2;
+    const maxR = Math.hypot(cx, cy);
+    const exponent = 1 + tunnelAmount * 2.5;
+    for (let y = 0; y < H; y++) {
+      const inTextBar = textBarTop !== null && y >= textBarTop && y < textBarBottom;
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        if (inTextBar) { warped[idx] = gray[idx]; continue; }
+        const dx = x - cx, dy = y - cy;
+        const r = Math.hypot(dx, dy);
+        if (r === 0) { warped[idx] = gray[idx]; continue; }
+        const rn = r / maxR;
+        const scale = Math.pow(rn, exponent) / rn;
+        let sx = Math.round(cx + dx * scale);
+        let sy = Math.round(cy + dy * scale);
+        sx = Math.max(0, Math.min(W - 1, sx));
+        sy = Math.max(0, Math.min(H - 1, sy));
+        warped[idx] = gray[sy * W + sx];
+      }
+    }
+    gray.set(warped);
+  }
+
   // pre-dither texture effects: each overlays a pattern onto the luminance
   // data BEFORE quantizing. The periodic ones (grid/hatch/scan) interfere
   // with the dither pattern's own periodicity to create genuine moiré beats;
   // grain is random rather than periodic, breaking up flat gradients
-  // organically instead of geometrically.
-  if (gridAmount > 0 || hatchAmount > 0 || scanAmount > 0 || grainAmount > 0) {
+  // organically instead of geometrically; relief simulates a raking light
+  // source across the luminance gradient, giving edges a pushed-out/carved
+  // "3D" look (classic bump-mapping technique).
+  if (gridAmount > 0 || hatchAmount > 0 || scanAmount > 0 || grainAmount > 0 || reliefAmount > 0) {
     const AMPLITUDE = 55;
     const GRID_WAVELENGTH = 4;
     const HATCH_WAVELENGTH = 5;
     const SCAN_WAVELENGTH = 4;
+    const RELIEF_SCALE = 2.5;
+    const LIGHT_ANGLE = -45 * Math.PI / 180; // light from upper-left
+    const lx = Math.cos(LIGHT_ANGLE), ly = Math.sin(LIGHT_ANGLE);
+    const baseGray = reliefAmount > 0 ? gray.slice() : null; // gradients read from the pre-effects snapshot
+
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const idx = y * W + x;
@@ -833,6 +869,14 @@ function render() {
         }
         if (grainAmount > 0) {
           gray[idx] += grainAmount * AMPLITUDE * (Math.random() * 2 - 1);
+        }
+        if (reliefAmount > 0) {
+          const xL = x > 0 ? x - 1 : 0, xR = x < W - 1 ? x + 1 : W - 1;
+          const yU = y > 0 ? y - 1 : 0, yD = y < H - 1 ? y + 1 : H - 1;
+          const gx = baseGray[y * W + xR] - baseGray[y * W + xL];
+          const gy = baseGray[yD * W + x] - baseGray[yU * W + x];
+          const relief = gx * lx + gy * ly; // directional derivative along the light vector
+          gray[idx] += reliefAmount * RELIEF_SCALE * relief;
         }
         gray[idx] = Math.max(0, Math.min(255, gray[idx]));
       }
@@ -1039,13 +1083,15 @@ let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
 // order matches the 7 dots around the dial (dot0 at top, clockwise)
-const FONT_LIST = ['GeistPixel', 'MW', 'NB', 'RegentUNZ', 'Pixelcastle', 'JacquardaBastard', 'Trathnona'];
-let selectedFontIndex = 0; // GeistPixel, the default
+const FONT_LIST = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonlight', 'VG5000', 'ChaumontScript'];
+let selectedFontIndex = 0; // Pixelcastle, the default
 let gridAmount = 0;    // 0..1 — 2D periodic grid, interferes with dither patterns
 let hatchAmount = 0;   // 0..1 — diagonal single-axis wave, crosshatch/engraving feel
 let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
 let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
 let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
+let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking light for a "3D" carved look
+let tunnelAmount = 0;  // 0..1 — radial spatial warp, stretches the border relative to center
 
 function updateFontDots() {
   FONT_DOTS.forEach((el, i) => {
@@ -1183,7 +1229,9 @@ const EFFECT_SLIDERS = [
   { id: 'hatchSlider', setter: v => hatchAmount = v },
   { id: 'scanSlider', setter: v => scanAmount = v },
   { id: 'grainSlider', setter: v => grainAmount = v },
-  { id: 'chromaSlider', setter: v => chromaAmount = v }
+  { id: 'chromaSlider', setter: v => chromaAmount = v },
+  { id: 'reliefSlider', setter: v => reliefAmount = v },
+  { id: 'tunnelSlider', setter: v => tunnelAmount = v }
 ];
 EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);

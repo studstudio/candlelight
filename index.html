@@ -358,6 +358,9 @@
 <div class="moire-row"><span class="moire-label">relief</span><input type="range" id="reliefSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">organic</span><input type="range" id="organicSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">outline</span><input type="range" id="outlineSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">dot stipple</span><input type="range" id="dotStippleSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">square stipple</span><input type="range" id="squareStippleSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">line stipple</span><input type="range" id="lineStippleSlider" min="0" max="100" value="0"></div>
 <p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
@@ -502,6 +505,7 @@ function makeDefaultLayerParams() {
     filterStepIndex: 0,
     gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
     organicAmount: 0, outlineAmount: 0,
+    dotStippleAmount: 0, squareStippleAmount: 0, lineStippleAmount: 0,
     opacityAmount: 1 // 0..1 — only meaningful for overlay layers (1 and 2); base is always fully opaque
   };
 }
@@ -541,6 +545,9 @@ function snapshotActiveLayerState() {
   layer.reliefAmount = reliefAmount;
   layer.organicAmount = organicAmount;
   layer.outlineAmount = outlineAmount;
+  layer.dotStippleAmount = dotStippleAmount;
+  layer.squareStippleAmount = squareStippleAmount;
+  layer.lineStippleAmount = lineStippleAmount;
   layer.opacityAmount = opacityAmount;
 }
 
@@ -569,6 +576,9 @@ function loadLayerStateToGlobals(idx) {
   reliefAmount = layer.reliefAmount;
   organicAmount = layer.organicAmount;
   outlineAmount = layer.outlineAmount;
+  dotStippleAmount = layer.dotStippleAmount;
+  squareStippleAmount = layer.squareStippleAmount;
+  lineStippleAmount = layer.lineStippleAmount;
   opacityAmount = layer.opacityAmount;
 
   applyBoxStyle();
@@ -584,6 +594,9 @@ function loadLayerStateToGlobals(idx) {
   document.getElementById('reliefSlider').value = Math.round(reliefAmount * 100);
   document.getElementById('organicSlider').value = Math.round(organicAmount * 100);
   document.getElementById('outlineSlider').value = Math.round(outlineAmount * 100);
+  document.getElementById('dotStippleSlider').value = Math.round(dotStippleAmount * 100);
+  document.getElementById('squareStippleSlider').value = Math.round(squareStippleAmount * 100);
+  document.getElementById('lineStippleSlider').value = Math.round(lineStippleAmount * 100);
   invertBtn.classList.toggle('active', invert);
   patternBtn.textContent = PATTERN_LABELS[ditherPattern];
   filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === FILTER_STEPS[filterStepIndex].label));
@@ -959,7 +972,7 @@ window.addEventListener('resize', () => {
 // + tone curve + dither, run entirely against ONE layer's own stored settings.
 // Draws into the shared offscreen scratch canvas and returns a quantized,
 // dithered Float32Array of gray values (0-255) at panel resolution.
-function computeLayerGray(layer, isBase, W, H) {
+function computeLayerGray(layer, W, H) {
   // map crop box (container coordinates) back to natural image pixel coordinates
   // using the same cover-fit math the browser used to render the photo
   const sx = (layer.box.left - layer.coverX0) / layer.coverScale;
@@ -969,50 +982,6 @@ function computeLayerGray(layer, isBase, W, H) {
 
   sctx.clearRect(0,0,W,H);
   sctx.drawImage(layer.img, sx, sy, sw, sh, 0, 0, W, H);
-
-  // draw the postcard text directly onto the RGBA canvas, BEFORE we extract
-  // grayscale — this means it rides through the exact same tone curve, dither
-  // pattern, and invert as the photo itself, with no separate logic needed.
-  // Message text always belongs to the base layer only.
-  let textBarTop = null, textBarBottom = null; // used later to keep text unaffected by chromatic drift
-  if (isBase) {
-    const text = postcardText.trim();
-    if (text) {
-      const barH = H * 0.11;
-      const barY = postcardPosition === 'top' ? 0 : H - barH;
-      textBarTop = barY;
-      textBarBottom = barY + barH;
-      const fontSize = Math.max(9, Math.floor(barH * 0.55));
-      const leftMargin = 0; // starts at the very edge, no padding
-      const maxTextWidth = W; // can span the full canvas width if the text is long enough
-
-      // font chosen via the circular dial next to the message input
-      sctx.font = `${fontSize}px '${FONT_LIST[selectedFontIndex]}', Georgia, serif`;
-
-      const naturalWidth = sctx.measureText(text).width;
-      const boxWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long, no extra padding
-
-      sctx.save();
-
-      // vertical gradient: fades in from the outer edge, plateaus at 0.8 opacity,
-      // fades back out toward the inner edge — no hard top/bottom line, which
-      // gives the dither pass a smooth transition to work with instead of a
-      // single hard row boundary
-      const grad = sctx.createLinearGradient(0, barY, 0, barY + barH);
-      grad.addColorStop(0,    'rgba(190,190,190,0)');
-      grad.addColorStop(0.25, 'rgba(190,190,190,0.8)');
-      grad.addColorStop(0.75, 'rgba(190,190,190,0.8)');
-      grad.addColorStop(1,    'rgba(190,190,190,0)');
-      sctx.fillStyle = grad;
-      sctx.fillRect(0, barY, boxWidth, barH);
-
-      sctx.fillStyle = 'rgba(35,35,35,0.95)'; // near-black for legibility; inverts to light grey via the existing invert step
-      sctx.textAlign = 'left';
-      sctx.textBaseline = 'middle';
-      sctx.fillText(text, leftMargin, barY + barH / 2, maxTextWidth);
-      sctx.restore();
-    }
-  }
 
   const imgData = sctx.getImageData(0,0,W,H);
   const data = imgData.data;
@@ -1030,14 +999,11 @@ function computeLayerGray(layer, isBase, W, H) {
   }
   if (chromaShift > 0) {
     for (let y = 0; y < H; y++) {
-      // rows inside the postcard text bar sample straight through, unshifted —
-      // keeps the text itself crisp and unaffected by the chroma effect
-      const inTextBar = textBarTop !== null && y >= textBarTop && y < textBarBottom;
       for (let x = 0; x < W; x++) {
         const idx = y * W + x;
-        const rVal = sampleChannel(inTextBar ? x : x - chromaShift, y, 0);
+        const rVal = sampleChannel(x - chromaShift, y, 0);
         const gVal = sampleChannel(x, y, 1);
-        const bVal = sampleChannel(inTextBar ? x : x + chromaShift, y, 2);
+        const bVal = sampleChannel(x + chromaShift, y, 2);
         gray[idx] = fw.r * rVal + fw.g * gVal + fw.b * bVal;
       }
     }
@@ -1045,29 +1011,68 @@ function computeLayerGray(layer, isBase, W, H) {
     for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
   }
 
-  // organic: warps the luminance field using smooth, multi-frequency wavy
-  // displacement (cheap sine-based "fake noise", not true Perlin, but reads
-  // as an organic wobble) — this runs BEFORE outline extraction below, which
-  // is what keeps the resulting line work from looking like a computer-precise
-  // vector trace and instead gives it a loose, hand-drawn wander.
+  // organic: built on cellular (Worley) noise instead of plain sine waves —
+  // the frame is scattered with irregular "cell" seed points, each pixel is
+  // pushed outward from its nearest seed (like cytoplasm bulging around a
+  // nucleus), and the thin boundaries between neighboring cells are darkened
+  // into "membrane" walls. This reads as genuinely organic/cell-division-like
+  // rather than uniform wavy ripples, because real biological cells tile
+  // irregularly — no two are the same size or shape — which is exactly what
+  // jittered cellular noise gives you for free.
+  //
+  // (Cymatics and Lichtenberg patterns were also on the table — they're
+  // legitimately different generative mechanisms though: cymatics comes from
+  // radial standing-wave interference, Lichtenberg from recursive branching
+  // growth. Worth their own dedicated sliders later if you want to keep
+  // exploring in that direction; this one covers the cell-division end.)
   if (layer.organicAmount > 0) {
+    const cellSize = 22;
+    function hash2(ix, iy) {
+      let n = (ix * 374761393 + iy * 668265263) | 0;
+      n = Math.imul(n ^ (n >>> 13), 1274126177);
+      n = n ^ (n >>> 16);
+      return ((n >>> 0) % 10000) / 10000;
+    }
+    function featurePoint(gx, gy) {
+      return [ (gx + hash2(gx, gy)) * cellSize, (gy + hash2(gy, gx + 7919)) * cellSize ];
+    }
+
     const warped = new Float32Array(W * H);
-    const strength = layer.organicAmount * 4; // pixels of displacement at full amount
+    const warpStrength = layer.organicAmount * 5;
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        const wx = Math.sin(x * 0.09 + y * 0.11) * strength + Math.sin(x * 0.23 - y * 0.05) * strength * 0.5;
-        const wy = Math.cos(y * 0.08 + x * 0.13) * strength + Math.cos(y * 0.19 - x * 0.07) * strength * 0.5;
-        const sx = Math.max(0, Math.min(W - 1, x + wx));
-        const sy = Math.max(0, Math.min(H - 1, y + wy));
-        // bilinear sample so the warp doesn't itself look pixelated/blocky
+        const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize);
+        let minD1 = Infinity, minD2 = Infinity, nearestFx = 0, nearestFy = 0;
+        for (let j = -1; j <= 1; j++) {
+          for (let i = -1; i <= 1; i++) {
+            const [fx, fy] = featurePoint(cx + i, cy + j);
+            const d = Math.hypot(x - fx, y - fy);
+            if (d < minD1) { minD2 = minD1; minD1 = d; nearestFx = fx; nearestFy = fy; }
+            else if (d < minD2) { minD2 = d; }
+          }
+        }
+
+        // push this pixel away from its cell's own seed point — organic,
+        // outward bulging displacement instead of a uniform ripple
+        const dx = x - nearestFx, dy = y - nearestFy;
+        const dist = Math.hypot(dx, dy) || 1;
+        const push = warpStrength * Math.min(1, minD1 / cellSize);
+        const sx = Math.max(0, Math.min(W - 1, x + (dx / dist) * push));
+        const sy = Math.max(0, Math.min(H - 1, y + (dy / dist) * push));
         const x0 = Math.floor(sx), x1 = Math.min(W - 1, x0 + 1);
         const y0 = Math.floor(sy), y1 = Math.min(H - 1, y0 + 1);
-        const fx = sx - x0, fy = sy - y0;
+        const fx2 = sx - x0, fy2 = sy - y0;
         const v00 = gray[y0 * W + x0], v10 = gray[y0 * W + x1];
         const v01 = gray[y1 * W + x0], v11 = gray[y1 * W + x1];
-        const vTop = v00 + (v10 - v00) * fx;
-        const vBot = v01 + (v11 - v01) * fx;
-        warped[y * W + x] = vTop + (vBot - vTop) * fy;
+        const vTop = v00 + (v10 - v00) * fx2, vBot = v01 + (v11 - v01) * fx2;
+        let val = vTop + (vBot - vTop) * fy2;
+
+        // darken the thin wall where two cells meet (minD1 and minD2 are
+        // close together right at a cell boundary)
+        const wallCloseness = 1 - Math.min(1, (minD2 - minD1) / (cellSize * 0.35));
+        val -= layer.organicAmount * 70 * wallCloseness;
+
+        warped[y * W + x] = Math.max(0, Math.min(255, val));
       }
     }
     gray.set(warped);
@@ -1149,6 +1154,83 @@ function computeLayerGray(layer, isBase, W, H) {
     }
   }
 
+  // dot stipple: a classic dot-screen (AM halftone). The frame is divided
+  // into a grid of cells; each cell collapses to ONE circular dot whose SIZE
+  // (not shade) encodes that cell's average brightness — dark cells get big
+  // dots that nearly merge, light cells get tiny dots or none. This is
+  // literally how hand stippling and engraving build up tone through density
+  // of marks rather than continuous gray.
+  if (layer.dotStippleAmount > 0) {
+    const cell = Math.round(3 + layer.dotStippleAmount * 7);
+    for (let cy = 0; cy < H; cy += cell) {
+      const ch = Math.min(cell, H - cy);
+      for (let cx = 0; cx < W; cx += cell) {
+        const cw = Math.min(cell, W - cx);
+        let sum = 0;
+        for (let y = cy; y < cy + ch; y++) for (let x = cx; x < cx + cw; x++) sum += gray[y * W + x];
+        const avg = sum / (cw * ch);
+        const darkness = 1 - avg / 255;
+        const maxR = Math.max(cw, ch) * 0.62;
+        const radius = darkness * maxR;
+        const centerX = cx + cw / 2, centerY = cy + ch / 2;
+        for (let y = cy; y < cy + ch; y++) {
+          for (let x = cx; x < cx + cw; x++) {
+            const dist = Math.hypot(x - centerX + 0.5, y - centerY + 0.5);
+            const dotVal = dist < radius ? 0 : 255;
+            const idx = y * W + x;
+            gray[idx] = gray[idx] * (1 - layer.dotStippleAmount) + dotVal * layer.dotStippleAmount;
+          }
+        }
+      }
+    }
+  }
+
+  // square stipple: same dot-screen idea, but each cell becomes a filled
+  // square instead of a circle — a bolder, more graphic/woodblock-print feel
+  // than the rounded dot version.
+  if (layer.squareStippleAmount > 0) {
+    const cell = Math.round(3 + layer.squareStippleAmount * 7);
+    for (let cy = 0; cy < H; cy += cell) {
+      const ch = Math.min(cell, H - cy);
+      for (let cx = 0; cx < W; cx += cell) {
+        const cw = Math.min(cell, W - cx);
+        let sum = 0;
+        for (let y = cy; y < cy + ch; y++) for (let x = cx; x < cx + cw; x++) sum += gray[y * W + x];
+        const avg = sum / (cw * ch);
+        const darkness = 1 - avg / 255;
+        const halfSide = darkness * Math.max(cw, ch) * 0.62;
+        const centerX = cx + cw / 2, centerY = cy + ch / 2;
+        for (let y = cy; y < cy + ch; y++) {
+          for (let x = cx; x < cx + cw; x++) {
+            const inside = Math.abs(x - centerX + 0.5) < halfSide && Math.abs(y - centerY + 0.5) < halfSide;
+            const dotVal = inside ? 0 : 255;
+            const idx = y * W + x;
+            gray[idx] = gray[idx] * (1 - layer.squareStippleAmount) + dotVal * layer.squareStippleAmount;
+          }
+        }
+      }
+    }
+  }
+
+  // line stipple: a line-screen halftone — parallel 45° lines whose
+  // thickness at any point varies with the local tone there, the way old
+  // engravings and newsprint used lines instead of dots to build shade.
+  // Implemented as a per-pixel ramp threshold along the line's own axis, so
+  // each line's width grows and shrinks continuously with the photo beneath it.
+  if (layer.lineStippleAmount > 0) {
+    const period = Math.round(3 + layer.lineStippleAmount * 7);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        const proj = (x + y) / Math.SQRT2; // 45° diagonal, matches the Hatch effects' axis
+        const ramp = ((proj % period) + period) % period / period; // 0..1 sawtooth along the line period
+        const darkness = 1 - gray[idx] / 255;
+        const lineVal = darkness > ramp ? 0 : 255;
+        gray[idx] = gray[idx] * (1 - layer.lineStippleAmount) + lineVal * layer.lineStippleAmount;
+      }
+    }
+  }
+
   // apply this layer's tone curve — black/white point, then shadow/highlight
   // shaping, then contrast — before quantizing.
   const cfg = STEPS[layer.stepIndex];
@@ -1208,7 +1290,7 @@ function render() {
   for (let i = 0; i < layers.length; i++) {
     const layer = layers[i];
     if (!layer || !layer.img) continue;
-    const gray = computeLayerGray(layer, i === 0, W, H);
+    const gray = computeLayerGray(layer, W, H);
     if (!composite) {
       composite = gray; // base always shows in full, nothing beneath it to blend with
       continue;
@@ -1239,11 +1321,85 @@ function render() {
   }
   if (!composite) return;
 
+  // postcard text is stamped LAST, on top of the fully composited image —
+  // so it always sits above every overlay, no matter the compositing order
+  // or opacity settings above.
+  if (postcardText.trim()) stampPostcardText(composite, W, H);
+
   const outData = lctx.createImageData(W, H);
   const od = outData.data;
   for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,composite[i])); od[i*4]=v;od[i*4+1]=v;od[i*4+2]=v;od[i*4+3]=255; }
   lctx.putImageData(outData,0,0);
   liveCanvas._grayCache = composite;
+}
+
+// draws the postcard message directly onto the finished composite (as real
+// RGBA, so the semi-transparent gradient bar blends against whatever's
+// actually there), then dithers just that text band using the BASE layer's
+// tone settings and writes it back into the composite array. Doing this as
+// a distinct final step — rather than baking it into the base layer's own
+// pipeline like before — is what guarantees text can never be covered by an
+// overlay, since it's applied strictly after every layer has been composited.
+function stampPostcardText(composite, W, H) {
+  const text = postcardText.trim();
+
+  const imgData = sctx.createImageData(W, H);
+  const d = imgData.data;
+  for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,composite[i])); d[i*4]=v;d[i*4+1]=v;d[i*4+2]=v;d[i*4+3]=255; }
+  sctx.putImageData(imgData, 0, 0);
+
+  const barH = H * 0.11;
+  const barY = postcardPosition === 'top' ? 0 : H - barH;
+  const fontSize = Math.max(9, Math.floor(barH * 0.55));
+  const maxTextWidth = W; // can span the full canvas width if the text is long enough
+
+  sctx.font = `${fontSize}px '${FONT_LIST[selectedFontIndex]}', Georgia, serif`;
+  const naturalWidth = sctx.measureText(text).width;
+  const boxWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long, no extra padding
+
+  sctx.save();
+  // vertical gradient: fades in from the outer edge, plateaus at 0.8 opacity,
+  // fades back out toward the inner edge — no hard top/bottom line
+  const grad = sctx.createLinearGradient(0, barY, 0, barY + barH);
+  grad.addColorStop(0,    'rgba(190,190,190,0)');
+  grad.addColorStop(0.25, 'rgba(190,190,190,0.8)');
+  grad.addColorStop(0.75, 'rgba(190,190,190,0.8)');
+  grad.addColorStop(1,    'rgba(190,190,190,0)');
+  sctx.fillStyle = grad;
+  sctx.fillRect(0, barY, boxWidth, barH);
+
+  sctx.fillStyle = 'rgba(35,35,35,0.95)'; // near-black for legibility; inverts to light grey via the base layer's invert setting
+  sctx.textAlign = 'left';
+  sctx.textBaseline = 'middle';
+  sctx.fillText(text, 0, barY + barH / 2, maxTextWidth);
+  sctx.restore();
+
+  // pull just the text-bar rows back out and dither them using the base
+  // layer's own tone step + pattern, so the look stays consistent with
+  // before — then stamp that band into the composite, overwriting whatever
+  // overlay pixels were there
+  const barTop = Math.max(0, Math.floor(barY));
+  const barBottom = Math.min(H, Math.ceil(barY + barH));
+  const bandH = barBottom - barTop;
+  if (bandH <= 0) return;
+
+  const bandData = sctx.getImageData(0, barTop, W, bandH).data;
+  const bandGray = new Float32Array(W * bandH);
+  for (let i=0;i<W*bandH;i++){ bandGray[i] = 0.299*bandData[i*4] + 0.587*bandData[i*4+1] + 0.114*bandData[i*4+2]; }
+
+  const baseLayer = layers[0];
+  const cfg = STEPS[baseLayer.stepIndex];
+  const levelCount = cfg.levels;
+  const step = 255 / (levelCount - 1);
+  function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
+  applyDither(bandGray, W, bandH, quantize, step, baseLayer.ditherPattern, cfg.ditherStrength);
+  if (baseLayer.invert) { for (let i=0;i<W*bandH;i++) bandGray[i] = 255 - bandGray[i]; }
+
+  for (let y = 0; y < bandH; y++) {
+    for (let x = 0; x < W; x++) {
+      composite[(barTop + y) * W + x] = bandGray[y * W + x];
+    }
+  }
 }
 
 // ---------- dither implementations ----------
@@ -1408,6 +1564,9 @@ let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostl
 let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking light for a "3D" carved look
 let organicAmount = 0; // 0..1 — smooth wavy domain warp applied before outline extraction, for a hand-drawn wobble instead of a computer-precise trace
 let outlineAmount = 0; // 0..1 — edge-detected contour extraction; suppresses interior tone, keeps only the line work
+let dotStippleAmount = 0;    // 0..1 — dot-screen halftone: cells become circular dots sized by darkness
+let squareStippleAmount = 0; // 0..1 — same idea as dot stipple, but square marks instead of round dots
+let lineStippleAmount = 0;   // 0..1 — line-screen halftone: parallel diagonal lines whose thickness varies with local tone
 let opacityAmount = 1; // 0..1 — overlay blend strength; base ignores this (nothing beneath it to blend with)
 
 function updateFontDots() {
@@ -1599,7 +1758,10 @@ const EFFECT_SLIDERS = [
   { id: 'chromaSlider', setter: v => chromaAmount = v },
   { id: 'reliefSlider', setter: v => reliefAmount = v },
   { id: 'organicSlider', setter: v => organicAmount = v },
-  { id: 'outlineSlider', setter: v => outlineAmount = v }
+  { id: 'outlineSlider', setter: v => outlineAmount = v },
+  { id: 'dotStippleSlider', setter: v => dotStippleAmount = v },
+  { id: 'squareStippleSlider', setter: v => squareStippleAmount = v },
+  { id: 'lineStippleSlider', setter: v => lineStippleAmount = v }
 ];
 EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);

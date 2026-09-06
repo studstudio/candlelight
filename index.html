@@ -1164,9 +1164,12 @@ function computeLayerGray(layer, W, H) {
   // (not shade) encodes that cell's average brightness — dark cells get big
   // dots that nearly merge, light cells get tiny dots or none. This is
   // literally how hand stippling and engraving build up tone through density
-  // of marks rather than continuous gray.
+  // of marks rather than continuous gray. Cell size is fixed (small) rather
+  // than tied to the slider — the slider is purely blend strength, so you can
+  // push it to 100% and still get fine, dense dots instead of the dots
+  // growing bigger/coarser as strength increases.
   if (layer.dotStippleAmount > 0) {
-    const cell = Math.round(3 + layer.dotStippleAmount * 7);
+    const cell = 2;
     for (let cy = 0; cy < H; cy += cell) {
       const ch = Math.min(cell, H - cy);
       for (let cx = 0; cx < W; cx += cell) {

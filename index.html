@@ -356,6 +356,8 @@
 <div class="moire-row"><span class="moire-label">grain</span><input type="range" id="grainSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">chroma</span><input type="range" id="chromaSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">relief</span><input type="range" id="reliefSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">stipple</span><input type="range" id="stippleSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">knit</span><input type="range" id="knitSlider" min="0" max="100" value="0"></div>
 <p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
@@ -499,6 +501,7 @@ function makeDefaultLayerParams() {
     invert: false,
     filterStepIndex: 0,
     gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
+    stippleAmount: 0, knitAmount: 0,
     opacityAmount: 1 // 0..1 — only meaningful for overlay layers (1 and 2); base is always fully opaque
   };
 }
@@ -536,6 +539,8 @@ function snapshotActiveLayerState() {
   layer.gridAmount = gridAmount; layer.hatchAmount = hatchAmount; layer.hatch2Amount = hatch2Amount;
   layer.scanAmount = scanAmount; layer.grainAmount = grainAmount; layer.chromaAmount = chromaAmount;
   layer.reliefAmount = reliefAmount;
+  layer.stippleAmount = stippleAmount;
+  layer.knitAmount = knitAmount;
   layer.opacityAmount = opacityAmount;
 }
 
@@ -562,6 +567,8 @@ function loadLayerStateToGlobals(idx) {
   gridAmount = layer.gridAmount; hatchAmount = layer.hatchAmount; hatch2Amount = layer.hatch2Amount;
   scanAmount = layer.scanAmount; grainAmount = layer.grainAmount; chromaAmount = layer.chromaAmount;
   reliefAmount = layer.reliefAmount;
+  stippleAmount = layer.stippleAmount;
+  knitAmount = layer.knitAmount;
   opacityAmount = layer.opacityAmount;
 
   applyBoxStyle();
@@ -575,6 +582,8 @@ function loadLayerStateToGlobals(idx) {
   document.getElementById('grainSlider').value = Math.round(grainAmount * 100);
   document.getElementById('chromaSlider').value = Math.round(chromaAmount * 100);
   document.getElementById('reliefSlider').value = Math.round(reliefAmount * 100);
+  document.getElementById('stippleSlider').value = Math.round(stippleAmount * 100);
+  document.getElementById('knitSlider').value = Math.round(knitAmount * 100);
   invertBtn.classList.toggle('active', invert);
   patternBtn.textContent = PATTERN_LABELS[ditherPattern];
   filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === FILTER_STEPS[filterStepIndex].label));
@@ -1091,6 +1100,62 @@ function computeLayerGray(layer, isBase, W, H) {
     }
   }
 
+  // stipple: a classic dot-screen (AM halftone). The frame is divided into a
+  // grid of cells; each cell collapses to ONE dot whose SIZE (not shade)
+  // encodes that cell's average brightness — dark cells get big dots that
+  // nearly merge, light cells get tiny dots or none. This is literally how
+  // hand stippling and engraving build up tone (density of marks, not
+  // continuous gray), so it reads as authentic simplification rather than
+  // just blur. Blended toward the dot value by `stippleAmount` so it eases
+  // in from the photographic original.
+  if (layer.stippleAmount > 0) {
+    const cell = Math.round(3 + layer.stippleAmount * 7); // finer dots at low amounts, bold coarse dots at high amounts
+    for (let cy = 0; cy < H; cy += cell) {
+      const ch = Math.min(cell, H - cy);
+      for (let cx = 0; cx < W; cx += cell) {
+        const cw = Math.min(cell, W - cx);
+        let sum = 0;
+        for (let y = cy; y < cy + ch; y++) for (let x = cx; x < cx + cw; x++) sum += gray[y * W + x];
+        const avg = sum / (cw * ch);
+        const darkness = 1 - avg / 255;
+        const maxR = Math.max(cw, ch) * 0.62; // lets very dark cells' dots nearly fill the cell
+        const radius = darkness * maxR;
+        const centerX = cx + cw / 2, centerY = cy + ch / 2;
+        for (let y = cy; y < cy + ch; y++) {
+          for (let x = cx; x < cx + cw; x++) {
+            const dist = Math.hypot(x - centerX + 0.5, y - centerY + 0.5);
+            const dotVal = dist < radius ? 0 : 255;
+            const idx = y * W + x;
+            gray[idx] = gray[idx] * (1 - layer.stippleAmount) + dotVal * layer.stippleAmount;
+          }
+        }
+      }
+    }
+  }
+
+  // knit: an interlocking chevron/stitch pattern (rows offset by half a
+  // stitch, each stitch a V-shaped ridge) approximating a woven/knitted
+  // fabric. This is an approximation, not a literal loop-by-loop simulation —
+  // same spirit as Hatch standing in for real engraving lines — but reads as
+  // "knitted-in" simplification once combined with the dither pass.
+  if (layer.knitAmount > 0) {
+    const STITCH_W = 7, STITCH_H = 9;
+    for (let y = 0; y < H; y++) {
+      const rowIdx = Math.floor(y / STITCH_H);
+      const xOffset = (rowIdx % 2) * (STITCH_W / 2);
+      const ly = (y % STITCH_H) / STITCH_H;
+      for (let x = 0; x < W; x++) {
+        const lx = (((x + xOffset) % STITCH_W) + STITCH_W) % STITCH_W / STITCH_W;
+        const vShape = Math.abs(lx - 0.5) * 2;       // 0 at stitch center, 1 at stitch edges
+        const chevronDist = Math.abs(vShape - ly);   // small right along the V-shaped yarn line
+        const ridge = 1 - Math.min(1, chevronDist * 3); // sharpen into a ridge, 0..1
+        const mod = (ridge - 0.5) * 2; // -1..1 — ridge pushes bright, gap pushes dark
+        const idx = y * W + x;
+        gray[idx] = Math.max(0, Math.min(255, gray[idx] + layer.knitAmount * 90 * mod));
+      }
+    }
+  }
+
   // apply this layer's tone curve — black/white point, then shadow/highlight
   // shaping, then contrast — before quantizing.
   const cfg = STEPS[layer.stepIndex];
@@ -1348,6 +1413,8 @@ let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
 let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
 let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
 let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking light for a "3D" carved look
+let stippleAmount = 0; // 0..1 — dot-screen halftone: cells become dots sized by darkness, like hand stippling/engraving
+let knitAmount = 0;    // 0..1 — offset chevron/stitch pattern approximating a woven/knitted fabric
 let opacityAmount = 1; // 0..1 — overlay blend strength; base ignores this (nothing beneath it to blend with)
 
 function updateFontDots() {
@@ -1537,7 +1604,9 @@ const EFFECT_SLIDERS = [
   { id: 'scanSlider', setter: v => scanAmount = v },
   { id: 'grainSlider', setter: v => grainAmount = v },
   { id: 'chromaSlider', setter: v => chromaAmount = v },
-  { id: 'reliefSlider', setter: v => reliefAmount = v }
+  { id: 'reliefSlider', setter: v => reliefAmount = v },
+  { id: 'stippleSlider', setter: v => stippleAmount = v },
+  { id: 'knitSlider', setter: v => knitAmount = v }
 ];
 EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);

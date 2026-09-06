@@ -356,8 +356,8 @@
 <div class="moire-row"><span class="moire-label">grain</span><input type="range" id="grainSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">chroma</span><input type="range" id="chromaSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">relief</span><input type="range" id="reliefSlider" min="0" max="100" value="0"></div>
-<div class="moire-row"><span class="moire-label">stipple</span><input type="range" id="stippleSlider" min="0" max="100" value="0"></div>
-<div class="moire-row"><span class="moire-label">knit</span><input type="range" id="knitSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">organic</span><input type="range" id="organicSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">outline</span><input type="range" id="outlineSlider" min="0" max="100" value="0"></div>
 <p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
@@ -501,7 +501,7 @@ function makeDefaultLayerParams() {
     invert: false,
     filterStepIndex: 0,
     gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
-    stippleAmount: 0, knitAmount: 0,
+    organicAmount: 0, outlineAmount: 0,
     opacityAmount: 1 // 0..1 — only meaningful for overlay layers (1 and 2); base is always fully opaque
   };
 }
@@ -539,8 +539,8 @@ function snapshotActiveLayerState() {
   layer.gridAmount = gridAmount; layer.hatchAmount = hatchAmount; layer.hatch2Amount = hatch2Amount;
   layer.scanAmount = scanAmount; layer.grainAmount = grainAmount; layer.chromaAmount = chromaAmount;
   layer.reliefAmount = reliefAmount;
-  layer.stippleAmount = stippleAmount;
-  layer.knitAmount = knitAmount;
+  layer.organicAmount = organicAmount;
+  layer.outlineAmount = outlineAmount;
   layer.opacityAmount = opacityAmount;
 }
 
@@ -567,8 +567,8 @@ function loadLayerStateToGlobals(idx) {
   gridAmount = layer.gridAmount; hatchAmount = layer.hatchAmount; hatch2Amount = layer.hatch2Amount;
   scanAmount = layer.scanAmount; grainAmount = layer.grainAmount; chromaAmount = layer.chromaAmount;
   reliefAmount = layer.reliefAmount;
-  stippleAmount = layer.stippleAmount;
-  knitAmount = layer.knitAmount;
+  organicAmount = layer.organicAmount;
+  outlineAmount = layer.outlineAmount;
   opacityAmount = layer.opacityAmount;
 
   applyBoxStyle();
@@ -582,8 +582,8 @@ function loadLayerStateToGlobals(idx) {
   document.getElementById('grainSlider').value = Math.round(grainAmount * 100);
   document.getElementById('chromaSlider').value = Math.round(chromaAmount * 100);
   document.getElementById('reliefSlider').value = Math.round(reliefAmount * 100);
-  document.getElementById('stippleSlider').value = Math.round(stippleAmount * 100);
-  document.getElementById('knitSlider').value = Math.round(knitAmount * 100);
+  document.getElementById('organicSlider').value = Math.round(organicAmount * 100);
+  document.getElementById('outlineSlider').value = Math.round(outlineAmount * 100);
   invertBtn.classList.toggle('active', invert);
   patternBtn.textContent = PATTERN_LABELS[ditherPattern];
   filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === FILTER_STEPS[filterStepIndex].label));
@@ -1045,6 +1045,55 @@ function computeLayerGray(layer, isBase, W, H) {
     for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
   }
 
+  // organic: warps the luminance field using smooth, multi-frequency wavy
+  // displacement (cheap sine-based "fake noise", not true Perlin, but reads
+  // as an organic wobble) — this runs BEFORE outline extraction below, which
+  // is what keeps the resulting line work from looking like a computer-precise
+  // vector trace and instead gives it a loose, hand-drawn wander.
+  if (layer.organicAmount > 0) {
+    const warped = new Float32Array(W * H);
+    const strength = layer.organicAmount * 4; // pixels of displacement at full amount
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const wx = Math.sin(x * 0.09 + y * 0.11) * strength + Math.sin(x * 0.23 - y * 0.05) * strength * 0.5;
+        const wy = Math.cos(y * 0.08 + x * 0.13) * strength + Math.cos(y * 0.19 - x * 0.07) * strength * 0.5;
+        const sx = Math.max(0, Math.min(W - 1, x + wx));
+        const sy = Math.max(0, Math.min(H - 1, y + wy));
+        // bilinear sample so the warp doesn't itself look pixelated/blocky
+        const x0 = Math.floor(sx), x1 = Math.min(W - 1, x0 + 1);
+        const y0 = Math.floor(sy), y1 = Math.min(H - 1, y0 + 1);
+        const fx = sx - x0, fy = sy - y0;
+        const v00 = gray[y0 * W + x0], v10 = gray[y0 * W + x1];
+        const v01 = gray[y1 * W + x0], v11 = gray[y1 * W + x1];
+        const vTop = v00 + (v10 - v00) * fx;
+        const vBot = v01 + (v11 - v01) * fx;
+        warped[y * W + x] = vTop + (vBot - vTop) * fy;
+      }
+    }
+    gray.set(warped);
+  }
+
+  // outline: edge-detected contour extraction. A Sobel-style gradient
+  // magnitude is computed at every pixel, then the frame is rebuilt as
+  // near-white everywhere EXCEPT along strong edges, where it goes dark —
+  // this is what suppresses interior tonal detail entirely and leaves only
+  // the contours, like a pen-and-ink line drawing rather than a shaded photo.
+  if (layer.outlineAmount > 0) {
+    const src = gray.slice();
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const xL = x > 0 ? x - 1 : 0, xR = x < W - 1 ? x + 1 : W - 1;
+        const yU = y > 0 ? y - 1 : 0, yD = y < H - 1 ? y + 1 : H - 1;
+        const gx = src[y * W + xR] - src[y * W + xL];
+        const gy = src[yD * W + x] - src[yU * W + x];
+        const mag = Math.hypot(gx, gy);
+        const lineVal = 255 - Math.min(255, mag * 2.2); // stronger edges -> darker line
+        const idx = y * W + x;
+        gray[idx] = gray[idx] * (1 - layer.outlineAmount) + lineVal * layer.outlineAmount;
+      }
+    }
+  }
+
   // pre-dither texture effects: each overlays a pattern onto the luminance
   // data BEFORE quantizing. The periodic ones (grid/hatch/scan) interfere
   // with the dither pattern's own periodicity to create genuine moiré beats;
@@ -1096,62 +1145,6 @@ function computeLayerGray(layer, isBase, W, H) {
           gray[idx] += layer.reliefAmount * RELIEF_SCALE * relief;
         }
         gray[idx] = Math.max(0, Math.min(255, gray[idx]));
-      }
-    }
-  }
-
-  // stipple: a classic dot-screen (AM halftone). The frame is divided into a
-  // grid of cells; each cell collapses to ONE dot whose SIZE (not shade)
-  // encodes that cell's average brightness — dark cells get big dots that
-  // nearly merge, light cells get tiny dots or none. This is literally how
-  // hand stippling and engraving build up tone (density of marks, not
-  // continuous gray), so it reads as authentic simplification rather than
-  // just blur. Blended toward the dot value by `stippleAmount` so it eases
-  // in from the photographic original.
-  if (layer.stippleAmount > 0) {
-    const cell = Math.round(3 + layer.stippleAmount * 7); // finer dots at low amounts, bold coarse dots at high amounts
-    for (let cy = 0; cy < H; cy += cell) {
-      const ch = Math.min(cell, H - cy);
-      for (let cx = 0; cx < W; cx += cell) {
-        const cw = Math.min(cell, W - cx);
-        let sum = 0;
-        for (let y = cy; y < cy + ch; y++) for (let x = cx; x < cx + cw; x++) sum += gray[y * W + x];
-        const avg = sum / (cw * ch);
-        const darkness = 1 - avg / 255;
-        const maxR = Math.max(cw, ch) * 0.62; // lets very dark cells' dots nearly fill the cell
-        const radius = darkness * maxR;
-        const centerX = cx + cw / 2, centerY = cy + ch / 2;
-        for (let y = cy; y < cy + ch; y++) {
-          for (let x = cx; x < cx + cw; x++) {
-            const dist = Math.hypot(x - centerX + 0.5, y - centerY + 0.5);
-            const dotVal = dist < radius ? 0 : 255;
-            const idx = y * W + x;
-            gray[idx] = gray[idx] * (1 - layer.stippleAmount) + dotVal * layer.stippleAmount;
-          }
-        }
-      }
-    }
-  }
-
-  // knit: an interlocking chevron/stitch pattern (rows offset by half a
-  // stitch, each stitch a V-shaped ridge) approximating a woven/knitted
-  // fabric. This is an approximation, not a literal loop-by-loop simulation —
-  // same spirit as Hatch standing in for real engraving lines — but reads as
-  // "knitted-in" simplification once combined with the dither pass.
-  if (layer.knitAmount > 0) {
-    const STITCH_W = 7, STITCH_H = 9;
-    for (let y = 0; y < H; y++) {
-      const rowIdx = Math.floor(y / STITCH_H);
-      const xOffset = (rowIdx % 2) * (STITCH_W / 2);
-      const ly = (y % STITCH_H) / STITCH_H;
-      for (let x = 0; x < W; x++) {
-        const lx = (((x + xOffset) % STITCH_W) + STITCH_W) % STITCH_W / STITCH_W;
-        const vShape = Math.abs(lx - 0.5) * 2;       // 0 at stitch center, 1 at stitch edges
-        const chevronDist = Math.abs(vShape - ly);   // small right along the V-shaped yarn line
-        const ridge = 1 - Math.min(1, chevronDist * 3); // sharpen into a ridge, 0..1
-        const mod = (ridge - 0.5) * 2; // -1..1 — ridge pushes bright, gap pushes dark
-        const idx = y * W + x;
-        gray[idx] = Math.max(0, Math.min(255, gray[idx] + layer.knitAmount * 90 * mod));
       }
     }
   }
@@ -1413,8 +1406,8 @@ let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
 let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
 let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
 let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking light for a "3D" carved look
-let stippleAmount = 0; // 0..1 — dot-screen halftone: cells become dots sized by darkness, like hand stippling/engraving
-let knitAmount = 0;    // 0..1 — offset chevron/stitch pattern approximating a woven/knitted fabric
+let organicAmount = 0; // 0..1 — smooth wavy domain warp applied before outline extraction, for a hand-drawn wobble instead of a computer-precise trace
+let outlineAmount = 0; // 0..1 — edge-detected contour extraction; suppresses interior tone, keeps only the line work
 let opacityAmount = 1; // 0..1 — overlay blend strength; base ignores this (nothing beneath it to blend with)
 
 function updateFontDots() {
@@ -1605,8 +1598,8 @@ const EFFECT_SLIDERS = [
   { id: 'grainSlider', setter: v => grainAmount = v },
   { id: 'chromaSlider', setter: v => chromaAmount = v },
   { id: 'reliefSlider', setter: v => reliefAmount = v },
-  { id: 'stippleSlider', setter: v => stippleAmount = v },
-  { id: 'knitSlider', setter: v => knitAmount = v }
+  { id: 'organicSlider', setter: v => organicAmount = v },
+  { id: 'outlineSlider', setter: v => outlineAmount = v }
 ];
 EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);

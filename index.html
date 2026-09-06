@@ -1484,27 +1484,46 @@ patternBtn.onclick = () => {
 // ---------- save the current composited preview to the device ----------
 // Works at any point mid-edit — it just exports whatever the liveCanvas is
 // showing right now (base + any overlays + postcard text, fully dithered).
-// Uses a blob + <a download> link rather than canvas.toDataURL so large
-// images don't get held as a giant base64 string in memory.
+//
+// On iOS Safari, tapping a blob download link pops up "view / download" —
+// but "view" navigates the CURRENT tab to the image, wiping out the whole
+// editor. To avoid that, we open a blank tab synchronously (must happen
+// immediately inside the click handler, before any await, or Safari's popup
+// blocker will kill it) and then point that already-open tab at the image
+// once the blob is ready. That way the editor tab is never touched, and
+// "save to Photos" is just a long-press on the image in the new tab.
 saveImageBtn.onclick = async () => {
   if (!naturalW || saveImageBtn.disabled) return;
   saveImageBtn.disabled = true;
   const originalLabel = saveImageBtn.textContent;
+
+  // must be opened synchronously, right here, so Safari still counts it as
+  // a direct result of the tap — opening it after the await below would get
+  // silently blocked as a popup
+  const newTab = window.open('', '_blank');
+
   try {
     const blob = await new Promise(res => liveCanvas.toBlob(res, 'image/png'));
     if (!blob) throw new Error('toBlob failed');
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `lamp-preview-${Date.now()}.png`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    // revoke on a slight delay — some browsers need the URL to still be
-    // valid for a moment after the click before they've finished the save
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-    saveImageBtn.textContent = 'saved';
+
+    if (newTab) {
+      newTab.location.href = url;
+    } else {
+      // popup got blocked anyway (e.g. browser settings) — fall back to the
+      // old same-tab download link rather than failing silently
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lamp-preview-${Date.now()}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+    // revoke well after the new tab has had time to fully load the image
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    saveImageBtn.textContent = newTab ? 'opened' : 'saved';
   } catch {
+    if (newTab) newTab.close();
     saveImageBtn.textContent = 'couldn\'t save';
   }
   setTimeout(() => { saveImageBtn.textContent = originalLabel; saveImageBtn.disabled = false; }, 1500);

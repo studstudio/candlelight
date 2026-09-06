@@ -184,6 +184,11 @@
     margin-top: -6.5px;
   }
 
+  .moire-row input[type=range]:disabled { opacity: 0.35; }
+
+  .opacity-row .moire-label { color: var(--ember); }
+  .opacity-row input[type=range]::-webkit-slider-thumb { background: var(--ember); }
+
   .postcard-row { display: flex; gap: 8px; margin-top: 12px; }
   .postcard-row input[type=text] {
     flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
@@ -340,8 +345,10 @@
   </div>
   <button class="pill" id="invertBtn">invert</button>
   <button class="pill" id="patternBtn">floyd–steinberg</button>
+  <button class="pill" id="saveImageBtn">save image</button>
 </div>
 
+<div class="moire-row opacity-row"><span class="moire-label">opacity</span><input type="range" id="opacitySlider" min="0" max="100" value="100"></div>
 <div class="moire-row"><span class="moire-label">grid</span><input type="range" id="gridSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">hatch</span><input type="range" id="hatchSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">hatch wide</span><input type="range" id="hatch2Slider" min="0" max="100" value="0"></div>
@@ -425,6 +432,7 @@ const tonePip3 = document.getElementById('tonePip3');
 const filterFillLine = document.getElementById('filterFillLine');
 const invertBtn = document.getElementById('invertBtn');
 const patternBtn = document.getElementById('patternBtn');
+const saveImageBtn = document.getElementById('saveImageBtn');
 const filterButtons = document.querySelectorAll('.filter-pill');
 const postcardInput = document.getElementById('postcardInput');
 const postcardPosBtn = document.getElementById('postcardPosBtn');
@@ -490,7 +498,8 @@ function makeDefaultLayerParams() {
     ditherPattern: 'floyd',
     invert: false,
     filterStepIndex: 0,
-    gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0
+    gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
+    opacityAmount: 1 // 0..1 — only meaningful for overlay layers (1 and 2); base is always fully opaque
   };
 }
 
@@ -527,6 +536,7 @@ function snapshotActiveLayerState() {
   layer.gridAmount = gridAmount; layer.hatchAmount = hatchAmount; layer.hatch2Amount = hatch2Amount;
   layer.scanAmount = scanAmount; layer.grainAmount = grainAmount; layer.chromaAmount = chromaAmount;
   layer.reliefAmount = reliefAmount;
+  layer.opacityAmount = opacityAmount;
 }
 
 // loads a stored layer's state into the live globals + on-screen controls,
@@ -552,8 +562,12 @@ function loadLayerStateToGlobals(idx) {
   gridAmount = layer.gridAmount; hatchAmount = layer.hatchAmount; hatch2Amount = layer.hatch2Amount;
   scanAmount = layer.scanAmount; grainAmount = layer.grainAmount; chromaAmount = layer.chromaAmount;
   reliefAmount = layer.reliefAmount;
+  opacityAmount = layer.opacityAmount;
 
   applyBoxStyle();
+  const opacitySlider = document.getElementById('opacitySlider');
+  opacitySlider.value = Math.round(opacityAmount * 100);
+  opacitySlider.disabled = (idx === 0); // base has nothing beneath it to blend with
   document.getElementById('gridSlider').value = Math.round(gridAmount * 100);
   document.getElementById('hatchSlider').value = Math.round(hatchAmount * 100);
   document.getElementById('hatch2Slider').value = Math.round(hatch2Amount * 100);
@@ -1138,10 +1152,32 @@ function render() {
     if (!layer || !layer.img) continue;
     const gray = computeLayerGray(layer, i === 0, W, H);
     if (!composite) {
-      composite = gray;
-    } else {
-      for (let p = 0; p < W*H; p++) { if (gray[p] < 255) composite[p] = gray[p]; }
+      composite = gray; // base always shows in full, nothing beneath it to blend with
+      continue;
     }
+    const opacity = layer.opacityAmount;
+    if (opacity >= 0.999) {
+      // full strength: simple punch-through, every ink pixel shows
+      for (let p = 0; p < W*H; p++) { if (gray[p] < 255) composite[p] = gray[p]; }
+    } else if (opacity > 0.001) {
+      // partial strength: rather than alpha-blending pixel values (which just
+      // rounds back to solid black/white on a 2-4 level display), each ink
+      // pixel is kept or dropped via the same ordered Bayer pattern used for
+      // dithering elsewhere — comparing the opacity against a per-pixel
+      // threshold. Surviving pixels stay at full, crisp intensity; the FADE
+      // comes from the density of surviving pixels, like a halftone screen,
+      // which reads as a genuine blend at the panel's real resolution instead
+      // of muddy in-between grays the hardware can't actually display.
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const idx = y * W + x;
+          if (gray[idx] >= 255) continue; // background stays transparent regardless of opacity
+          const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
+          if (opacity > threshold) composite[idx] = gray[idx];
+        }
+      }
+    }
+    // opacity <= 0.001: overlay contributes nothing, skip entirely
   }
   if (!composite) return;
 
@@ -1312,6 +1348,7 @@ let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
 let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
 let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
 let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking light for a "3D" carved look
+let opacityAmount = 1; // 0..1 — overlay blend strength; base ignores this (nothing beneath it to blend with)
 
 function updateFontDots() {
   FONT_DOTS.forEach((el, i) => {
@@ -1444,7 +1481,37 @@ patternBtn.onclick = () => {
   if (naturalW) render();
 };
 
+// ---------- save the current composited preview to the device ----------
+// Works at any point mid-edit — it just exports whatever the liveCanvas is
+// showing right now (base + any overlays + postcard text, fully dithered).
+// Uses a blob + <a download> link rather than canvas.toDataURL so large
+// images don't get held as a giant base64 string in memory.
+saveImageBtn.onclick = async () => {
+  if (!naturalW || saveImageBtn.disabled) return;
+  saveImageBtn.disabled = true;
+  const originalLabel = saveImageBtn.textContent;
+  try {
+    const blob = await new Promise(res => liveCanvas.toBlob(res, 'image/png'));
+    if (!blob) throw new Error('toBlob failed');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `lamp-preview-${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // revoke on a slight delay — some browsers need the URL to still be
+    // valid for a moment after the click before they've finished the save
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    saveImageBtn.textContent = 'saved';
+  } catch {
+    saveImageBtn.textContent = 'couldn\'t save';
+  }
+  setTimeout(() => { saveImageBtn.textContent = originalLabel; saveImageBtn.disabled = false; }, 1500);
+};
+
 const EFFECT_SLIDERS = [
+  { id: 'opacitySlider', setter: v => opacityAmount = v },
   { id: 'gridSlider', setter: v => gridAmount = v },
   { id: 'hatchSlider', setter: v => hatchAmount = v },
   { id: 'hatch2Slider', setter: v => hatch2Amount = v },

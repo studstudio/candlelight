@@ -58,6 +58,19 @@
   }
   .pill.active { background: var(--ember); border-color: var(--ember); color: #1a1108; font-weight: 600; }
 
+  .layer-tabs { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+  .layer-tab {
+    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line);
+    background: transparent; color: var(--cream-dim); font-size: 11px; letter-spacing: 0.02em;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .layer-tab.active { background: var(--ember); border-color: var(--ember); color: #1a1108; font-weight: 600; }
+  .layer-tab.layer-tab-add { border-style: dashed; opacity: 0.75; }
+  .layer-remove {
+    display: inline-block; width: 13px; height: 13px; line-height: 13px; text-align: center;
+    border-radius: 50%; background: rgba(0,0,0,0.25); font-size: 10px;
+  }
+
   /* orientation icon buttons — sit in the letterbox space beside the photo */
   .orient-btn {
     position: absolute; top: 50%; transform: translateY(-50%);
@@ -250,6 +263,8 @@
 </head>
 <body>
 
+<div class="layer-tabs" id="layerTabs"></div>
+
 <div class="photo-wrap" id="photoWrap">
   <img id="sourceImg" src="" style="display:none;">
   <div class="empty-state" id="emptyState">
@@ -329,11 +344,11 @@
 
 <div class="moire-row"><span class="moire-label">grid</span><input type="range" id="gridSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">hatch</span><input type="range" id="hatchSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">hatch wide</span><input type="range" id="hatch2Slider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">scan</span><input type="range" id="scanSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">grain</span><input type="range" id="grainSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">chroma</span><input type="range" id="chromaSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">relief</span><input type="range" id="reliefSlider" min="0" max="100" value="0"></div>
-<div class="moire-row"><span class="moire-label">tunnel</span><input type="range" id="tunnelSlider" min="0" max="100" value="0"></div>
 <p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
@@ -391,6 +406,7 @@
 <script>
 const WORKER_BASE_URL = "https://your-worker-name.workers.dev"; // <-- edit this
 
+const layerTabs = document.getElementById('layerTabs');
 const fileInput = document.getElementById('fileInput');
 const tapTarget = document.getElementById('tapTarget');
 const photoWrap = document.getElementById('photoWrap');
@@ -445,10 +461,151 @@ let editingContactIdx = null;
 let selectedContact = null;
 // gray-level/tone-curve state now lives in STEPS + stepIndex, defined near the scrub handler below
 
-// crop box state, in DISPLAYED (CSS) pixel coordinates relative to photoWrap
+// crop box state, in DISPLAYED (CSS) pixel coordinates relative to photoWrap.
+// This always describes whichever layer is currently ACTIVE for editing —
+// see the layers system just below.
 let box = { left: 0, top: 0, width: 0, height: 0 };
 
 const CHUNK_TYPE = 'epRb';
+
+// ============================================================
+// LAYERS: a base photo plus up to 2 optional overlays. Each layer is edited
+// with the exact same tools (crop, tone, filter, textures, dither, invert) —
+// only one layer's controls are "live" (bound to the globals below) at a
+// time, matching whichever tab is active. Composite order is base → overlay
+// 1 → overlay 2; each overlay's fully-dithered WHITE pixels are treated as
+// transparent, so only its "ink" shows through onto the layers beneath it.
+// Up to 2 overlays keeps the tab UI simple — the per-pixel compositing itself
+// is cheap at panel resolution (hundreds of pixels), so it isn't a limit
+// coming from performance.
+// ============================================================
+let layers = [null, null, null]; // index 0 = base, 1/2 = overlays
+let activeLayerIdx = 0;
+let pendingUploadTargetLayer = 0; // which layer slot the next file picker result goes into
+
+function makeDefaultLayerParams() {
+  return {
+    stepIndex: STEPS.reduce((best, cur, idx) =>
+      (cur.levels === 2 && Math.abs(cur.contrast - 1) < Math.abs(STEPS[best].contrast - 1)) ? idx : best, 0),
+    ditherPattern: 'floyd',
+    invert: false,
+    filterStepIndex: 0,
+    gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0
+  };
+}
+
+// offscreen canvas used to compute each layer's dithered output before
+// compositing — kept separate from the visible liveCanvas so intermediate
+// layer passes never flash on screen
+const scratchCanvas = document.createElement('canvas');
+const sctx = scratchCanvas.getContext('2d');
+
+function computeVisibleBoundsFor(coverScaleV, coverX0V, coverY0V, natW, natH) {
+  return { left: coverX0V, top: coverY0V, right: coverX0V + natW * coverScaleV, bottom: coverY0V + natH * coverScaleV };
+}
+function computeFittedBox(vis, aspect) {
+  const visW = vis.right - vis.left, visH = vis.bottom - vis.top;
+  let boxW, boxH;
+  if (visW / visH > aspect) { boxH = visH * 0.9; boxW = boxH * aspect; }
+  else { boxW = visW * 0.9; boxH = boxW / aspect; }
+  return { width: boxW, height: boxH, left: vis.left + (visW - boxW) / 2, top: vis.top + (visH - boxH) / 2 };
+}
+
+// writes the current live globals (whatever's being edited right now) back
+// into the active layer's stored record — always called before a render so
+// the composite reflects the latest scrub/slider/crop changes
+function snapshotActiveLayerState() {
+  const layer = layers[activeLayerIdx];
+  if (!layer) return;
+  layer.box = { ...box };
+  layer.coverScale = coverScale; layer.coverX0 = coverX0; layer.coverY0 = coverY0;
+  layer.naturalW = naturalW; layer.naturalH = naturalH;
+  layer.stepIndex = stepIndex;
+  layer.ditherPattern = ditherPattern;
+  layer.invert = invert;
+  layer.filterStepIndex = filterStepIndex;
+  layer.gridAmount = gridAmount; layer.hatchAmount = hatchAmount; layer.hatch2Amount = hatch2Amount;
+  layer.scanAmount = scanAmount; layer.grainAmount = grainAmount; layer.chromaAmount = chromaAmount;
+  layer.reliefAmount = reliefAmount;
+}
+
+// loads a stored layer's state into the live globals + on-screen controls,
+// so whichever layer you tap becomes the one the crop box / sliders / pills
+// actually affect
+function loadLayerStateToGlobals(idx) {
+  const layer = layers[idx];
+  if (!layer) return;
+  activeLayerIdx = idx;
+  naturalW = layer.naturalW; naturalH = layer.naturalH;
+  sourceImg.src = layer.img.src;
+  sourceImg.style.display = 'block';
+  emptyState.style.display = 'none';
+  photoWrap.classList.add('has-photo');
+  cropBox.style.display = 'block';
+  cropHint.style.display = 'block';
+  box = { ...layer.box };
+  coverScale = layer.coverScale; coverX0 = layer.coverX0; coverY0 = layer.coverY0;
+  stepIndex = layer.stepIndex;
+  ditherPattern = layer.ditherPattern;
+  invert = layer.invert;
+  filterStepIndex = layer.filterStepIndex;
+  gridAmount = layer.gridAmount; hatchAmount = layer.hatchAmount; hatch2Amount = layer.hatch2Amount;
+  scanAmount = layer.scanAmount; grainAmount = layer.grainAmount; chromaAmount = layer.chromaAmount;
+  reliefAmount = layer.reliefAmount;
+
+  applyBoxStyle();
+  document.getElementById('gridSlider').value = Math.round(gridAmount * 100);
+  document.getElementById('hatchSlider').value = Math.round(hatchAmount * 100);
+  document.getElementById('hatch2Slider').value = Math.round(hatch2Amount * 100);
+  document.getElementById('scanSlider').value = Math.round(scanAmount * 100);
+  document.getElementById('grainSlider').value = Math.round(grainAmount * 100);
+  document.getElementById('chromaSlider').value = Math.round(chromaAmount * 100);
+  document.getElementById('reliefSlider').value = Math.round(reliefAmount * 100);
+  invertBtn.classList.toggle('active', invert);
+  patternBtn.textContent = PATTERN_LABELS[ditherPattern];
+  filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === FILTER_STEPS[filterStepIndex].label));
+  updateIndicators();
+}
+
+function switchToLayer(idx) {
+  if (!layers[idx] || idx === activeLayerIdx) return;
+  snapshotActiveLayerState();
+  loadLayerStateToGlobals(idx);
+  updateLayerTabs();
+  render();
+}
+
+function removeLayer(idx) {
+  if (idx === 0 || !layers[idx]) return; // base can't be removed
+  layers[idx] = null;
+  if (activeLayerIdx === idx) loadLayerStateToGlobals(0);
+  updateLayerTabs();
+  render();
+}
+
+function updateLayerTabs() {
+  layerTabs.innerHTML = '';
+  if (!layers[0]) return; // nothing to show until a base photo exists — the empty-state placeholder covers this
+  const LABELS = ['base', 'overlay 1', 'overlay 2'];
+  for (let i = 0; i < 3; i++) {
+    const layer = layers[i];
+    const tab = document.createElement('button');
+    tab.className = 'layer-tab' + (i === activeLayerIdx ? ' active' : '') + (!layer ? ' layer-tab-add' : '');
+    tab.textContent = layer ? LABELS[i] : '+ overlay';
+    tab.onclick = () => {
+      if (!layer) { pendingUploadTargetLayer = i; fileInput.click(); }
+      else { switchToLayer(i); }
+    };
+    if (layer && i > 0) {
+      const remove = document.createElement('span');
+      remove.className = 'layer-remove';
+      remove.textContent = '×';
+      remove.onclick = (e) => { e.stopPropagation(); removeLayer(i); };
+      tab.appendChild(remove);
+    }
+    layerTabs.appendChild(tab);
+  }
+}
 
 // ---------- contacts ----------
 function loadContacts() {
@@ -570,16 +727,29 @@ function setOrientation(landscape) {
   }
   liveCanvas.width = targetW;
   liveCanvas.height = targetH;
-  if (naturalW) { initBox(); render(); }
+  scratchCanvas.width = targetW;
+  scratchCanvas.height = targetH;
+  // the fixed output aspect just changed, so every layer's crop box (not
+  // just the one you're currently editing) needs to re-fit to it
+  layers.forEach((layer, i) => {
+    if (!layer) return;
+    const vis = computeVisibleBoundsFor(layer.coverScale, layer.coverX0, layer.coverY0, layer.naturalW, layer.naturalH);
+    const fitted = computeFittedBox(vis, presetAspect);
+    if (i === activeLayerIdx) { box = fitted; applyBoxStyle(); }
+    else { layer.box = fitted; }
+  });
+  if (naturalW) render();
 }
 let presetAspect = PANEL_W / PANEL_H;
 btnLandscape.onclick = () => setOrientation(true);
 btnPortrait.onclick = () => setOrientation(false);
 
 // ---------- photo load ----------
-tapTarget.onclick = () => fileInput.click();
+tapTarget.onclick = () => { pendingUploadTargetLayer = 0; fileInput.click(); };
 const replacePhotoBtn = document.getElementById('replacePhotoBtn');
-replacePhotoBtn.onclick = () => fileInput.click();
+// replaces whichever layer is currently active (base or an overlay) — the
+// icon acts on "the photo you're looking at right now"
+replacePhotoBtn.onclick = () => { pendingUploadTargetLayer = activeLayerIdx; fileInput.click(); };
 
 // ---------- message panel toggle: folds/unfolds between photo and preview ----------
 const postcardCollapse = document.getElementById('postcardCollapse');
@@ -592,19 +762,33 @@ messageToggleBtn.onclick = () => {
 fileInput.onchange = (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  const targetIdx = pendingUploadTargetLayer;
   const img = new Image();
   img.onload = () => {
-    naturalW = img.naturalWidth; naturalH = img.naturalHeight;
-    sourceImg.src = img.src;
+    const layer = layers[targetIdx] || makeDefaultLayerParams();
+    layer.img = img;
+    layer.naturalW = img.naturalWidth;
+    layer.naturalH = img.naturalHeight;
+    layers[targetIdx] = layer;
+
+    hasPhoto = true;
+    photoWrap.classList.add('has-photo');
     sourceImg.style.display = 'block';
     emptyState.style.display = 'none';
-    photoWrap.classList.add('has-photo');
     cropBox.style.display = 'block';
     cropHint.style.display = 'block';
-    hasPhoto = true;
+
+    // temporarily reflect the new image's natural size so updateCoverFit()
+    // (which reads the globals, not the layer object) computes correctly
+    naturalW = layer.naturalW; naturalH = layer.naturalH;
+
     requestAnimationFrame(() => {
       updateCoverFit();
-      initBox();
+      layer.coverScale = coverScale; layer.coverX0 = coverX0; layer.coverY0 = coverY0;
+      layer.box = computeFittedBox(visibleImageBounds(), presetAspect);
+      activeLayerIdx = targetIdx;
+      loadLayerStateToGlobals(targetIdx);
+      updateLayerTabs();
       render();
       lastWrapW = photoWrap.clientWidth;
     });
@@ -635,26 +819,6 @@ function visibleImageBounds() {
     right: coverX0 + naturalW * coverScale,
     bottom: coverY0 + naturalH * coverScale
   };
-}
-
-function initBox() {
-  const vis = visibleImageBounds();
-  const visW = vis.right - vis.left, visH = vis.bottom - vis.top;
-  const aspect = presetAspect;
-
-  let boxW, boxH;
-  if (visW / visH > aspect) {
-    boxH = visH * 0.9;
-    boxW = boxH * aspect;
-  } else {
-    boxW = visW * 0.9;
-    boxH = boxW / aspect;
-  }
-  box.width = boxW;
-  box.height = boxH;
-  box.left = vis.left + (visW - boxW) / 2;
-  box.top = vis.top + (visH - boxH) / 2;
-  applyBoxStyle();
 }
 
 function applyBoxStyle() {
@@ -768,73 +932,74 @@ window.addEventListener('resize', () => {
 });
 
 // ---------- live render: crop + postcard bar + grayscale + tone curve + dither ----------
-function render() {
-  if (!naturalW) return;
-
+// ---------- per-layer pipeline: crop + postcard bar (base only) + grayscale
+// + tone curve + dither, run entirely against ONE layer's own stored settings.
+// Draws into the shared offscreen scratch canvas and returns a quantized,
+// dithered Float32Array of gray values (0-255) at panel resolution.
+function computeLayerGray(layer, isBase, W, H) {
   // map crop box (container coordinates) back to natural image pixel coordinates
   // using the same cover-fit math the browser used to render the photo
-  const sx = (box.left - coverX0) / coverScale;
-  const sy = (box.top - coverY0) / coverScale;
-  const sw = box.width / coverScale;
-  const sh = box.height / coverScale;
+  const sx = (layer.box.left - layer.coverX0) / layer.coverScale;
+  const sy = (layer.box.top - layer.coverY0) / layer.coverScale;
+  const sw = layer.box.width / layer.coverScale;
+  const sh = layer.box.height / layer.coverScale;
 
-  const W = targetW, H = targetH;
-  lctx.clearRect(0,0,W,H);
-  lctx.drawImage(sourceImg, sx, sy, sw, sh, 0, 0, W, H);
+  sctx.clearRect(0,0,W,H);
+  sctx.drawImage(layer.img, sx, sy, sw, sh, 0, 0, W, H);
 
   // draw the postcard text directly onto the RGBA canvas, BEFORE we extract
   // grayscale — this means it rides through the exact same tone curve, dither
   // pattern, and invert as the photo itself, with no separate logic needed.
-  // Single line only; the box hugs the actual text width instead of spanning
-  // the full canvas, and squashes horizontally (via canvas's native maxWidth
-  // behavior) rather than wrapping if the line runs long.
-  const text = postcardText.trim();
+  // Message text always belongs to the base layer only.
   let textBarTop = null, textBarBottom = null; // used later to keep text unaffected by chromatic drift
-  if (text) {
-    const barH = H * 0.11;
-    const barY = postcardPosition === 'top' ? 0 : H - barH;
-    textBarTop = barY;
-    textBarBottom = barY + barH;
-    const fontSize = Math.max(9, Math.floor(barH * 0.55));
-    const leftMargin = 0; // starts at the very edge, no padding
-    const maxTextWidth = W; // can span the full canvas width if the text is long enough
+  if (isBase) {
+    const text = postcardText.trim();
+    if (text) {
+      const barH = H * 0.11;
+      const barY = postcardPosition === 'top' ? 0 : H - barH;
+      textBarTop = barY;
+      textBarBottom = barY + barH;
+      const fontSize = Math.max(9, Math.floor(barH * 0.55));
+      const leftMargin = 0; // starts at the very edge, no padding
+      const maxTextWidth = W; // can span the full canvas width if the text is long enough
 
-    // font chosen via the circular dial next to the message input
-    lctx.font = `${fontSize}px '${FONT_LIST[selectedFontIndex]}', Georgia, serif`;
+      // font chosen via the circular dial next to the message input
+      sctx.font = `${fontSize}px '${FONT_LIST[selectedFontIndex]}', Georgia, serif`;
 
-    const naturalWidth = lctx.measureText(text).width;
-    const boxWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long, no extra padding
+      const naturalWidth = sctx.measureText(text).width;
+      const boxWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long, no extra padding
 
-    lctx.save();
+      sctx.save();
 
-    // vertical gradient: fades in from the outer edge, plateaus at 0.8 opacity,
-    // fades back out toward the inner edge — no hard top/bottom line, which
-    // gives the dither pass a smooth transition to work with instead of a
-    // single hard row boundary
-    const grad = lctx.createLinearGradient(0, barY, 0, barY + barH);
-    grad.addColorStop(0,    'rgba(190,190,190,0)');
-    grad.addColorStop(0.25, 'rgba(190,190,190,0.8)');
-    grad.addColorStop(0.75, 'rgba(190,190,190,0.8)');
-    grad.addColorStop(1,    'rgba(190,190,190,0)');
-    lctx.fillStyle = grad;
-    lctx.fillRect(0, barY, boxWidth, barH);
+      // vertical gradient: fades in from the outer edge, plateaus at 0.8 opacity,
+      // fades back out toward the inner edge — no hard top/bottom line, which
+      // gives the dither pass a smooth transition to work with instead of a
+      // single hard row boundary
+      const grad = sctx.createLinearGradient(0, barY, 0, barY + barH);
+      grad.addColorStop(0,    'rgba(190,190,190,0)');
+      grad.addColorStop(0.25, 'rgba(190,190,190,0.8)');
+      grad.addColorStop(0.75, 'rgba(190,190,190,0.8)');
+      grad.addColorStop(1,    'rgba(190,190,190,0)');
+      sctx.fillStyle = grad;
+      sctx.fillRect(0, barY, boxWidth, barH);
 
-    lctx.fillStyle = 'rgba(35,35,35,0.95)'; // near-black for legibility; inverts to light grey via the existing invert step
-    lctx.textAlign = 'left';
-    lctx.textBaseline = 'middle';
-    lctx.fillText(text, leftMargin, barY + barH / 2, maxTextWidth);
-    lctx.restore();
+      sctx.fillStyle = 'rgba(35,35,35,0.95)'; // near-black for legibility; inverts to light grey via the existing invert step
+      sctx.textAlign = 'left';
+      sctx.textBaseline = 'middle';
+      sctx.fillText(text, leftMargin, barY + barH / 2, maxTextWidth);
+      sctx.restore();
+    }
   }
 
-  const imgData = lctx.getImageData(0,0,W,H);
+  const imgData = sctx.getImageData(0,0,W,H);
   const data = imgData.data;
   const gray = new Float32Array(W*H);
-  const fw = FILTER_STEPS[filterStepIndex];
+  const fw = FILTER_STEPS[layer.filterStepIndex];
 
   // chromatic drift: sample R and B from horizontally offset positions
   // before combining into grayscale — on contrast edges this creates ghostly
   // fringing, like a VHS tracking error, once it hits the dither pass
-  const chromaShift = Math.round(chromaAmount * 4);
+  const chromaShift = Math.round(layer.chromaAmount * 4);
   function sampleChannel(x, y, channel) {
     x = Math.max(0, Math.min(W - 1, x));
     y = Math.max(0, Math.min(H - 1, y));
@@ -857,35 +1022,6 @@ function render() {
     for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
   }
 
-  // tunnel warp: a genuine spatial remap based on distance from center — pixels
-  // near the border sample from progressively closer to the middle, stretching
-  // outer content outward for a fisheye/vortex tunnel-vision look. Text stays
-  // untouched (rows inside the postcard bar keep their original, unwarped values).
-  if (tunnelAmount > 0) {
-    const warped = new Float32Array(W * H);
-    const cx = W / 2, cy = H / 2;
-    const maxR = Math.hypot(cx, cy);
-    const exponent = 1 + tunnelAmount * 2.5;
-    for (let y = 0; y < H; y++) {
-      const inTextBar = textBarTop !== null && y >= textBarTop && y < textBarBottom;
-      for (let x = 0; x < W; x++) {
-        const idx = y * W + x;
-        if (inTextBar) { warped[idx] = gray[idx]; continue; }
-        const dx = x - cx, dy = y - cy;
-        const r = Math.hypot(dx, dy);
-        if (r === 0) { warped[idx] = gray[idx]; continue; }
-        const rn = r / maxR;
-        const scale = Math.pow(rn, exponent) / rn;
-        let sx = Math.round(cx + dx * scale);
-        let sy = Math.round(cy + dy * scale);
-        sx = Math.max(0, Math.min(W - 1, sx));
-        sy = Math.max(0, Math.min(H - 1, sy));
-        warped[idx] = gray[sy * W + sx];
-      }
-    }
-    gray.set(warped);
-  }
-
   // pre-dither texture effects: each overlays a pattern onto the luminance
   // data BEFORE quantizing. The periodic ones (grid/hatch/scan) interfere
   // with the dither pattern's own periodicity to create genuine moiré beats;
@@ -893,53 +1029,57 @@ function render() {
   // organically instead of geometrically; relief simulates a raking light
   // source across the luminance gradient, giving edges a pushed-out/carved
   // "3D" look (classic bump-mapping technique).
-  if (gridAmount > 0 || hatchAmount > 0 || scanAmount > 0 || grainAmount > 0 || reliefAmount > 0) {
+  if (layer.gridAmount > 0 || layer.hatchAmount > 0 || layer.hatch2Amount > 0 || layer.scanAmount > 0 || layer.grainAmount > 0 || layer.reliefAmount > 0) {
     const AMPLITUDE = 55;
     const GRID_WAVELENGTH = 4;
     const HATCH_WAVELENGTH = 5;
+    const HATCH2_WAVELENGTH = 20; // 4x the original hatch wavelength — much wider bands
     const SCAN_WAVELENGTH = 4;
-    const RELIEF_SCALE = 2.5;
+    const RELIEF_SCALE = 6.5; // stronger raking-light push for a more pronounced carved look
     const LIGHT_ANGLE = -45 * Math.PI / 180; // light from upper-left
     const lx = Math.cos(LIGHT_ANGLE), ly = Math.sin(LIGHT_ANGLE);
-    const baseGray = reliefAmount > 0 ? gray.slice() : null; // gradients read from the pre-effects snapshot
+    const baseGray = layer.reliefAmount > 0 ? gray.slice() : null; // gradients read from the pre-effects snapshot
 
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const idx = y * W + x;
-        if (gridAmount > 0) {
+        if (layer.gridAmount > 0) {
           const g = Math.sin(2 * Math.PI * x / GRID_WAVELENGTH) * Math.sin(2 * Math.PI * y / GRID_WAVELENGTH);
-          gray[idx] += gridAmount * AMPLITUDE * g;
+          gray[idx] += layer.gridAmount * AMPLITUDE * g;
         }
-        if (hatchAmount > 0) {
+        if (layer.hatchAmount > 0) {
           const proj = (x + y) / Math.SQRT2; // 45° diagonal projection
           const h = Math.sin(2 * Math.PI * proj / HATCH_WAVELENGTH);
-          gray[idx] += hatchAmount * AMPLITUDE * h;
+          gray[idx] += layer.hatchAmount * AMPLITUDE * h;
         }
-        if (scanAmount > 0) {
+        if (layer.hatch2Amount > 0) {
+          const proj = (x + y) / Math.SQRT2; // same 45° diagonal projection, 4x wider bands
+          const h2 = Math.sin(2 * Math.PI * proj / HATCH2_WAVELENGTH);
+          gray[idx] += layer.hatch2Amount * AMPLITUDE * h2;
+        }
+        if (layer.scanAmount > 0) {
           const s = Math.sin(2 * Math.PI * y / SCAN_WAVELENGTH); // horizontal-only, no x term
-          gray[idx] += scanAmount * AMPLITUDE * s;
+          gray[idx] += layer.scanAmount * AMPLITUDE * s;
         }
-        if (grainAmount > 0) {
-          gray[idx] += grainAmount * AMPLITUDE * (Math.random() * 2 - 1);
+        if (layer.grainAmount > 0) {
+          gray[idx] += layer.grainAmount * AMPLITUDE * (Math.random() * 2 - 1);
         }
-        if (reliefAmount > 0) {
+        if (layer.reliefAmount > 0) {
           const xL = x > 0 ? x - 1 : 0, xR = x < W - 1 ? x + 1 : W - 1;
           const yU = y > 0 ? y - 1 : 0, yD = y < H - 1 ? y + 1 : H - 1;
           const gx = baseGray[y * W + xR] - baseGray[y * W + xL];
           const gy = baseGray[yD * W + x] - baseGray[yU * W + x];
           const relief = gx * lx + gy * ly; // directional derivative along the light vector
-          gray[idx] += reliefAmount * RELIEF_SCALE * relief;
+          gray[idx] += layer.reliefAmount * RELIEF_SCALE * relief;
         }
         gray[idx] = Math.max(0, Math.min(255, gray[idx]));
       }
     }
   }
 
-  // apply the current step's full tone curve — black/white point, then
-  // shadow/highlight shaping, then contrast — before quantizing. This is what
-  // gives finer variation than raw level count alone, same effect as adjusting
-  // contrast/black point/shadows/highlights in Photos before uploading
-  const cfg = STEPS[stepIndex];
+  // apply this layer's tone curve — black/white point, then shadow/highlight
+  // shaping, then contrast — before quantizing.
+  const cfg = STEPS[layer.stepIndex];
   const range = Math.max(1, cfg.whitePoint - cfg.blackPoint);
   for (let i=0;i<W*H;i++){
     let t = (gray[i] - cfg.blackPoint) / range;
@@ -970,18 +1110,46 @@ function render() {
   // strength is baked into the step progression — lower strength = harder,
   // more graphic edges; full strength = smoothest photographic gradation
   const strength = cfg.ditherStrength;
-  applyDither(gray, W, H, quantize, step, ditherPattern, strength);
+  applyDither(gray, W, H, quantize, step, layer.ditherPattern, strength);
 
   // invert swaps black<->white on the already-dithered result, so the pattern
   // itself is unchanged — just which physical e-ink state (black or white)
   // each dithered pixel maps to
-  if (invert) {
+  if (layer.invert) {
     for (let i=0;i<W*H;i++){ gray[i] = 255 - gray[i]; }
   }
 
-  for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,gray[i])); data[i*4]=v;data[i*4+1]=v;data[i*4+2]=v;data[i*4+3]=255; }
-  lctx.putImageData(imgData,0,0);
-  liveCanvas._grayCache = gray;
+  return gray;
+}
+
+// ---------- live render: composites base + any overlays into liveCanvas ----------
+// Overlays are drawn on top in order (overlay 1, then overlay 2); any pixel
+// an overlay finishes with as pure white (255, its "background") is treated
+// as transparent and left alone, so only that overlay's dithered "ink" shows
+// through onto whatever is underneath it.
+function render() {
+  if (!naturalW) return;
+  snapshotActiveLayerState(); // make sure the layer being edited right now is up to date before compositing
+
+  const W = targetW, H = targetH;
+  let composite = null;
+  for (let i = 0; i < layers.length; i++) {
+    const layer = layers[i];
+    if (!layer || !layer.img) continue;
+    const gray = computeLayerGray(layer, i === 0, W, H);
+    if (!composite) {
+      composite = gray;
+    } else {
+      for (let p = 0; p < W*H; p++) { if (gray[p] < 255) composite[p] = gray[p]; }
+    }
+  }
+  if (!composite) return;
+
+  const outData = lctx.createImageData(W, H);
+  const od = outData.data;
+  for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,composite[i])); od[i*4]=v;od[i*4+1]=v;od[i*4+2]=v;od[i*4+3]=255; }
+  lctx.putImageData(outData,0,0);
+  liveCanvas._grayCache = composite;
 }
 
 // ---------- dither implementations ----------
@@ -1139,11 +1307,11 @@ const FONT_LIST = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonli
 let selectedFontIndex = 0; // Pixelcastle, the default
 let gridAmount = 0;    // 0..1 — 2D periodic grid, interferes with dither patterns
 let hatchAmount = 0;   // 0..1 — diagonal single-axis wave, crosshatch/engraving feel
+let hatch2Amount = 0;  // 0..1 — same diagonal wave, 4x the wavelength (much wider bands)
 let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
 let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
 let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
 let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking light for a "3D" carved look
-let tunnelAmount = 0;  // 0..1 — radial spatial warp, stretches the border relative to center
 
 function updateFontDots() {
   FONT_DOTS.forEach((el, i) => {
@@ -1279,11 +1447,11 @@ patternBtn.onclick = () => {
 const EFFECT_SLIDERS = [
   { id: 'gridSlider', setter: v => gridAmount = v },
   { id: 'hatchSlider', setter: v => hatchAmount = v },
+  { id: 'hatch2Slider', setter: v => hatch2Amount = v },
   { id: 'scanSlider', setter: v => scanAmount = v },
   { id: 'grainSlider', setter: v => grainAmount = v },
   { id: 'chromaSlider', setter: v => chromaAmount = v },
-  { id: 'reliefSlider', setter: v => reliefAmount = v },
-  { id: 'tunnelSlider', setter: v => tunnelAmount = v }
+  { id: 'reliefSlider', setter: v => reliefAmount = v }
 ];
 EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);
@@ -1391,7 +1559,9 @@ document.addEventListener('gestureend', (e) => e.preventDefault());
 
 renderContacts();
 liveCanvas.width = targetW; liveCanvas.height = targetH;
+scratchCanvas.width = targetW; scratchCanvas.height = targetH;
 updateIndicators(); // sync the ring indicators to the default state
+updateLayerTabs(); // empty until a base photo is chosen
 
 // canvas text doesn't auto-refresh when web fonts finish loading, so once
 // they're all ready, force a re-render to pick up the real typefaces

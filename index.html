@@ -1011,68 +1011,73 @@ function computeLayerGray(layer, W, H) {
     for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
   }
 
-  // organic: built on cellular (Worley) noise instead of plain sine waves —
-  // the frame is scattered with irregular "cell" seed points, each pixel is
-  // pushed outward from its nearest seed (like cytoplasm bulging around a
-  // nucleus), and the thin boundaries between neighboring cells are darkened
-  // into "membrane" walls. This reads as genuinely organic/cell-division-like
-  // rather than uniform wavy ripples, because real biological cells tile
-  // irregularly — no two are the same size or shape — which is exactly what
-  // jittered cellular noise gives you for free.
-  //
-  // (Cymatics and Lichtenberg patterns were also on the table — they're
-  // legitimately different generative mechanisms though: cymatics comes from
-  // radial standing-wave interference, Lichtenberg from recursive branching
-  // growth. Worth their own dedicated sliders later if you want to keep
-  // exploring in that direction; this one covers the cell-division end.)
+  // organic: a real 2-buffer wave simulation, not a fixed pattern. Ripples
+  // are dropped at points where the PHOTO ITSELF has strong local contrast —
+  // its own edges and contours act as the "stones hitting the pond" — then
+  // those waves propagate outward across the frame using the classic
+  // interference recurrence (each new frame of the simulation is built from
+  // the ring around each cell in the previous frame, minus the frame before
+  // that, with a bit of damping). Waves from different source points run
+  // into each other, and where two wavefronts overlap the heights genuinely
+  // add and cancel — real constructive/destructive interference, not a
+  // pattern that just looks like it. The resulting height field is then used
+  // to both warp the image (like light refracting through the ripples) and
+  // shade it (brighter/darker where the water's "surface" tilts), so the
+  // photo is actually being transformed by what the simulation computed,
+  // not overlaid with something unrelated to it.
   if (layer.organicAmount > 0) {
-    const cellSize = 22;
-    function hash2(ix, iy) {
-      let n = (ix * 374761393 + iy * 668265263) | 0;
-      n = Math.imul(n ^ (n >>> 13), 1274126177);
-      n = n ^ (n >>> 16);
-      return ((n >>> 0) % 10000) / 10000;
+    let buf1 = new Float32Array(W * H);
+    let buf2 = new Float32Array(W * H);
+    let next = new Float32Array(W * H);
+
+    // seed drops at the image's own strong edges — sampled on a coarse grid
+    // so we're not dropping a stone at every single pixel, just wherever
+    // there's real contrast nearby
+    const seedStep = 6;
+    for (let sy = seedStep; sy < H - seedStep; sy += seedStep) {
+      for (let sx = seedStep; sx < W - seedStep; sx += seedStep) {
+        const idx = sy * W + sx;
+        const gx = gray[idx + 1] - gray[idx - 1];
+        const gy = gray[idx + W] - gray[idx - W];
+        const edgeStrength = Math.hypot(gx, gy);
+        if (edgeStrength > 40) buf1[idx] += Math.min(255, edgeStrength) * 1.4;
+      }
     }
-    function featurePoint(gx, gy) {
-      return [ (gx + hash2(gx, gy)) * cellSize, (gy + hash2(gy, gx + 7919)) * cellSize ];
+
+    const iterations = Math.round(8 + layer.organicAmount * 24); // more amount = more time for ripples to spread and collide
+    const damping = 0.985;
+    for (let k = 0; k < iterations; k++) {
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const idx = y * W + x;
+          next[idx] = ((buf1[idx-1] + buf1[idx+1] + buf1[idx-W] + buf1[idx+W]) * 0.5 - buf2[idx]) * damping;
+        }
+      }
+      const tmp = buf2; buf2 = buf1; buf1 = next; next = tmp;
     }
 
     const warped = new Float32Array(W * H);
-    const warpStrength = layer.organicAmount * 5;
+    const warpStrength = layer.organicAmount * 0.06;
+    const shadeStrength = layer.organicAmount * 0.6;
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize);
-        let minD1 = Infinity, minD2 = Infinity, nearestFx = 0, nearestFy = 0;
-        for (let j = -1; j <= 1; j++) {
-          for (let i = -1; i <= 1; i++) {
-            const [fx, fy] = featurePoint(cx + i, cy + j);
-            const d = Math.hypot(x - fx, y - fy);
-            if (d < minD1) { minD2 = minD1; minD1 = d; nearestFx = fx; nearestFy = fy; }
-            else if (d < minD2) { minD2 = d; }
-          }
-        }
-
-        // push this pixel away from its cell's own seed point — organic,
-        // outward bulging displacement instead of a uniform ripple
-        const dx = x - nearestFx, dy = y - nearestFy;
-        const dist = Math.hypot(dx, dy) || 1;
-        const push = warpStrength * Math.min(1, minD1 / cellSize);
-        const sx = Math.max(0, Math.min(W - 1, x + (dx / dist) * push));
-        const sy = Math.max(0, Math.min(H - 1, y + (dy / dist) * push));
+        const idx = y * W + x;
+        const xL = x > 0 ? x - 1 : 0, xR = x < W - 1 ? x + 1 : W - 1;
+        const yU = y > 0 ? y - 1 : 0, yD = y < H - 1 ? y + 1 : H - 1;
+        // slope of the ripple surface at this point — this IS the refraction direction
+        const hgx = buf1[y * W + xR] - buf1[y * W + xL];
+        const hgy = buf1[yD * W + x] - buf1[yU * W + x];
+        const sx = Math.max(0, Math.min(W - 1, x + hgx * warpStrength));
+        const sy = Math.max(0, Math.min(H - 1, y + hgy * warpStrength));
         const x0 = Math.floor(sx), x1 = Math.min(W - 1, x0 + 1);
         const y0 = Math.floor(sy), y1 = Math.min(H - 1, y0 + 1);
-        const fx2 = sx - x0, fy2 = sy - y0;
+        const fx = sx - x0, fy = sy - y0;
         const v00 = gray[y0 * W + x0], v10 = gray[y0 * W + x1];
         const v01 = gray[y1 * W + x0], v11 = gray[y1 * W + x1];
-        const vTop = v00 + (v10 - v00) * fx2, vBot = v01 + (v11 - v01) * fx2;
-        let val = vTop + (vBot - vTop) * fy2;
-
-        // darken the thin wall where two cells meet (minD1 and minD2 are
-        // close together right at a cell boundary)
-        const wallCloseness = 1 - Math.min(1, (minD2 - minD1) / (cellSize * 0.35));
-        val -= layer.organicAmount * 70 * wallCloseness;
-
-        warped[y * W + x] = Math.max(0, Math.min(255, val));
+        const vTop = v00 + (v10 - v00) * fx, vBot = v01 + (v11 - v01) * fx;
+        let val = vTop + (vBot - vTop) * fy;
+        val += buf1[idx] * shadeStrength; // caustic-like brightening/darkening from the wave height itself
+        warped[idx] = Math.max(0, Math.min(255, val));
       }
     }
     gray.set(warped);

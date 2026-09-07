@@ -1318,20 +1318,29 @@ function stampPostcardText(composite, W, H) {
 
   const barH = H * 0.11;
   const barY = postcardPosition === 'top' ? 0 : H - barH;
-  const fontSize = Math.max(9, Math.floor(barH * 0.55));
+  // a couple of fonts render visually smaller than the others at the same
+  // pixel size — nudge those up individually rather than changing the size
+  // for everyone
+  const FONT_SIZE_ADJUST = { Altgotisch: 5 };
+  const fontName = FONT_LIST[selectedFontIndex];
+  const fontSize = Math.max(9, Math.floor(barH * 0.55)) + (FONT_SIZE_ADJUST[fontName] || 0);
   const maxTextWidth = W; // can span the full canvas width if the text is long enough
 
-  sctx.font = `${fontSize}px '${FONT_LIST[selectedFontIndex]}', Georgia, serif`;
+  sctx.font = `${fontSize}px '${fontName}', Georgia, serif`;
   const naturalWidth = sctx.measureText(text).width;
   const boxWidth = Math.min(naturalWidth, maxTextWidth); // squashed width if it was too long, no extra padding
 
   sctx.save();
-  // vertical gradient: fades in from the outer edge, plateaus at 0.8 opacity,
-  // fades back out toward the inner edge — no hard top/bottom line
+  // vertical gradient: fades in from the outer edge, plateaus at high opacity,
+  // fades back out toward the inner edge — no hard top/bottom line. Plateau
+  // is intentionally higher than a purely cosmetic bar would need, since it
+  // also has to keep whatever's happening in the photo behind it (grid,
+  // organic warp, grain, etc., all fully at whatever strength you set them)
+  // from fighting with the text for legibility.
   const grad = sctx.createLinearGradient(0, barY, 0, barY + barH);
   grad.addColorStop(0,    'rgba(190,190,190,0)');
-  grad.addColorStop(0.25, 'rgba(190,190,190,0.8)');
-  grad.addColorStop(0.75, 'rgba(190,190,190,0.8)');
+  grad.addColorStop(0.25, 'rgba(190,190,190,0.92)');
+  grad.addColorStop(0.75, 'rgba(190,190,190,0.92)');
   grad.addColorStop(1,    'rgba(190,190,190,0)');
   sctx.fillStyle = grad;
   sctx.fillRect(0, barY, boxWidth, barH);
@@ -1343,9 +1352,11 @@ function stampPostcardText(composite, W, H) {
   sctx.restore();
 
   // pull just the text-bar rows back out and dither them using the base
-  // layer's own tone step + pattern, so the look stays consistent with
-  // before — then stamp that band into the composite, overwriting whatever
-  // overlay pixels were there
+  // layer's tone step + pattern for visual consistency — but CAPPED, so an
+  // aggressive base setting (e.g. 2-gray, high dither strength) can't shred
+  // thin text strokes into noise the way it did before. Text always gets at
+  // least 3 gray levels and no more than moderate dither strength, regardless
+  // of how hard the sliders are pushed elsewhere.
   const barTop = Math.max(0, Math.floor(barY));
   const barBottom = Math.min(H, Math.ceil(barY + barH));
   const bandH = barBottom - barTop;
@@ -1357,10 +1368,11 @@ function stampPostcardText(composite, W, H) {
 
   const baseLayer = layers[0];
   const cfg = STEPS[baseLayer.stepIndex];
-  const levelCount = cfg.levels;
+  const levelCount = Math.max(3, cfg.levels); // never collapse text down to harsh 2-gray thresholding
+  const cappedStrength = Math.min(cfg.ditherStrength, 0.5); // never inject full-strength dither noise into text
   const step = 255 / (levelCount - 1);
   function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
-  applyDither(bandGray, W, bandH, quantize, step, baseLayer.ditherPattern, cfg.ditherStrength);
+  applyDither(bandGray, W, bandH, quantize, step, baseLayer.ditherPattern, cappedStrength);
   if (baseLayer.invert) { for (let i=0;i<W*bandH;i++) bandGray[i] = 255 - bandGray[i]; }
 
   for (let y = 0; y < bandH; y++) {

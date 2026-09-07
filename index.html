@@ -18,6 +18,9 @@
   @font-face { font-family: 'BasteleurMoonlight'; src: url('./fonts/Basteleur-Moonlight.ttf') format('truetype'); font-display: swap; }
   @font-face { font-family: 'VG5000'; src: url('./fonts/VG5000-Regular.otf') format('opentype'); font-display: swap; }
   @font-face { font-family: 'ChaumontScript'; src: url('./fonts/Chaumont_script-Regular.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'Helgoland'; src: url('./fonts/Helgoland.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'MagielBlack'; src: url('./fonts/Magiel-Black.otf') format('opentype'); font-display: swap; }
+  @font-face { font-family: 'Altgotisch'; src: url('./fonts/Altgotisch.ttf') format('truetype'); font-display: swap; }
 
   :root {
     --bg: #14100d;
@@ -359,8 +362,6 @@
 <div class="moire-row"><span class="moire-label">organic</span><input type="range" id="organicSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">outline</span><input type="range" id="outlineSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">dot stipple</span><input type="range" id="dotStippleSlider" min="0" max="100" value="0"></div>
-<div class="moire-row"><span class="moire-label">square stipple</span><input type="range" id="squareStippleSlider" min="0" max="100" value="0"></div>
-<div class="moire-row"><span class="moire-label">line stipple</span><input type="range" id="lineStippleSlider" min="0" max="100" value="0"></div>
 <p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <div style="display:flex; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
@@ -505,7 +506,7 @@ function makeDefaultLayerParams() {
     filterStepIndex: 0,
     gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
     organicAmount: 0, outlineAmount: 0,
-    dotStippleAmount: 0, squareStippleAmount: 0, lineStippleAmount: 0,
+    dotStippleAmount: 0,
     opacityAmount: 1 // 0..1 — only meaningful for overlay layers (1 and 2); base is always fully opaque
   };
 }
@@ -546,8 +547,6 @@ function snapshotActiveLayerState() {
   layer.organicAmount = organicAmount;
   layer.outlineAmount = outlineAmount;
   layer.dotStippleAmount = dotStippleAmount;
-  layer.squareStippleAmount = squareStippleAmount;
-  layer.lineStippleAmount = lineStippleAmount;
   layer.opacityAmount = opacityAmount;
 }
 
@@ -577,8 +576,6 @@ function loadLayerStateToGlobals(idx) {
   organicAmount = layer.organicAmount;
   outlineAmount = layer.outlineAmount;
   dotStippleAmount = layer.dotStippleAmount;
-  squareStippleAmount = layer.squareStippleAmount;
-  lineStippleAmount = layer.lineStippleAmount;
   opacityAmount = layer.opacityAmount;
 
   applyBoxStyle();
@@ -595,8 +592,6 @@ function loadLayerStateToGlobals(idx) {
   document.getElementById('organicSlider').value = Math.round(organicAmount * 100);
   document.getElementById('outlineSlider').value = Math.round(outlineAmount * 100);
   document.getElementById('dotStippleSlider').value = Math.round(dotStippleAmount * 100);
-  document.getElementById('squareStippleSlider').value = Math.round(squareStippleAmount * 100);
-  document.getElementById('lineStippleSlider').value = Math.round(lineStippleAmount * 100);
   invertBtn.classList.toggle('active', invert);
   patternBtn.textContent = PATTERN_LABELS[ditherPattern];
   filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === FILTER_STEPS[filterStepIndex].label));
@@ -1013,39 +1008,48 @@ function computeLayerGray(layer, W, H) {
 
   // organic: a real 2-buffer wave simulation, not a fixed pattern. Ripples
   // are dropped at points where the PHOTO ITSELF has strong local contrast —
-  // its own edges and contours act as the "stones hitting the pond" — then
-  // those waves propagate outward across the frame using the classic
-  // interference recurrence (each new frame of the simulation is built from
-  // the ring around each cell in the previous frame, minus the frame before
-  // that, with a bit of damping). Waves from different source points run
-  // into each other, and where two wavefronts overlap the heights genuinely
-  // add and cancel — real constructive/destructive interference, not a
-  // pattern that just looks like it. The resulting height field is then used
-  // to both warp the image (like light refracting through the ripples) and
-  // shade it (brighter/darker where the water's "surface" tilts), so the
-  // photo is actually being transformed by what the simulation computed,
-  // not overlaid with something unrelated to it.
+  // one source per block, picking only the single strongest edge in each
+  // block (rather than every point above a threshold), so sources are sparse
+  // and well-separated. That spacing matters: it gives waves real room to
+  // expand into big, visible arcs BEFORE they start colliding, instead of
+  // interfering immediately at a fine scale that just reads as noise. Waves
+  // from different source points run into each other, and where two
+  // wavefronts overlap the heights genuinely add and cancel — real
+  // constructive/destructive interference, not a pattern that just looks
+  // like it. The resulting height field is normalized (so the effect's
+  // visible strength depends only on the slider, not on how much contrast
+  // the source photo happened to have) and then used to both warp the image
+  // (like light refracting through the ripples) and shade it (brighter/
+  // darker where the water's "surface" tilts) — the photo is actually being
+  // transformed by what the simulation computed, not overlaid with something
+  // unrelated to it.
   if (layer.organicAmount > 0) {
     let buf1 = new Float32Array(W * H);
     let buf2 = new Float32Array(W * H);
     let next = new Float32Array(W * H);
 
-    // seed drops at the image's own strong edges — sampled on a coarse grid
-    // so we're not dropping a stone at every single pixel, just wherever
-    // there's real contrast nearby
-    const seedStep = 6;
-    for (let sy = seedStep; sy < H - seedStep; sy += seedStep) {
-      for (let sx = seedStep; sx < W - seedStep; sx += seedStep) {
-        const idx = sy * W + sx;
-        const gx = gray[idx + 1] - gray[idx - 1];
-        const gy = gray[idx + W] - gray[idx - W];
-        const edgeStrength = Math.hypot(gx, gy);
-        if (edgeStrength > 40) buf1[idx] += Math.min(255, edgeStrength) * 1.4;
+    const blockSize = 34;
+    for (let by = blockSize; by < H - blockSize; by += blockSize) {
+      for (let bx = blockSize; bx < W - blockSize; bx += blockSize) {
+        let bestStrength = 0, bestX = -1, bestY = -1;
+        for (let y = by; y < by + blockSize; y++) {
+          for (let x = bx; x < bx + blockSize; x++) {
+            const idx = y * W + x;
+            const gx = gray[idx + 1] - gray[idx - 1];
+            const gy = gray[idx + W] - gray[idx - W];
+            const strength = Math.hypot(gx, gy);
+            if (strength > bestStrength) { bestStrength = strength; bestX = x; bestY = y; }
+          }
+        }
+        // fixed impulse regardless of exact edge strength — since the result
+        // gets normalized below, this only decides WHERE ripples originate,
+        // not how strong the final effect looks
+        if (bestStrength > 25) buf1[bestY * W + bestX] += 300;
       }
     }
 
-    const iterations = Math.round(8 + layer.organicAmount * 24); // more amount = more time for ripples to spread and collide
-    const damping = 0.985;
+    const iterations = Math.round(15 + layer.organicAmount * 45); // more amount = more time to travel and collide into broad arcs
+    const damping = 0.99;
     for (let k = 0; k < iterations; k++) {
       for (let y = 1; y < H - 1; y++) {
         for (let x = 1; x < W - 1; x++) {
@@ -1056,17 +1060,21 @@ function computeLayerGray(layer, W, H) {
       const tmp = buf2; buf2 = buf1; buf1 = next; next = tmp;
     }
 
+    let maxAbs = 0;
+    for (let i = 0; i < W*H; i++) { const a = Math.abs(buf1[i]); if (a > maxAbs) maxAbs = a; }
+    const norm = maxAbs > 0 ? 1 / maxAbs : 0;
+
     const warped = new Float32Array(W * H);
-    const warpStrength = layer.organicAmount * 0.06;
-    const shadeStrength = layer.organicAmount * 0.6;
+    const warpStrength = layer.organicAmount * 22;  // px of displacement at full normalized height
+    const shadeStrength = layer.organicAmount * 130; // tone units at full normalized height
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const idx = y * W + x;
         const xL = x > 0 ? x - 1 : 0, xR = x < W - 1 ? x + 1 : W - 1;
         const yU = y > 0 ? y - 1 : 0, yD = y < H - 1 ? y + 1 : H - 1;
         // slope of the ripple surface at this point — this IS the refraction direction
-        const hgx = buf1[y * W + xR] - buf1[y * W + xL];
-        const hgy = buf1[yD * W + x] - buf1[yU * W + x];
+        const hgx = (buf1[y * W + xR] - buf1[y * W + xL]) * norm;
+        const hgy = (buf1[yD * W + x] - buf1[yU * W + x]) * norm;
         const sx = Math.max(0, Math.min(W - 1, x + hgx * warpStrength));
         const sy = Math.max(0, Math.min(H - 1, y + hgy * warpStrength));
         const x0 = Math.floor(sx), x1 = Math.min(W - 1, x0 + 1);
@@ -1076,7 +1084,7 @@ function computeLayerGray(layer, W, H) {
         const v01 = gray[y1 * W + x0], v11 = gray[y1 * W + x1];
         const vTop = v00 + (v10 - v00) * fx, vBot = v01 + (v11 - v01) * fx;
         let val = vTop + (vBot - vTop) * fy;
-        val += buf1[idx] * shadeStrength; // caustic-like brightening/darkening from the wave height itself
+        val += buf1[idx] * norm * shadeStrength; // caustic-like brightening/darkening from the wave height itself
         warped[idx] = Math.max(0, Math.min(255, val));
       }
     }
@@ -1115,7 +1123,7 @@ function computeLayerGray(layer, W, H) {
     const AMPLITUDE = 55;
     const GRID_WAVELENGTH = 4;
     const HATCH_WAVELENGTH = 5;
-    const HATCH2_WAVELENGTH = 20; // 4x the original hatch wavelength — much wider bands
+    const HATCH2_WAVELENGTH = 50; // 10x the original hatch wavelength — much wider bands
     const SCAN_WAVELENGTH = 4;
     const RELIEF_SCALE = 6.5; // stronger raking-light push for a more pronounced carved look
     const LIGHT_ANGLE = -45 * Math.PI / 180; // light from upper-left
@@ -1164,12 +1172,10 @@ function computeLayerGray(layer, W, H) {
   // (not shade) encodes that cell's average brightness — dark cells get big
   // dots that nearly merge, light cells get tiny dots or none. This is
   // literally how hand stippling and engraving build up tone through density
-  // of marks rather than continuous gray. Cell size is fixed (small) rather
-  // than tied to the slider — the slider is purely blend strength, so you can
-  // push it to 100% and still get fine, dense dots instead of the dots
-  // growing bigger/coarser as strength increases.
+  // of marks rather than continuous gray. Cell size grows with the slider
+  // (finer dots at low amounts, bolder/coarser at high amounts).
   if (layer.dotStippleAmount > 0) {
-    const cell = 2;
+    const cell = Math.round(2 + layer.dotStippleAmount * 6);
     for (let cy = 0; cy < H; cy += cell) {
       const ch = Math.min(cell, H - cy);
       for (let cx = 0; cx < W; cx += cell) {
@@ -1189,52 +1195,6 @@ function computeLayerGray(layer, W, H) {
             gray[idx] = gray[idx] * (1 - layer.dotStippleAmount) + dotVal * layer.dotStippleAmount;
           }
         }
-      }
-    }
-  }
-
-  // square stipple: same dot-screen idea, but each cell becomes a filled
-  // square instead of a circle — a bolder, more graphic/woodblock-print feel
-  // than the rounded dot version.
-  if (layer.squareStippleAmount > 0) {
-    const cell = Math.round(3 + layer.squareStippleAmount * 7);
-    for (let cy = 0; cy < H; cy += cell) {
-      const ch = Math.min(cell, H - cy);
-      for (let cx = 0; cx < W; cx += cell) {
-        const cw = Math.min(cell, W - cx);
-        let sum = 0;
-        for (let y = cy; y < cy + ch; y++) for (let x = cx; x < cx + cw; x++) sum += gray[y * W + x];
-        const avg = sum / (cw * ch);
-        const darkness = 1 - avg / 255;
-        const halfSide = darkness * Math.max(cw, ch) * 0.62;
-        const centerX = cx + cw / 2, centerY = cy + ch / 2;
-        for (let y = cy; y < cy + ch; y++) {
-          for (let x = cx; x < cx + cw; x++) {
-            const inside = Math.abs(x - centerX + 0.5) < halfSide && Math.abs(y - centerY + 0.5) < halfSide;
-            const dotVal = inside ? 0 : 255;
-            const idx = y * W + x;
-            gray[idx] = gray[idx] * (1 - layer.squareStippleAmount) + dotVal * layer.squareStippleAmount;
-          }
-        }
-      }
-    }
-  }
-
-  // line stipple: a line-screen halftone — parallel 45° lines whose
-  // thickness at any point varies with the local tone there, the way old
-  // engravings and newsprint used lines instead of dots to build shade.
-  // Implemented as a per-pixel ramp threshold along the line's own axis, so
-  // each line's width grows and shrinks continuously with the photo beneath it.
-  if (layer.lineStippleAmount > 0) {
-    const period = Math.round(3 + layer.lineStippleAmount * 7);
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const idx = y * W + x;
-        const proj = (x + y) / Math.SQRT2; // 45° diagonal, matches the Hatch effects' axis
-        const ramp = ((proj % period) + period) % period / period; // 0..1 sawtooth along the line period
-        const darkness = 1 - gray[idx] / 255;
-        const lineVal = darkness > ramp ? 0 : 255;
-        gray[idx] = gray[idx] * (1 - layer.lineStippleAmount) + lineVal * layer.lineStippleAmount;
       }
     }
   }
@@ -1561,7 +1521,7 @@ let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 
 // order matches the 7 dots around the dial (dot0 at top, clockwise)
-const FONT_LIST = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonlight', 'VG5000', 'ChaumontScript'];
+const FONT_LIST = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonlight', 'VG5000', 'ChaumontScript', 'Helgoland', 'MagielBlack', 'Altgotisch'];
 let selectedFontIndex = 0; // Pixelcastle, the default
 let gridAmount = 0;    // 0..1 — 2D periodic grid, interferes with dither patterns
 let hatchAmount = 0;   // 0..1 — diagonal single-axis wave, crosshatch/engraving feel
@@ -1573,8 +1533,6 @@ let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking lig
 let organicAmount = 0; // 0..1 — smooth wavy domain warp applied before outline extraction, for a hand-drawn wobble instead of a computer-precise trace
 let outlineAmount = 0; // 0..1 — edge-detected contour extraction; suppresses interior tone, keeps only the line work
 let dotStippleAmount = 0;    // 0..1 — dot-screen halftone: cells become circular dots sized by darkness
-let squareStippleAmount = 0; // 0..1 — same idea as dot stipple, but square marks instead of round dots
-let lineStippleAmount = 0;   // 0..1 — line-screen halftone: parallel diagonal lines whose thickness varies with local tone
 let opacityAmount = 1; // 0..1 — overlay blend strength; base ignores this (nothing beneath it to blend with)
 
 function updateFontDots() {
@@ -1767,9 +1725,7 @@ const EFFECT_SLIDERS = [
   { id: 'reliefSlider', setter: v => reliefAmount = v },
   { id: 'organicSlider', setter: v => organicAmount = v },
   { id: 'outlineSlider', setter: v => outlineAmount = v },
-  { id: 'dotStippleSlider', setter: v => dotStippleAmount = v },
-  { id: 'squareStippleSlider', setter: v => squareStippleAmount = v },
-  { id: 'lineStippleSlider', setter: v => lineStippleAmount = v }
+  { id: 'dotStippleSlider', setter: v => dotStippleAmount = v }
 ];
 EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);

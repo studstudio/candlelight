@@ -1777,15 +1777,28 @@ const crcTable = (() => { const t=[]; for(let n=0;n<256;n++){let c=n;for(let k=0
 function crc32(bytes){ let c=0xFFFFFFFF; for(let i=0;i<bytes.length;i++){c=crcTable[(c^bytes[i])&0xFF]^(c>>>8);} return (c^0xFFFFFFFF)>>>0; }
 function u32be(n){ return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]); }
 
+// GDEY042T81 (SSD1683) is a native 4-grayscale panel, so each pixel is packed
+// as a 2-bit code (0 = black .. 3 = white) rather than 1 bit. Whatever
+// firmware eventually reads this can re-encode these codes into the
+// controller's own old-data/new-data bitplane format however it needs to —
+// this app doesn't need to know that detail, just deliver 4 real gray levels.
+// The gray value is already quantized by applyDither() to whichever level
+// count (2/3/4-gray) was chosen via the tone-curve scrub, so dividing by 85
+// and rounding recovers that exact level as a 0-3 code without re-thresholding
+// it back down to pure black/white.
 async function buildChunkedPNG() {
   const W = targetW, H = targetH;
   const gray = liveCanvas._grayCache;
-  const bytesPerRow = Math.ceil(W/8);
+  const BPP = 2;
+  const bytesPerRow = Math.ceil(W * BPP / 8);
   const packed = new Uint8Array(bytesPerRow*H);
   for(let y=0;y<H;y++) for(let x=0;x<W;x++){
-    if (gray[y*W+x] > 127) packed[y*bytesPerRow+(x>>3)] |= (0x80 >> (x&7));
+    const code = Math.max(0, Math.min(3, Math.round(gray[y*W+x] / 85))); // 0=black .. 3=white
+    const bitOffset = (x * BPP) % 8;
+    const byteIndex = y*bytesPerRow + ((x * BPP) >> 3);
+    packed[byteIndex] |= code << (6 - bitOffset);
   }
-  const header = new Uint8Array([(W>>8)&255,W&255,(H>>8)&255,H&255]);
+  const header = new Uint8Array([(W>>8)&255,W&255,(H>>8)&255,H&255,BPP]);
   const chunkData = new Uint8Array(header.length+packed.length);
   chunkData.set(header,0); chunkData.set(packed,header.length);
 
@@ -1830,7 +1843,6 @@ sendBtn.onclick = async () => {
     if (!res.ok) throw new Error('Upload failed');
     sendStatus.textContent = `sent to ${target.name}`;
     sendStatus.classList.add('success');
-    checkLastSeen(target.id);
   } catch (err) {
     sendStatus.textContent = 'could not send — check connection';
     sendStatus.classList.add('fail');

@@ -91,7 +91,7 @@
     background: var(--bg-elevated); border: 1px solid var(--line); color: var(--cream-dim);
     font-size: 11px; line-height: 14px; text-align: center;
   }
-  .anim-interval-value { font-size: 11px; color: var(--cream-dim); flex: 0 0 26px; text-align: right; }
+  .anim-interval-value { font-size: 11px; color: var(--cream-dim); flex: 0 0 32px; text-align: right; }
 
   .layer-remove {
     display: inline-block; width: 13px; height: 13px; line-height: 13px; text-align: center;
@@ -306,7 +306,7 @@
 <div class="anim-controls" id="animControls" style="display:none; margin-bottom:10px;">
   <div class="moire-row">
     <span class="moire-label">speed</span>
-    <input type="range" id="animIntervalSlider" min="3" max="30" step="1" value="4">
+    <input type="range" id="animIntervalSlider" min="0.3" max="30" step="0.1" value="4">
     <span class="anim-interval-value" id="animIntervalValue">4s</span>
   </div>
   <button class="pill" id="animPlayBtn" style="margin-top:8px; width:100%; padding:9px 0;">▶ preview</button>
@@ -550,7 +550,7 @@ let pendingUploadTargetLayer = 0; // which layer slot the next file picker resul
 const MAX_FRAMES = 10;
 let mode = 'still'; // 'still' | 'cycle'
 let frames = [];
-let animIntervalSec = 4; // global, enforced minimum of 3s in the UI
+let animIntervalSec = 4; // global, enforced minimum of 0.3s (real partial-refresh speed) in the UI
 let animPlaying = false;
 let animPlayTimer = null;
 
@@ -798,8 +798,8 @@ modeStillBtn.onclick = () => setMode('still');
 modeCycleBtn.onclick = () => setMode('cycle');
 
 animIntervalSlider.oninput = () => {
-  animIntervalSec = Math.max(3, parseInt(animIntervalSlider.value, 10));
-  animIntervalValue.textContent = animIntervalSec + 's';
+  animIntervalSec = Math.max(0.3, parseFloat(animIntervalSlider.value));
+  animIntervalValue.textContent = (Math.round(animIntervalSec * 10) / 10) + 's';
 };
 
 // draws a single frame straight to the canvas without disturbing whichever
@@ -2032,7 +2032,7 @@ async function buildChunkedPNG() {
 
   if (mode === 'cycle') {
     const activeFrames = frames.filter(f => f && f.img);
-    const intervalMs = Math.max(3000, Math.round(animIntervalSec * 1000));
+    const intervalMs = Math.max(300, Math.round(animIntervalSec * 1000));
     // epRa: animation header — panel dims, bpp (always 1 = B/W here),
     // frame count, interval in ms (16-bit, so up to ~65s)
     const animHeader = new Uint8Array([

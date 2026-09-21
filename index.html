@@ -538,23 +538,31 @@ let activeLayerIdx = 0;
 let pendingUploadTargetLayer = 0; // which layer slot the next file picker result goes into
 
 // ============================================================
-// ANIMATION ("cycle") MODE: up to 10 independent frames, each edited with
-// the exact same tools as a layer (crop, tone, filter, textures, dither) —
-// no overlay compositing between frames, just one flattened image per
-// frame. Reuses the snapshot/load/switch machinery below by swapping which
-// array activeList() points at, rather than duplicating that logic.
-// Frames are always rendered/sent as pure black & white (2 levels): the
-// panel can't do partial refresh in 4-gray mode, so cycling relies on fast
-// B/W partial refresh instead.
+// ANIMATION ("cycle") MODE: up to 10 independent frames. Each frame is
+// itself a full layer stack — a base plus up to 2 overlays, edited and
+// composited exactly like still mode (see LAYERS above) — just forced to
+// pure black & white (2 levels) instead of whatever tone step you dial in,
+// since the panel can't do partial refresh in 4-gray mode and cycling
+// relies on fast B/W partial refresh instead.
+// currentStack() is the single source of truth for "whichever layer stack
+// is being edited right now" — the base `layers` array in still mode, or
+// frames[activeFrameIdx] in cycle mode — so all the existing layer-tab /
+// snapshot / load / switch machinery below works unmodified in both modes.
 // ============================================================
 const MAX_FRAMES = 10;
 let mode = 'still'; // 'still' | 'cycle'
-let frames = [];
-let animIntervalSec = 4; // global, enforced minimum of 0.3s (real partial-refresh speed) in the UI
+let frames = []; // each entry is itself a [base, overlay1, overlay2] stack, or null
+let activeFrameIdx = 0; // which frame is being edited in cycle mode
+let animIntervalSec = 0.3; // global, defaults to real partial-refresh speed
 let animPlaying = false;
 let animPlayTimer = null;
 
-function activeList() { return mode === 'cycle' ? frames : layers; }
+function currentStack() {
+  if (mode !== 'cycle') return layers;
+  if (!frames[activeFrameIdx]) frames[activeFrameIdx] = [null, null, null];
+  return frames[activeFrameIdx];
+}
+function frameIsFilled(f) { return !!(f && f[0] && f[0].img); }
 
 function makeDefaultLayerParams() {
   return {
@@ -591,7 +599,7 @@ function computeFittedBox(vis, aspect) {
 // into the active layer's stored record — always called before a render so
 // the composite reflects the latest scrub/slider/crop changes
 function snapshotActiveLayerState() {
-  const layer = activeList()[activeLayerIdx];
+  const layer = currentStack()[activeLayerIdx];
   if (!layer) return;
   layer.box = { ...box };
   layer.coverScale = coverScale; layer.coverX0 = coverX0; layer.coverY0 = coverY0;
@@ -613,7 +621,7 @@ function snapshotActiveLayerState() {
 // so whichever layer you tap becomes the one the crop box / sliders / pills
 // actually affect
 function loadLayerStateToGlobals(idx) {
-  const layer = activeList()[idx];
+  const layer = currentStack()[idx];
   if (!layer) return;
   activeLayerIdx = idx;
   naturalW = layer.naturalW; naturalH = layer.naturalH;
@@ -658,7 +666,7 @@ function loadLayerStateToGlobals(idx) {
 }
 
 function switchToLayer(idx) {
-  if (!activeList()[idx] || idx === activeLayerIdx) return;
+  if (!currentStack()[idx] || idx === activeLayerIdx) return;
   snapshotActiveLayerState();
   loadLayerStateToGlobals(idx);
   updateLayerTabs();
@@ -667,8 +675,9 @@ function switchToLayer(idx) {
 }
 
 function removeLayer(idx) {
-  if (idx === 0 || !layers[idx]) return; // base can't be removed
-  layers[idx] = null;
+  const stack = currentStack();
+  if (idx === 0 || !stack[idx]) return; // base can't be removed
+  stack[idx] = null;
   if (activeLayerIdx === idx) loadLayerStateToGlobals(0);
   updateLayerTabs();
   render();
@@ -676,10 +685,11 @@ function removeLayer(idx) {
 
 function updateLayerTabs() {
   layerTabs.innerHTML = '';
-  if (!layers[0]) return; // nothing to show until a base photo exists — the empty-state placeholder covers this
+  const stack = currentStack();
+  if (!stack[0]) return; // nothing to show until a base photo exists — the empty-state placeholder covers this
   const LABELS = ['base', 'overlay 1', 'overlay 2'];
   for (let i = 0; i < 3; i++) {
-    const layer = layers[i];
+    const layer = stack[i];
     const tab = document.createElement('button');
     tab.className = 'layer-tab' + (i === activeLayerIdx ? ' active' : '') + (!layer ? ' layer-tab-add' : '');
     tab.textContent = layer ? LABELS[i] : '+ overlay';
@@ -707,16 +717,65 @@ const animIntervalSlider = document.getElementById('animIntervalSlider');
 const animIntervalValue = document.getElementById('animIntervalValue');
 const animPlayBtn = document.getElementById('animPlayBtn');
 
+// composites a whole layer stack (base + overlays) into one gray buffer —
+// shared by render() (still mode, and the active frame in cycle mode) and
+// the preview/send paths below (which need to composite OTHER frames, not
+// just whichever one is currently loaded into the editing globals)
+function compositeStack(stack, forceLevels) {
+  const W = targetW, H = targetH;
+  let composite = null;
+  for (let i = 0; i < stack.length; i++) {
+    const layer = stack[i];
+    if (!layer || !layer.img) continue;
+    const gray = computeLayerGray(layer, W, H, forceLevels);
+    if (!composite) { composite = gray; continue; }
+    const opacity = layer.opacityAmount;
+    if (opacity >= 0.999) {
+      for (let p = 0; p < W*H; p++) { if (gray[p] < 255) composite[p] = gray[p]; }
+    } else if (opacity > 0.001) {
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const idx = y * W + x;
+          if (gray[idx] >= 255) continue;
+          const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
+          if (opacity > threshold) composite[idx] = gray[idx];
+        }
+      }
+    }
+  }
+  return composite;
+}
+
+function switchToFrame(frameIdx) {
+  if (mode !== 'cycle' || frameIdx === activeFrameIdx) return;
+  snapshotActiveLayerState(); // saves into the OLD frame's stack, still active at this point
+  activeFrameIdx = frameIdx;
+  if (!frames[activeFrameIdx]) frames[activeFrameIdx] = [null, null, null];
+  activeLayerIdx = 0;
+  const stack = frames[activeFrameIdx];
+  if (stack[0]) {
+    loadLayerStateToGlobals(0);
+  } else {
+    sourceImg.style.display = 'none';
+    emptyState.style.display = 'flex';
+    cropBox.style.display = 'none';
+    cropHint.style.display = 'none';
+  }
+  updateLayerTabs();
+  updateFrameFilmstrip();
+  render();
+}
+
 function updateFrameFilmstrip() {
   frameFilmstrip.innerHTML = '';
   if (mode !== 'cycle') return;
-  frames.forEach((frame, i) => {
-    if (!frame) return;
+  const filledFrames = frames.map((f, i) => ({ f, i })).filter(x => frameIsFilled(x.f));
+  filledFrames.forEach(({ f, i }) => {
     const tab = document.createElement('button');
-    tab.className = 'frame-tab' + (i === activeLayerIdx ? ' active' : '');
+    tab.className = 'frame-tab' + (i === activeFrameIdx ? ' active' : '');
     tab.textContent = String(i + 1);
-    tab.onclick = () => switchToLayer(i);
-    if (frames.filter(Boolean).length > 1) {
+    tab.onclick = () => switchToFrame(i);
+    if (filledFrames.length > 1) {
       const remove = document.createElement('span');
       remove.className = 'frame-remove';
       remove.textContent = '×';
@@ -725,16 +784,20 @@ function updateFrameFilmstrip() {
     }
     frameFilmstrip.appendChild(tab);
   });
-  const filledCount = frames.filter(Boolean).length;
-  if (filledCount > 0 && filledCount < MAX_FRAMES) {
+  if (filledFrames.length > 0 && filledFrames.length < MAX_FRAMES) {
     const add = document.createElement('button');
     add.className = 'frame-tab frame-tab-add';
     add.textContent = '+';
     add.title = 'add a new photo as the next frame';
     add.onclick = () => {
       snapshotActiveLayerState();
-      const emptyIdx = frames.findIndex(f => !f);
-      pendingUploadTargetLayer = emptyIdx === -1 ? frames.length : emptyIdx;
+      let newIdx = -1;
+      for (let i = 0; i < MAX_FRAMES; i++) { if (!frameIsFilled(frames[i])) { newIdx = i; break; } }
+      if (newIdx === -1) return;
+      activeFrameIdx = newIdx;
+      frames[newIdx] = frames[newIdx] || [null, null, null];
+      activeLayerIdx = 0;
+      pendingUploadTargetLayer = 0;
       fileInput.click();
     };
     frameFilmstrip.appendChild(add);
@@ -744,25 +807,43 @@ function updateFrameFilmstrip() {
 function duplicateActiveFrame() {
   if (mode !== 'cycle') return;
   snapshotActiveLayerState();
-  const source = frames[activeLayerIdx];
-  if (!source || !source.img) return;
-  const filledCount = frames.filter(Boolean).length;
-  if (filledCount >= MAX_FRAMES) return;
-  const emptyIdx = frames.findIndex(f => !f);
-  const targetIdx = emptyIdx === -1 ? frames.length : emptyIdx;
-  if (targetIdx >= MAX_FRAMES) return;
-  frames[targetIdx] = JSON.parse(JSON.stringify(source, (k, v) => k === 'img' ? undefined : v));
-  frames[targetIdx].img = source.img; // image element itself can't survive JSON round-trip — share the reference
-  switchToLayer(targetIdx);
+  const source = frames[activeFrameIdx];
+  if (!frameIsFilled(source)) return;
+  let newIdx = -1;
+  for (let i = 0; i < MAX_FRAMES; i++) { if (!frameIsFilled(frames[i])) { newIdx = i; break; } }
+  if (newIdx === -1) return; // all 10 slots full
+  // deep-clone every layer in the stack (base + any overlays) except the
+  // shared <img> element, which can't survive a JSON round-trip
+  frames[newIdx] = source.map(layer => {
+    if (!layer) return null;
+    const clone = JSON.parse(JSON.stringify(layer, (k, v) => k === 'img' ? undefined : v));
+    clone.img = layer.img;
+    return clone;
+  });
+  switchToFrame(newIdx);
 }
 document.getElementById('duplicateFrameBtn').onclick = duplicateActiveFrame;
 
 function removeFrame(idx) {
   if (!frames[idx]) return;
   frames[idx] = null;
-  if (activeLayerIdx === idx) {
-    const nextIdx = frames.findIndex(f => f);
-    if (nextIdx !== -1) loadLayerStateToGlobals(nextIdx);
+  if (activeFrameIdx === idx) {
+    const nextIdx = frames.findIndex(f => frameIsFilled(f));
+    if (nextIdx !== -1) {
+      activeFrameIdx = nextIdx; // switchToFrame no-ops on equal index, so set then load directly
+      activeLayerIdx = 0;
+      loadLayerStateToGlobals(0);
+      updateLayerTabs();
+    } else {
+      frames[0] = [null, null, null];
+      activeFrameIdx = 0;
+      activeLayerIdx = 0;
+      sourceImg.style.display = 'none';
+      emptyState.style.display = 'flex';
+      cropBox.style.display = 'none';
+      cropHint.style.display = 'none';
+      updateLayerTabs();
+    }
   }
   updateFrameFilmstrip();
   render();
@@ -775,14 +856,12 @@ function setMode(next) {
   mode = next;
   modeStillBtn.classList.toggle('active', mode === 'still');
   modeCycleBtn.classList.toggle('active', mode === 'cycle');
-  layerTabs.style.display = mode === 'still' ? 'flex' : 'none';
   frameFilmstrip.style.display = mode === 'cycle' ? 'flex' : 'none';
   animControls.style.display = mode === 'cycle' ? 'block' : 'none';
 
-  const list = activeList();
   activeLayerIdx = 0;
-  if (!list[0]) list[0] = makeDefaultLayerParams();
-  if (list[0].img) {
+  const stack = currentStack();
+  if (stack[0] && stack[0].img) {
     loadLayerStateToGlobals(0);
   } else {
     sourceImg.style.display = 'none';
@@ -802,17 +881,18 @@ animIntervalSlider.oninput = () => {
   animIntervalValue.textContent = (Math.round(animIntervalSec * 10) / 10) + 's';
 };
 
-// draws a single frame straight to the canvas without disturbing whichever
-// frame is currently being edited (crop box, sliders, etc.) — used only for
-// the play/pause preview loop below
+// composites and draws one whole frame (base + its overlays) straight to
+// the canvas without disturbing whichever frame is currently being edited
+// (crop box, sliders, etc.) — used only for the play/pause preview loop
 function renderFrameForPreview(idx) {
-  const frame = frames[idx];
-  if (!frame || !frame.img) return;
+  const stack = frames[idx];
+  if (!frameIsFilled(stack)) return;
+  const composite = compositeStack(stack, 2);
+  if (!composite) return;
   const W = targetW, H = targetH;
-  const gray = computeLayerGray(frame, W, H, 2);
   const outData = lctx.createImageData(W, H);
   const od = outData.data;
-  for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,gray[i])); od[i*4]=v;od[i*4+1]=v;od[i*4+2]=v;od[i*4+3]=255; }
+  for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,composite[i])); od[i*4]=v;od[i*4+1]=v;od[i*4+2]=v;od[i*4+3]=255; }
   lctx.putImageData(outData,0,0);
 }
 
@@ -825,7 +905,7 @@ function stopAnimPreview() {
 
 animPlayBtn.onclick = () => {
   if (animPlaying) { stopAnimPreview(); return; }
-  const filled = frames.map((f,i)=>({f,i})).filter(x => x.f && x.f.img);
+  const filled = frames.map((f,i)=>({f,i})).filter(x => frameIsFilled(x.f));
   if (filled.length === 0) return;
   animPlaying = true;
   animPlayBtn.textContent = '■ stop';
@@ -995,7 +1075,7 @@ fileInput.onchange = (e) => {
   const targetIdx = pendingUploadTargetLayer;
   const img = new Image();
   img.onload = () => {
-    const list = activeList();
+    const list = currentStack();
     const layer = list[targetIdx] || makeDefaultLayerParams();
     layer.img = img;
     layer.naturalW = img.naturalWidth;
@@ -1455,48 +1535,8 @@ function render() {
   snapshotActiveLayerState(); // make sure the layer being edited right now is up to date before compositing
 
   const W = targetW, H = targetH;
-  let composite = null;
-
-  if (mode === 'cycle') {
-    // cycle mode: one flattened frame at a time, no compositing between
-    // frames, always forced to pure black/white (2 levels) — see the note
-    // above the ANIMATION state block for why.
-    const frame = frames[activeLayerIdx];
-    if (frame && frame.img) composite = computeLayerGray(frame, W, H, 2);
-  } else {
-    for (let i = 0; i < layers.length; i++) {
-      const layer = layers[i];
-      if (!layer || !layer.img) continue;
-      const gray = computeLayerGray(layer, W, H);
-      if (!composite) {
-        composite = gray; // base always shows in full, nothing beneath it to blend with
-        continue;
-      }
-      const opacity = layer.opacityAmount;
-      if (opacity >= 0.999) {
-        // full strength: simple punch-through, every ink pixel shows
-        for (let p = 0; p < W*H; p++) { if (gray[p] < 255) composite[p] = gray[p]; }
-      } else if (opacity > 0.001) {
-        // partial strength: rather than alpha-blending pixel values (which just
-        // rounds back to solid black/white on a 2-4 level display), each ink
-        // pixel is kept or dropped via the same ordered Bayer pattern used for
-        // dithering elsewhere — comparing the opacity against a per-pixel
-        // threshold. Surviving pixels stay at full, crisp intensity; the FADE
-        // comes from the density of surviving pixels, like a halftone screen,
-        // which reads as a genuine blend at the panel's real resolution instead
-        // of muddy in-between grays the hardware can't actually display.
-        for (let y = 0; y < H; y++) {
-          for (let x = 0; x < W; x++) {
-            const idx = y * W + x;
-            if (gray[idx] >= 255) continue; // background stays transparent regardless of opacity
-            const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
-            if (opacity > threshold) composite[idx] = gray[idx];
-          }
-        }
-      }
-      // opacity <= 0.001: overlay contributes nothing, skip entirely
-    }
-  }
+  const stack = currentStack(); // layers (still) or frames[activeFrameIdx] (cycle) — see compositeStack() for the shared logic
+  const composite = compositeStack(stack, mode === 'cycle' ? 2 : undefined);
   if (!composite) return;
 
   // postcard text isn't supported on animation frames for now — skip it
@@ -2031,7 +2071,8 @@ async function buildChunkedPNG() {
   const customChunks = [];
 
   if (mode === 'cycle') {
-    const activeFrames = frames.filter(f => f && f.img);
+    snapshotActiveLayerState(); // make sure the frame being edited right now is fully up to date
+    const activeFrames = frames.filter(f => frameIsFilled(f));
     const intervalMs = Math.max(300, Math.round(animIntervalSec * 1000));
     // epRa: animation header — panel dims, bpp (always 1 = B/W here),
     // frame count, interval in ms (16-bit, so up to ~65s)
@@ -2040,8 +2081,8 @@ async function buildChunkedPNG() {
       (intervalMs>>8)&255, intervalMs&255
     ]);
     customChunks.push(makeChunk('epRa', animHeader));
-    for (const frame of activeFrames) {
-      const gray = computeLayerGray(frame, W, H, 2); // forced B/W regardless of the frame's own tone step
+    for (const stack of activeFrames) {
+      const gray = compositeStack(stack, 2); // forced B/W, base + overlays composited
       customChunks.push(makeChunk(CHUNK_TYPE, packBits(gray, W, H, 1)));
     }
   } else {

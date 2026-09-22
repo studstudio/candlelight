@@ -129,11 +129,12 @@ const resetBtn = document.getElementById('resetBtn');
 // default polar-centered aspect. d3's .rotate() takes the negated
 // [longitude, latitude] of the point that should land at the center.
 const US_CENTER = [98.58, -39.83];
-let rotationGamma = 0; // two-finger twist offset, degrees — spins the disc in place around its own center
+let rotationGamma = 0; // two-finger twist offset, degrees — applied as a pure canvas rotation at draw time (see draw()), NOT baked into the projection, so spinning stays cheap even with the terrain layer below
 let spinVelocity = 0; // degrees/frame of residual spin after a flick, decays via friction in tick()
-const projection = d3.geoAzimuthalEquidistant().rotate([US_CENTER[0], US_CENTER[1], rotationGamma]).precision(0.3);
-function applyRotation() { projection.rotate([US_CENTER[0], US_CENTER[1], rotationGamma]); }
+const projection = d3.geoAzimuthalEquidistant().rotate(US_CENTER).precision(0.3);
 const path = d3.geoPath(projection, ctx);
+
+let discCenter = { x: 0, y: 0 }, discRadius = 0; // fixed once per resize(), since the projection itself no longer changes with gamma
 
 let land = null, lakes = null, rivers = null;
 let events = [];
@@ -149,6 +150,10 @@ function resize() {
   canvas.style.height = rect.height + 'px';
   const size = Math.min(rect.width, rect.height);
   projection.scale(size * 0.49).translate([rect.width / 2, rect.height / 2]);
+  const b = path.bounds(sphere);
+  discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
+  discRadius = (b[1][0] - b[0][0]) / 2;
+  bakeTerrain(); // expensive (per-pixel reprojection) — only runs here, on load/resize, never per-frame
   draw();
 }
 
@@ -166,6 +171,119 @@ async function loadGeo(url, isTopo, objectName) {
 
 const sphere = { type: 'Sphere' };
 
+// ============================================================
+// TERRAIN: real NASA elevation data (public domain, equirectangular
+// depthmap combining topography + bathymetry), hosted on Wikimedia Commons
+// via their official hotlink mechanism (Special:FilePath, always resolves
+// to the current file regardless of its internal storage path).
+//
+// This is elevation-DERIVED shading and coloring, not true satellite
+// land-cover imagery — it's a hypsometric tint (green lowland -> tan hills
+// -> brown-gray mountains -> white peaks) combined with a real computed
+// hillshade from the elevation gradient. That's a standard, legitimate
+// cartographic technique, but it's worth knowing the honest limitation: a
+// low-lying desert (e.g. the Sahara) will still read green here, since the
+// color comes from elevation, not from what's actually growing there.
+// ============================================================
+const ELEVATION_URL = "https://commons.wikimedia.org/wiki/Special:FilePath/Earth_dry_elevation.png";
+const SEA_LEVEL_LUMA = 141; // this dataset's documented sea-level pixel value
+let elevData = null, elevW = 0, elevH = 0;
+let terrainCanvas = null;
+
+function loadElevation() {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      // downsample for bake-loop speed — full source detail isn't needed at
+      // the scale we're reprojecting to
+      const w = 1080, h = 540;
+      const off = document.createElement('canvas');
+      off.width = w; off.height = h;
+      const octx = off.getContext('2d');
+      octx.drawImage(img, 0, 0, w, h);
+      try {
+        const id = octx.getImageData(0, 0, w, h);
+        elevData = id.data; elevW = w; elevH = h;
+      } catch (err) {
+        console.warn('gallery: could not read elevation pixel data (CORS?)', err);
+        elevData = null;
+      }
+      resolve();
+    };
+    img.onerror = () => { console.warn('gallery: elevation image failed to load'); resolve(); };
+    img.src = ELEVATION_URL;
+  });
+}
+
+function sampleLuma(row, col) {
+  row = Math.max(0, Math.min(elevH - 1, row));
+  col = ((col % elevW) + elevW) % elevW; // wrap around at the antimeridian
+  return elevData[(row * elevW + col) * 4];
+}
+
+// hypsometric tint: green lowland through white peaks, standing in for
+// real land-cover data — see the honest caveat in the block comment above
+function elevationColor(luma) {
+  const stops = [
+    [SEA_LEVEL_LUMA, 110, 143, 74],
+    [172, 168, 152, 96],
+    [202, 138, 120, 96],
+    [232, 218, 212, 198],
+  ];
+  let lo = stops[0], hi = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (luma >= stops[i][0] && luma <= stops[i + 1][0]) { lo = stops[i]; hi = stops[i + 1]; break; }
+  }
+  const span = Math.max(1, hi[0] - lo[0]);
+  const t = Math.max(0, Math.min(1, (luma - lo[0]) / span));
+  return [lo[1] + (hi[1] - lo[1]) * t, lo[2] + (hi[2] - lo[2]) * t, lo[3] + (hi[3] - lo[3]) * t];
+}
+
+// bakes a reprojected, hillshaded, hypsometrically-tinted terrain bitmap at
+// the CURRENT projection (fixed US-centered orientation, gamma=0) — this is
+// the expensive per-pixel step (one projection.invert() per output pixel),
+// so it only ever runs from resize(), never per animation frame
+function bakeTerrain() {
+  if (!elevData) { terrainCanvas = null; return; }
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const octx = off.getContext('2d');
+  const outData = octx.createImageData(w, h);
+  const od = outData.data;
+  const Z_FACTOR = 5; // relief exaggeration, tuned for this raster's coarseness
+  const AZIMUTH = 315 * Math.PI / 180, ALTITUDE = 45 * Math.PI / 180; // fixed light direction, NW
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const lonlat = projection.invert([x, y]);
+      if (!lonlat || !isFinite(lonlat[0]) || !isFinite(lonlat[1])) continue; // leave transparent outside the sphere
+      const [lon, lat] = lonlat;
+      const col = Math.floor((lon + 180) / 360 * elevW);
+      const row = Math.floor((90 - lat) / 180 * elevH);
+      const luma = sampleLuma(row, col);
+      const l = sampleLuma(row, col - 1), r = sampleLuma(row, col + 1);
+      const t = sampleLuma(row - 1, col), b = sampleLuma(row + 1, col);
+      const dzdx = (r - l) / 2, dzdy = (b - t) / 2;
+      const slope = Math.atan(Math.sqrt(dzdx * dzdx + dzdy * dzdy) * Z_FACTOR / 255);
+      const aspect = Math.atan2(dzdy, -dzdx);
+      let hillshade = Math.cos(ALTITUDE) * Math.cos(slope) + Math.sin(ALTITUDE) * Math.sin(slope) * Math.cos(AZIMUTH - aspect);
+      hillshade = Math.max(0, Math.min(1, hillshade));
+      const brightness = 0.55 + hillshade * 0.75;
+      const [cr, cg, cb] = elevationColor(Math.max(luma, SEA_LEVEL_LUMA));
+      const idx = (y * w + x) * 4;
+      od[idx] = Math.min(255, cr * brightness);
+      od[idx + 1] = Math.min(255, cg * brightness);
+      od[idx + 2] = Math.min(255, cb * brightness);
+      od[idx + 3] = 255;
+    }
+  }
+  octx.putImageData(outData, 0, 0);
+  terrainCanvas = off;
+}
+
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
 
 function draw() {
@@ -178,15 +296,20 @@ function draw() {
   // coordinates — the standard d3-zoom + canvas pattern
   ctx.setTransform(transform.k * dpr, 0, 0, transform.k * dpr, transform.x * dpr, transform.y * dpr);
 
+  // two-finger spin: a pure rotation around the disc's (fixed) center,
+  // layered on top of pan/zoom. Decoupled from the projection itself, so it
+  // applies identically and cheaply to both the live vector paths below AND
+  // the pre-baked terrain bitmap, without needing to re-bake anything.
+  ctx.translate(discCenter.x, discCenter.y);
+  ctx.rotate(rotationGamma * Math.PI / 180);
+  ctx.translate(-discCenter.x, -discCenter.y);
+
   const lw = (px) => px / transform.k; // keep stroke widths visually constant across zoom levels
   const pr = (px) => px / transform.k; // same for point radii
 
   // ocean fades to transparent near the disc's outer edge, so it blends
   // softly into the beige page background instead of a hard circular border
-  const b = path.bounds(sphere);
-  const cx = (b[0][0] + b[1][0]) / 2, cy = (b[0][1] + b[1][1]) / 2;
-  const r = (b[1][0] - b[0][0]) / 2;
-  const oceanGrad = ctx.createRadialGradient(cx, cy, r * 0.92, cx, cy, r);
+  const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
   const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
   oceanGrad.addColorStop(0, oceanColor);
   oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
@@ -195,9 +318,19 @@ function draw() {
   ctx.fill();
 
   if (land) {
-    ctx.beginPath(); path(land);
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
-    ctx.fill();
+    ctx.save();
+    ctx.beginPath(); path(land); ctx.clip();
+    if (terrainCanvas) {
+      // baked at CSS-pixel dimensions matching the container, in the same
+      // (gamma=0) projected coordinate space the vector paths use — drawing
+      // it 1:1 here lets the current ctx transform (pan/zoom/spin) place it
+      // correctly, same as any vector path
+      ctx.drawImage(terrainCanvas, 0, 0, terrainCanvas.width, terrainCanvas.height);
+    } else {
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
+      ctx.fill();
+    }
+    ctx.restore();
   }
   if (rivers) {
     ctx.beginPath(); path(rivers);
@@ -274,7 +407,6 @@ const zoomBehavior = d3.zoom()
         const MOMENTUM_MULT = 1.5; // extra boost to how much velocity a flick imparts
         spinVelocity = (delta / dt) * 16 * SPIN_MULT * MOMENTUM_MULT;
         rotationGamma += delta * SPIN_MULT;
-        applyRotation();
       } else {
         spinVelocity = 0; // grabbing it fresh stops any residual momentum spin
       }
@@ -287,16 +419,22 @@ const zoomBehavior = d3.zoom()
 d3.select(canvas).call(zoomBehavior);
 resetBtn.onclick = () => {
   d3.select(canvas).transition().duration(400).call(zoomBehavior.transform, d3.zoomIdentity);
-  rotationGamma = 0; spinVelocity = 0; applyRotation();
+  rotationGamma = 0; spinVelocity = 0;
 };
 
 // ---- hover / tap tooltips (accounts for current pan/zoom) ----
 function screenPointFor(geo) {
   const p = project(geo);
   if (!p) return null;
-  const base = projection(p);
+  const base = projection(p); // base (gamma=0) projected coordinates
   if (!base) return null;
-  return [transform.x + transform.k * base[0], transform.y + transform.k * base[1]];
+  // apply the same gamma rotation around discCenter that draw() applies via
+  // ctx.rotate(), so hit-testing matches what's actually on screen
+  const rad = rotationGamma * Math.PI / 180;
+  const dx = base[0] - discCenter.x, dy = base[1] - discCenter.y;
+  const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
+  const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
+  return [transform.x + transform.k * rx, transform.y + transform.k * ry];
 }
 function handlePointer(mx, my) {
   let best = null, bestDist = 16;
@@ -359,7 +497,6 @@ function tick() {
   if (!twist && Math.abs(spinVelocity) > 0.01) {
     rotationGamma += spinVelocity;
     spinVelocity *= 0.976; // friction, decay rate reduced 2.5x from before — spins longer before settling
-    applyRotation();
   }
   draw();
   requestAnimationFrame(tick);
@@ -371,6 +508,7 @@ function tick() {
     loadGeo(LAND_URL, true, 'land'),
     loadGeo(LAKES_URL, false),
     loadGeo(RIVERS_URL, false),
+    loadElevation(), // populates elevData/elevW/elevH; resize() below bakes the first terrain frame from it
   ]);
   land = landData; lakes = lakeData; rivers = riverData;
   resize();

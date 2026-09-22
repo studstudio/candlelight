@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>candlelight — gallery</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@10.4.0/ol.css">
 <style>
   :root {
     --bg: #15100a;
@@ -13,17 +14,8 @@
     --ember-dim: rgba(232, 130, 60, 0.55);
     --cream: #f2e9d8;
     --cream-dim: rgba(242, 233, 216, 0.55);
-    /* bright atlas-style palette for the map surface itself, distinct from
-       the dark app chrome around it — legibility over mood here */
-    --ocean: #b9dde2;
-    --land: #ecd191;
-    --land-line: #b08a4a;
-    --water: #8fc3d6;
-    --river: #4f9fc0;
-    --graticule: rgba(90, 70, 30, 0.18);
-    --sphere-edge: #6b5230;
   }
-  * { box-sizing: border-box; touch-action: none; }
+  * { box-sizing: border-box; }
   html, body {
     height: 100%; height: 100dvh; margin: 0; background: var(--bg); color: var(--cream);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -45,8 +37,7 @@
     position: relative; flex: 1 1 auto; min-height: 0;
     background: radial-gradient(circle at center, #f1e6cf 0%, #ddcda3 55%, #c3ac81 100%);
   }
-  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
-  canvas:active { cursor: grabbing; }
+  #map { position: absolute; inset: 0; }
   #tooltip {
     position: absolute; pointer-events: none; background: var(--panel);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
@@ -57,14 +48,14 @@
   #legend {
     position: absolute; left: 14px; bottom: 14px; background: var(--panel);
     border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
-    font-size: 11px; color: var(--cream-dim); display: flex; flex-direction: column; gap: 5px;
+    font-size: 11px; color: var(--cream-dim); display: flex; flex-direction: column; gap: 5px; z-index: 3;
   }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   #count {
     position: absolute; right: 14px; bottom: 14px; background: var(--panel);
     border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px;
-    font-size: 11px; color: var(--cream-dim); text-align: right;
+    font-size: 11px; color: var(--cream-dim); text-align: right; z-index: 3;
   }
   #count b { color: var(--cream); font-size: 16px; display: block; }
   #resetBtn {
@@ -74,8 +65,14 @@
   }
   #empty {
     position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-    flex-direction: column; gap: 6px; color: var(--cream-dim); font-size: 13px; text-align: center; padding: 20px;
-    pointer-events: none;
+    flex-direction: column; gap: 6px; color: #3a2c1c; font-size: 13px; text-align: center; padding: 20px;
+    pointer-events: none; z-index: 2;
+  }
+  /* data attribution (required by the tile providers' terms) — kept small,
+     centered at the bottom so it doesn't collide with the legend/count */
+  .ol-attribution {
+    right: auto !important; left: 50% !important; transform: translateX(-50%);
+    bottom: 14px !important; max-width: 40%;
   }
 </style>
 </head>
@@ -86,13 +83,13 @@
     <span id="status">connecting…</span>
   </header>
   <main>
-    <canvas id="map"></canvas>
+    <div id="map"></div>
     <button id="resetBtn">reset view</button>
     <div id="tooltip"></div>
     <div id="legend">
       <div class="row"><span class="dot" style="background:var(--ember)"></span> sent</div>
-      <div class="row"><span class="dot" style="background:#1d1610"></span> received</div>
-      <div class="row"><span class="dot" style="background:var(--ember-dim);opacity:0.6"></span> in flight</div>
+      <div class="row"><span class="dot" style="background:#1d1610;border:1.5px solid var(--cream)"></span> received</div>
+      <div class="row"><span class="dot" style="background:var(--ember-dim)"></span> in flight</div>
     </div>
     <div id="count"><b id="countNum">0</b>lights shared</div>
     <div id="empty">
@@ -102,253 +99,262 @@
   </main>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/proj4@2.15.0/dist/proj4.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ol@10.4.0/dist/ol.js"></script>
 <script>
 // ---- config ----
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
-const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json";
-const LAKES_URL = "https://ne.freemap.online/50m/physical/ne_50m_lakes.json";
-const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_centerlines.json";
 
-const canvas = document.getElementById('map');
-const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const countEl = document.getElementById('countNum');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
 const resetBtn = document.getElementById('resetBtn');
+const mapEl = document.getElementById('map');
 
-// Azimuthal equidistant, polar aspect (North Pole at center) — true
-// distance-from-center in every direction. Base scale fits the WHOLE disc
-// in view; d3-zoom (pinch/drag/wheel) layers on top for zooming in.
-// Azimuthal equidistant, centered on the continental US (geographic center,
-// near Lebanon, Kansas: ~39.83N, 98.58W) — the classic "centered on my
-// city" style seen in vintage azimuthal equidistant maps, rather than the
-// default polar-centered aspect. d3's .rotate() takes the negated
-// [longitude, latitude] of the point that should land at the center.
-const US_CENTER = [98.58, -39.83];
-let rotationGamma = 0; // two-finger twist offset, degrees — applied as a pure canvas rotation at draw time (see draw()), NOT baked into the projection, so spinning stays cheap even with the terrain layer below
-let spinVelocity = 0; // degrees/frame of residual spin after a flick, decays via friction in tick()
-const projection = d3.geoAzimuthalEquidistant().rotate(US_CENTER).precision(0.3);
-const path = d3.geoPath(projection, ctx);
-
-let discCenter = { x: 0, y: 0 }, discRadius = 0; // fixed once per resize(), since the projection itself no longer changes with gamma
-
-let land = null, lakes = null, rivers = null;
-let events = [];
-let dpr = window.devicePixelRatio || 1;
-let transform = d3.zoomIdentity;
-
-function resize() {
-  const rect = canvas.parentElement.getBoundingClientRect();
-  dpr = window.devicePixelRatio || 1;
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
-  canvas.style.width = rect.width + 'px';
-  canvas.style.height = rect.height + 'px';
-  const size = Math.min(rect.width, rect.height);
-  projection.scale(size * 0.49).translate([rect.width / 2, rect.height / 2]);
-  const b = path.bounds(sphere);
-  discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
-  discRadius = (b[1][0] - b[0][0]) / 2;
-  draw();
+// ============================================================
+// PROJECTION: azimuthal equidistant, centered on the geographic center of
+// the continental US (near Lebanon, Kansas). Defined via proj4 and
+// registered with OpenLayers, which then reprojects standard Web Mercator
+// map tiles into it live, tile by tile, at whatever zoom level is on
+// screen — that's what keeps it sharp when zooming in, unlike a single
+// pre-downloaded world image.
+// ============================================================
+proj4.defs('US-AEQD', '+proj=aeqd +lat_0=39.83 +lon_0=-98.58 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs');
+if (ol.proj.proj4 && ol.proj.proj4.register) {
+  ol.proj.proj4.register(proj4);
+} else {
+  console.error('GALLERY: ol.proj.proj4.register not found — projection cannot be registered');
 }
+const R = Math.PI * 6378137; // max distance from center (to the antipode), meters
+const aeqd = ol.proj.get('US-AEQD');
+aeqd.setExtent([-R, -R, R, R]);
 
-async function loadGeo(url, isTopo, objectName) {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(res.status);
-    const data = await res.json();
-    return isTopo ? topojson.feature(data, data.objects[objectName]) : data;
-  } catch (err) {
-    console.warn('gallery: failed to load', url, err);
-    return null;
-  }
-}
-
-const sphere = { type: 'Sphere' };
-
-
-function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
-
-function draw() {
-  const rect = canvas.parentElement.getBoundingClientRect();
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-
-  // pan/zoom: fold the current d3-zoom transform into the canvas transform
-  // (alongside dpr scaling), then draw everything in fixed projected
-  // coordinates — the standard d3-zoom + canvas pattern
-  ctx.setTransform(transform.k * dpr, 0, 0, transform.k * dpr, transform.x * dpr, transform.y * dpr);
-
-  // two-finger spin: a pure rotation around the disc's (fixed) center,
-  // layered on top of pan/zoom. Decoupled from the projection itself, so it
-  // applies identically and cheaply to both the live vector paths below AND
-  // the pre-baked terrain bitmap, without needing to re-bake anything.
-  ctx.translate(discCenter.x, discCenter.y);
-  ctx.rotate(rotationGamma * Math.PI / 180);
-  ctx.translate(-discCenter.x, -discCenter.y);
-
-  const lw = (px) => px / transform.k; // keep stroke widths visually constant across zoom levels
-  const pr = (px) => px / transform.k; // same for point radii
-
-  // ocean fades to transparent near the disc's outer edge, so it blends
-  // softly into the beige page background instead of a hard circular border
-  const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
-  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
-  oceanGrad.addColorStop(0, oceanColor);
-  oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
-  ctx.beginPath(); path(sphere);
-  ctx.fillStyle = oceanGrad;
-  ctx.fill();
-
-  if (land) {
-    ctx.beginPath(); path(land);
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
-    ctx.fill();
-  }
-  if (rivers) {
-    ctx.beginPath(); path(rivers);
-    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--river');
-    ctx.lineWidth = lw(0.8); ctx.stroke();
-  }
-  if (lakes) {
-    ctx.beginPath(); path(lakes);
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--water');
-    ctx.fill();
-  }
-
-  drawEvents(lw, pr);
-}
-
-function drawEvents(lw, pr) {
-  const now = Date.now();
-  for (const ev of events) {
-    const from = project(ev.sentGeo);
-    const to = project(ev.downloadGeo);
-
-    if (from && to) {
-      ctx.beginPath();
-      path({ type: 'LineString', coordinates: [from, to] });
-      ctx.strokeStyle = 'rgba(232,130,60,0.55)';
-      ctx.lineWidth = lw(1.3);
-      ctx.stroke();
-    }
-    if (from) {
-      const inFlight = !ev.downloadedAt;
-      const pulse = inFlight ? (0.5 + 0.5 * Math.sin(now / 400)) : 1;
-      ctx.beginPath();
-      path.pointRadius(pr(inFlight ? 4 : 3))({ type: 'Point', coordinates: from });
-      ctx.fillStyle = inFlight ? `rgba(232,130,60,${0.4 + 0.4 * pulse})` : '#e8823c';
-      ctx.fill();
-      ctx.lineWidth = lw(0.8); ctx.strokeStyle = '#1d1610'; ctx.stroke();
-    }
-    if (to) {
-      ctx.beginPath();
-      path.pointRadius(pr(3))({ type: 'Point', coordinates: to });
-      ctx.fillStyle = '#1d1610';
-      ctx.fill();
-      ctx.lineWidth = lw(0.8); ctx.strokeStyle = '#f2e9d8'; ctx.stroke();
-    }
-  }
-  path.pointRadius(2.5); // reset default used elsewhere
-}
-
-// ---- pan / pinch-zoom, plus two-finger twist-to-spin read from the same
-// gesture — d3.zoom suppresses propagation of the raw touch events it
-// handles, so separate touchstart/touchmove listeners never see them.
-// Reading rotation from event.sourceEvent inside d3.zoom's own 'zoom'
-// callback sidesteps that entirely, since that event always fires. ----
-let twist = null; // { prevAngle, lastTime } while a 2-touch zoom gesture is active
-function touchAngle(touches) {
-  const dx = touches[1].clientX - touches[0].clientX;
-  const dy = touches[1].clientY - touches[0].clientY;
-  return Math.atan2(dy, dx) * 180 / Math.PI;
-}
-const zoomBehavior = d3.zoom()
-  .scaleExtent([0.25, 10])
-  .on('zoom', (event) => {
-    transform = event.transform;
-    const se = event.sourceEvent;
-    if (se && se.touches && se.touches.length === 2) {
-      const angle = touchAngle(se.touches);
-      const now = performance.now();
-      if (twist) {
-        let delta = angle - twist.prevAngle;
-        if (delta > 180) delta -= 360; // shortest-path across the atan2 wrap point
-        if (delta < -180) delta += 360;
-        const dt = Math.max(now - twist.lastTime, 1);
-        const SPIN_MULT = -2; // spins twice as fast as the raw finger angle, reversed direction
-        const MOMENTUM_MULT = 1.5; // extra boost to how much velocity a flick imparts
-        spinVelocity = (delta / dt) * 16 * SPIN_MULT * MOMENTUM_MULT;
-        rotationGamma += delta * SPIN_MULT;
-      } else {
-        spinVelocity = 0; // grabbing it fresh stops any residual momentum spin
-      }
-      twist = { prevAngle: angle, lastTime: now };
-    } else if (twist) {
-      twist = null; // dropped below 2 touches — momentum takes over in tick()
-    }
-    draw();
+// ============================================================
+// BASEMAP LAYERS
+// 1. Real satellite color (actual observed greenery, deserts, ice) —
+//    EOX Sentinel-2 Cloudless, a cloud-free mosaic of the whole Earth.
+// 2. Shaded relief — Esri World Hillshade, blended with "multiply" on top
+//    of the satellite layer, the same technique print atlases use to add
+//    mountain/valley relief over color.
+// Both are Web Mercator tile sets; OpenLayers reprojects them on the fly.
+// One known limitation: Web Mercator tiles stop at ~85° N/S, so the very
+// center of Antarctica and the North Pole ice cap have no imagery.
+//
+// Licensing note: EOX Sentinel-2 Cloudless 2024 is CC BY-NC-SA 4.0 (free
+// for non-commercial use, needs a commercial license from EOX if sold);
+// Esri basemaps have their own terms. Fine for development/personal use —
+// worth revisiting before shipping candlelight commercially.
+// ============================================================
+let tileErrors = 0;
+function watchTiles(source, label) {
+  source.on('tileloaderror', () => {
+    tileErrors++;
+    if (tileErrors === 1 || tileErrors % 50 === 0) console.warn('GALLERY: tile load errors from', label, '(total', tileErrors + ')');
   });
-d3.select(canvas).call(zoomBehavior);
+}
+
+const satelliteSource = new ol.source.XYZ({
+  url: 'https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg',
+  maxZoom: 15,
+  attributions: 'Sentinel-2 cloudless by <a href="https://s2maps.eu" target="_blank">EOX IT Services GmbH</a> (contains modified Copernicus Sentinel data 2024)',
+});
+watchTiles(satelliteSource, 'satellite');
+
+const hillshadeSource = new ol.source.XYZ({
+  url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
+  maxZoom: 16,
+  attributions: 'Hillshade © Esri',
+});
+watchTiles(hillshadeSource, 'hillshade');
+
+const satelliteLayer = new ol.layer.Tile({ source: satelliteSource });
+const hillshadeLayer = new ol.layer.Tile({ source: hillshadeSource });
+// multiply blend: white flat areas leave the satellite color untouched,
+// shaded slopes darken it — OpenLayers' own documented blend-mode pattern
+hillshadeLayer.on('prerender', (e) => { e.context.globalCompositeOperation = 'multiply'; });
+hillshadeLayer.on('postrender', (e) => { e.context.globalCompositeOperation = 'source-over'; });
+
+// ============================================================
+// EVENTS LAYER: send points, receive points, and great-circle travel arcs
+// ============================================================
+const eventSource = new ol.source.Vector();
+let events = [];
+
+function eventStyle(feature) {
+  const kind = feature.get('kind');
+  if (kind === 'arc') {
+    return new ol.style.Style({ stroke: new ol.style.Stroke({ color: 'rgba(232,130,60,0.85)', width: 2 }) });
+  }
+  if (kind === 'sent') {
+    const inFlight = feature.get('inFlight');
+    const pulse = inFlight ? 0.5 + 0.5 * Math.sin(Date.now() / 400) : 1;
+    return new ol.style.Style({
+      image: new ol.style.Circle({
+        radius: inFlight ? 6 : 5,
+        fill: new ol.style.Fill({ color: inFlight ? `rgba(232,130,60,${0.4 + 0.5 * pulse})` : '#e8823c' }),
+        stroke: new ol.style.Stroke({ color: '#1d1610', width: 1.5 }),
+      }),
+    });
+  }
+  return new ol.style.Style({
+    image: new ol.style.Circle({
+      radius: 5,
+      fill: new ol.style.Fill({ color: '#1d1610' }),
+      stroke: new ol.style.Stroke({ color: '#f2e9d8', width: 1.5 }),
+    }),
+  });
+}
+const eventLayer = new ol.layer.Vector({
+  source: eventSource,
+  style: eventStyle,
+  updateWhileAnimating: true,
+  updateWhileInteracting: true,
+});
+
+// great-circle path between two [lon, lat] points (spherical slerp), so
+// arcs follow the true shortest route and bend correctly in the projection
+function greatCircle(a, b, n = 64) {
+  const d2r = Math.PI / 180;
+  const vec = ([lon, lat]) => [Math.cos(lat * d2r) * Math.cos(lon * d2r), Math.cos(lat * d2r) * Math.sin(lon * d2r), Math.sin(lat * d2r)];
+  const A = vec(a), B = vec(b);
+  const dot = Math.max(-1, Math.min(1, A[0] * B[0] + A[1] * B[1] + A[2] * B[2]));
+  const w = Math.acos(dot);
+  if (w < 1e-9) return [a, b];
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const s1 = Math.sin((1 - t) * w) / Math.sin(w), s2 = Math.sin(t * w) / Math.sin(w);
+    const x = s1 * A[0] + s2 * B[0], y = s1 * A[1] + s2 * B[1], z = s1 * A[2] + s2 * B[2];
+    pts.push([Math.atan2(y, x) / d2r, Math.atan2(z, Math.hypot(x, y)) / d2r]);
+  }
+  return pts;
+}
+
+function lonLatOf(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
+function toMap(lonlat) { return ol.proj.fromLonLat(lonlat, 'US-AEQD'); }
+
+function rebuildEventFeatures() {
+  eventSource.clear();
+  const features = [];
+  for (const ev of events) {
+    const from = lonLatOf(ev.sentGeo);
+    const to = lonLatOf(ev.downloadGeo);
+    if (from && to) {
+      features.push(new ol.Feature({ kind: 'arc', ev, geometry: new ol.geom.LineString(greatCircle(from, to).map(toMap)) }));
+    }
+    if (to) features.push(new ol.Feature({ kind: 'received', ev, geo: ev.downloadGeo, geometry: new ol.geom.Point(toMap(to)) }));
+    if (from) features.push(new ol.Feature({ kind: 'sent', ev, geo: ev.sentGeo, inFlight: !ev.downloadedAt, geometry: new ol.geom.Point(toMap(from)) }));
+  }
+  eventSource.addFeatures(features);
+}
+
+// ============================================================
+// MAP + VIEW
+// ============================================================
+const rect = mapEl.getBoundingClientRect();
+const fitResolution = (2 * R) / (Math.max(1, Math.min(rect.width, rect.height)) * 0.98); // whole disc fits on load
+
+const view = new ol.View({
+  projection: 'US-AEQD',
+  center: [0, 0],
+  resolution: fitResolution,
+  maxResolution: fitResolution * 4, // allows zooming out to 0.25x of the fit view
+  minResolution: 8,                 // ~street-level cap; source tiles run out past this anyway
+  extent: [-R, -R, R, R],
+  constrainOnlyCenter: true,
+  constrainRotation: false,         // no snapping back to north while spinning
+});
+
+const map = new ol.Map({
+  target: mapEl,
+  layers: [satelliteLayer, hillshadeLayer, eventLayer],
+  view,
+  controls: [new ol.control.Attribution({ collapsible: true })],
+});
+
+// built-in two-finger/alt-shift rotation is replaced by the custom spin
+// below (faster, reversed direction, with momentum), so remove the defaults
+map.getInteractions().getArray().slice().forEach((i) => {
+  if (i instanceof ol.interaction.PinchRotate || i instanceof ol.interaction.DragRotate) map.removeInteraction(i);
+});
+
 resetBtn.onclick = () => {
-  d3.select(canvas).transition().duration(400).call(zoomBehavior.transform, d3.zoomIdentity);
-  rotationGamma = 0; spinVelocity = 0;
+  spinVelocity = 0;
+  view.animate({ center: [0, 0], resolution: fitResolution, rotation: 0, duration: 400 });
 };
 
-// ---- hover / tap tooltips (accounts for current pan/zoom) ----
-function screenPointFor(geo) {
-  const p = project(geo);
-  if (!p) return null;
-  const base = projection(p); // base (gamma=0) projected coordinates
-  if (!base) return null;
-  // apply the same gamma rotation around discCenter that draw() applies via
-  // ctx.rotate(), so hit-testing matches what's actually on screen
-  const rad = rotationGamma * Math.PI / 180;
-  const dx = base[0] - discCenter.x, dy = base[1] - discCenter.y;
-  const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
-  const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
-  return [transform.x + transform.k * rx, transform.y + transform.k * ry];
-}
-function handlePointer(mx, my) {
-  let best = null, bestDist = 16;
-  for (const ev of events) {
-    for (const [geo, kind] of [[ev.sentGeo, 'sent'], [ev.downloadGeo, 'received']]) {
-      const s = screenPointFor(geo);
-      if (!s) continue;
-      const d = Math.hypot(s[0] - mx, s[1] - my);
-      if (d < bestDist) { bestDist = d; best = { ev, kind, geo }; }
-    }
-  }
-  if (best) {
-    const { ev, kind, geo } = best;
-    const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || 'unknown location';
-    let html = `<b>${kind === 'sent' ? 'sent from' : 'received in'}</b> ${place}`;
-    if (ev.deliveryMs != null) {
-      const secs = Math.round(ev.deliveryMs / 1000);
-      html += `<br>delivered in ${secs < 60 ? secs + 's' : Math.round(secs/60) + 'm'}`;
-    } else {
-      html += `<br><span style="color:var(--ember)">in flight…</span>`;
-    }
-    tooltipEl.innerHTML = html;
-    tooltipEl.style.display = 'block';
-    const rect = canvas.getBoundingClientRect();
-    tooltipEl.style.left = Math.min(mx + 14, rect.width - 230) + 'px';
-    tooltipEl.style.top = Math.max(my - 10, 4) + 'px';
-  } else {
-    tooltipEl.style.display = 'none';
-  }
-}
-canvas.addEventListener('mousemove', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  handlePointer(e.clientX - rect.left, e.clientY - rect.top);
-});
-canvas.addEventListener('mouseleave', () => { tooltipEl.style.display = 'none'; });
+// ============================================================
+// TWO-FINGER SPIN with momentum — same feel as before: 2x finger speed,
+// reversed direction, flick to keep it spinning, friction decay.
+// Reads raw touch events in the capture phase, alongside OpenLayers'
+// own pinch-zoom (which keeps handling zoom from the same two fingers).
+// ============================================================
+const SPIN_MULT = -2;
+const MOMENTUM_MULT = 1.5;
+const FRICTION = 0.976;
+let twist = null;
+let spinVelocity = 0; // degrees per frame
 
-// ---- polling, with a real reason shown on failure instead of a vague message ----
+function touchAngle(t) { return Math.atan2(t[1].clientY - t[0].clientY, t[1].clientX - t[0].clientX) * 180 / Math.PI; }
+function touchMidCoordinate(t) {
+  const r = map.getViewport().getBoundingClientRect();
+  const px = [((t[0].clientX + t[1].clientX) / 2) - r.left, ((t[0].clientY + t[1].clientY) / 2) - r.top];
+  return map.getCoordinateFromPixel(px);
+}
+const vp = map.getViewport();
+vp.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) {
+    twist = { prevAngle: touchAngle(e.touches), lastTime: performance.now() };
+    spinVelocity = 0;
+  }
+}, { passive: true, capture: true });
+vp.addEventListener('touchmove', (e) => {
+  if (e.touches.length !== 2 || !twist) return;
+  const angle = touchAngle(e.touches);
+  let delta = angle - twist.prevAngle;
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  const now = performance.now();
+  const dt = Math.max(now - twist.lastTime, 1);
+  spinVelocity = (delta / dt) * 16 * SPIN_MULT * MOMENTUM_MULT;
+  view.adjustRotation(delta * SPIN_MULT * Math.PI / 180, touchMidCoordinate(e.touches));
+  twist.prevAngle = angle;
+  twist.lastTime = now;
+}, { passive: true, capture: true });
+const endTwist = (e) => { if (e.touches.length < 2) twist = null; };
+vp.addEventListener('touchend', endTwist, { passive: true, capture: true });
+vp.addEventListener('touchcancel', endTwist, { passive: true, capture: true });
+
+// ============================================================
+// TOOLTIPS — hover on desktop, tap on touch
+// ============================================================
+function showTooltipAt(pixel) {
+  const feature = map.forEachFeatureAtPixel(pixel, (f) => (f.get('kind') !== 'arc' ? f : undefined), { hitTolerance: 10 });
+  if (!feature) { tooltipEl.style.display = 'none'; return; }
+  const ev = feature.get('ev'), geo = feature.get('geo'), kind = feature.get('kind');
+  const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || 'unknown location';
+  let html = `<b>${kind === 'sent' ? 'sent from' : 'received in'}</b> ${place}`;
+  if (ev.deliveryMs != null) {
+    const secs = Math.round(ev.deliveryMs / 1000);
+    html += `<br>delivered in ${secs < 60 ? secs + 's' : Math.round(secs / 60) + 'm'}`;
+  } else {
+    html += `<br><span style="color:var(--ember)">in flight…</span>`;
+  }
+  tooltipEl.innerHTML = html;
+  tooltipEl.style.display = 'block';
+  const w = mapEl.clientWidth;
+  tooltipEl.style.left = Math.min(pixel[0] + 14, w - 230) + 'px';
+  tooltipEl.style.top = Math.max(pixel[1] - 10, 4) + 'px';
+}
+map.on('pointermove', (e) => { if (!e.dragging) showTooltipAt(e.pixel); });
+map.on('singleclick', (e) => showTooltipAt(e.pixel));
+mapEl.addEventListener('mouseleave', () => { tooltipEl.style.display = 'none'; });
+
+// ============================================================
+// POLLING
+// ============================================================
 async function poll() {
   try {
     const res = await fetch(`${WORKER_BASE_URL}/gallery/events?limit=200`);
@@ -359,6 +365,7 @@ async function poll() {
     }
     const data = await res.json();
     events = data.events || [];
+    rebuildEventFeatures();
     countEl.textContent = events.length;
     emptyEl.style.display = events.length === 0 ? 'flex' : 'none';
     statusEl.textContent = 'live';
@@ -370,28 +377,22 @@ async function poll() {
   }
 }
 
+// ============================================================
+// ANIMATION LOOP — spin momentum + in-flight pulse
+// ============================================================
 function tick() {
   if (!twist && Math.abs(spinVelocity) > 0.01) {
-    rotationGamma += spinVelocity;
-    spinVelocity *= 0.976; // friction, decay rate reduced 2.5x from before — spins longer before settling
+    view.adjustRotation(spinVelocity * Math.PI / 180);
+    spinVelocity *= FRICTION;
   }
-  draw();
+  if (events.some((ev) => !ev.downloadedAt)) eventLayer.changed(); // re-style for the pulse
   requestAnimationFrame(tick);
 }
 
-(async function init() {
-  window.addEventListener('resize', resize);
-  const [landData, lakeData, riverData] = await Promise.all([
-    loadGeo(LAND_URL, true, 'land'),
-    loadGeo(LAKES_URL, false),
-    loadGeo(RIVERS_URL, false),
-  ]);
-  land = landData; lakes = lakeData; rivers = riverData;
-  resize();
-  await poll();
-  setInterval(poll, POLL_MS);
-  tick();
-})();
+window.addEventListener('resize', () => map.updateSize());
+poll();
+setInterval(poll, POLL_MS);
+tick();
 </script>
 </body>
 </html>

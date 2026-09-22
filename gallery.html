@@ -246,50 +246,49 @@ function drawEvents(lw, pr) {
   path.pointRadius(2.5); // reset default used elsewhere
 }
 
-// ---- pan / pinch-zoom ----
-const zoomBehavior = d3.zoom()
-  .scaleExtent([0.25, 10])
-  .on('zoom', (event) => { transform = event.transform; draw(); });
-d3.select(canvas).call(zoomBehavior);
-resetBtn.onclick = () => {
-  d3.select(canvas).transition().duration(400).call(zoomBehavior.transform, d3.zoomIdentity);
-  rotationGamma = 0; spinVelocity = 0; applyRotation();
-};
-
-// ---- two-finger twist to spin the globe in place, loose and fidgety ----
-// Runs alongside d3.zoom's own pinch handling above (which reads the same
-// touches for scale) — this only reads the ANGLE between the two touches,
-// so pinch-to-zoom and twist-to-spin both work at once, naturally.
-let twist = null; // { prevAngle, lastTime } while two fingers are down
+// ---- pan / pinch-zoom, plus two-finger twist-to-spin read from the same
+// gesture — d3.zoom suppresses propagation of the raw touch events it
+// handles, so separate touchstart/touchmove listeners never see them.
+// Reading rotation from event.sourceEvent inside d3.zoom's own 'zoom'
+// callback sidesteps that entirely, since that event always fires. ----
+let twist = null; // { prevAngle, lastTime } while a 2-touch zoom gesture is active
 function touchAngle(touches) {
   const dx = touches[1].clientX - touches[0].clientX;
   const dy = touches[1].clientY - touches[0].clientY;
   return Math.atan2(dy, dx) * 180 / Math.PI;
 }
-canvas.addEventListener('touchstart', (e) => {
-  if (e.touches.length === 2) {
-    twist = { prevAngle: touchAngle(e.touches), lastTime: performance.now() };
-    spinVelocity = 0; // grabbing it again stops any residual momentum spin
-  }
-}, { passive: true });
-canvas.addEventListener('touchmove', (e) => {
-  if (e.touches.length === 2 && twist) {
-    const angle = touchAngle(e.touches);
-    let delta = angle - twist.prevAngle;
-    if (delta > 180) delta -= 360; // shortest-path across the atan2 wrap point
-    if (delta < -180) delta += 360;
-    const now = performance.now();
-    const dt = Math.max(now - twist.lastTime, 1);
-    spinVelocity = (delta / dt) * 16; // ~degrees per animation frame, feeds the momentum below
-    rotationGamma += delta;
-    applyRotation();
-    twist.prevAngle = angle;
-    twist.lastTime = now;
-  }
-}, { passive: true });
-canvas.addEventListener('touchend', (e) => {
-  if (e.touches.length < 2) twist = null; // fewer than 2 fingers left: momentum takes over in tick()
-}, { passive: true });
+const zoomBehavior = d3.zoom()
+  .scaleExtent([0.25, 10])
+  .on('zoom', (event) => {
+    transform = event.transform;
+    const se = event.sourceEvent;
+    if (se && se.touches && se.touches.length === 2) {
+      const angle = touchAngle(se.touches);
+      const now = performance.now();
+      if (twist) {
+        let delta = angle - twist.prevAngle;
+        if (delta > 180) delta -= 360; // shortest-path across the atan2 wrap point
+        if (delta < -180) delta += 360;
+        const dt = Math.max(now - twist.lastTime, 1);
+        const SPIN_MULT = -2; // spins twice as fast as the raw finger angle, reversed direction
+        const MOMENTUM_MULT = 1.5; // extra boost to how much velocity a flick imparts
+        spinVelocity = (delta / dt) * 16 * SPIN_MULT * MOMENTUM_MULT;
+        rotationGamma += delta * SPIN_MULT;
+        applyRotation();
+      } else {
+        spinVelocity = 0; // grabbing it fresh stops any residual momentum spin
+      }
+      twist = { prevAngle: angle, lastTime: now };
+    } else if (twist) {
+      twist = null; // dropped below 2 touches — momentum takes over in tick()
+    }
+    draw();
+  });
+d3.select(canvas).call(zoomBehavior);
+resetBtn.onclick = () => {
+  d3.select(canvas).transition().duration(400).call(zoomBehavior.transform, d3.zoomIdentity);
+  rotationGamma = 0; spinVelocity = 0; applyRotation();
+};
 
 // ---- hover / tap tooltips (accounts for current pan/zoom) ----
 function screenPointFor(geo) {
@@ -359,7 +358,7 @@ async function poll() {
 function tick() {
   if (!twist && Math.abs(spinVelocity) > 0.01) {
     rotationGamma += spinVelocity;
-    spinVelocity *= 0.94; // friction — tuned for a loose, fidgety settle rather than a hard stop
+    spinVelocity *= 0.976; // friction, decay rate reduced 2.5x from before — spins longer before settling
     applyRotation();
   }
   draw();

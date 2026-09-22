@@ -200,9 +200,13 @@ function loadElevation() {
   return new Promise((resolve) => {
     console.log('TERRAIN: fetching satellite imagery via', ELEVATION_URL);
     fetch(ELEVATION_URL)
-      .then((res) => {
+      .then(async (res) => {
         console.log('TERRAIN: fetch response', res.status);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => null);
+          console.error('TERRAIN: Worker error detail:', errBody);
+          throw new Error('HTTP ' + res.status + (errBody ? ' — ' + JSON.stringify(errBody) : ''));
+        }
         return res.blob();
       })
       .then((blob) => {

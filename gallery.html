@@ -185,7 +185,13 @@ const sphere = { type: 'Sphere' };
 // low-lying desert (e.g. the Sahara) will still read green here, since the
 // color comes from elevation, not from what's actually growing there.
 // ============================================================
-const ELEVATION_URL = "https://commons.wikimedia.org/wiki/Special:FilePath/Earth_dry_elevation.png";
+// Wikimedia's Special:FilePath hotlink doesn't set CORS headers on its
+// redirect, which blocks canvas pixel access outright (confirmed via a real
+// browser test) — routing through wsrv.nl, a widely-used image proxy built
+// for exactly this, adds proper CORS headers and resizes server-side.
+const ELEVATION_SOURCE = "https://commons.wikimedia.org/wiki/Special:FilePath/Earth_dry_elevation.png";
+const ELEVATION_W = 1080, ELEVATION_H = 540;
+const ELEVATION_URL = `https://wsrv.nl/?url=${encodeURIComponent(ELEVATION_SOURCE)}&w=${ELEVATION_W}&h=${ELEVATION_H}&fit=fill`;
 const SEA_LEVEL_LUMA = 141; // this dataset's documented sea-level pixel value
 let elevData = null, elevW = 0, elevH = 0;
 let terrainCanvas = null;
@@ -207,7 +213,7 @@ function loadElevation() {
           console.log('TERRAIN: image decoded,', img.naturalWidth, 'x', img.naturalHeight);
           // downsample for bake-loop speed — full source detail isn't needed
           // at the scale we're reprojecting to
-          const w = 1080, h = 540;
+          const w = ELEVATION_W, h = ELEVATION_H;
           const off = document.createElement('canvas');
           off.width = w; off.height = h;
           const octx = off.getContext('2d');

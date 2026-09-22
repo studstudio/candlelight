@@ -187,22 +187,38 @@ const sphere = { type: 'Sphere' };
 // ============================================================
 // Wikimedia's Special:FilePath hotlink doesn't set CORS headers on its
 // redirect, which blocks canvas pixel access outright (confirmed via a real
-// browser test) — routing through wsrv.nl, a widely-used image proxy built
-// for exactly this, adds proper CORS headers and resizes server-side.
-const ELEVATION_SOURCE = "https://commons.wikimedia.org/wiki/Special:FilePath/Earth_dry_elevation.png";
+// browser test), and routing it through a third-party proxy (wsrv.nl) also
+// failed — it likely couldn't follow that wiki-page redirect the way a
+// browser does. Wikimedia's own Action API supports a documented origin=*
+// parameter specifically for cross-origin JS use, which resolves the real
+// upload.wikimedia.org file URL; that direct file host sets proper CORS on
+// media files, so fetching it after resolution should work.
+const ELEVATION_API = "https://commons.wikimedia.org/w/api.php?action=query&titles=File:Earth_dry_elevation.png&prop=imageinfo&iiprop=url&format=json&origin=*";
 const ELEVATION_W = 1080, ELEVATION_H = 540;
-const ELEVATION_URL = `https://wsrv.nl/?url=${encodeURIComponent(ELEVATION_SOURCE)}&w=${ELEVATION_W}&h=${ELEVATION_H}&fit=fill`;
 const SEA_LEVEL_LUMA = 141; // this dataset's documented sea-level pixel value
 let elevData = null, elevW = 0, elevH = 0;
 let terrainCanvas = null;
 
 function loadElevation() {
   return new Promise((resolve) => {
-    console.log('TERRAIN: fetching elevation data from', ELEVATION_URL);
-    fetch(ELEVATION_URL)
+    console.log('TERRAIN: resolving elevation file URL via Wikimedia API');
+    fetch(ELEVATION_API)
       .then((res) => {
-        console.log('TERRAIN: fetch response', res.status, res.type, [...res.headers.entries()]);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        console.log('TERRAIN: API response', res.status);
+        if (!res.ok) throw new Error('API HTTP ' + res.status);
+        return res.json();
+      })
+      .then((data) => {
+        const pages = data.query && data.query.pages;
+        const page = pages && Object.values(pages)[0];
+        const fileUrl = page && page.imageinfo && page.imageinfo[0] && page.imageinfo[0].url;
+        if (!fileUrl) throw new Error('could not find imageinfo.url in API response — ' + JSON.stringify(data).slice(0, 200));
+        console.log('TERRAIN: resolved direct file URL:', fileUrl);
+        return fetch(fileUrl);
+      })
+      .then((res) => {
+        console.log('TERRAIN: image fetch response', res.status);
+        if (!res.ok) throw new Error('image HTTP ' + res.status);
         return res.blob();
       })
       .then((blob) => {

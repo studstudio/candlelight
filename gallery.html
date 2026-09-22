@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>candlelight — gallery</title>
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
 <style>
   :root {
     --bg: #15100a;
@@ -45,7 +46,7 @@
     position: relative; flex: 1 1 auto; min-height: 0;
     background: radial-gradient(circle at center, #f1e6cf 0%, #ddcda3 55%, #c3ac81 100%);
   }
-  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; position: relative; z-index: 2; }
   canvas:active { cursor: grabbing; }
   #tooltip {
     position: absolute; pointer-events: none; background: var(--panel);
@@ -72,6 +73,24 @@
     border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
     font-size: 11px; color: var(--cream-dim); z-index: 3;
   }
+  #terrainMap {
+    position: absolute; inset: 0; opacity: 0; pointer-events: none;
+    transition: opacity 0.6s ease; z-index: 1;
+  }
+  #terrainMap.active { opacity: 1; pointer-events: auto; }
+  #map { transition: opacity 0.6s ease; }
+  #map.faded { opacity: 0; pointer-events: none; }
+  #backBtn {
+    position: absolute; left: 14px; top: 14px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
+    font-size: 11px; color: var(--cream-dim); z-index: 3; display: none;
+  }
+  #backBtn.visible { display: block; }
+  /* strip MapLibre's own attribution/logo chrome down to something minimal
+     and on-theme rather than its default styling */
+  .maplibregl-ctrl-attrib { background: var(--panel) !important; color: var(--cream-dim) !important; font-size: 10px !important; }
+  .maplibregl-ctrl-attrib a { color: var(--cream-dim) !important; }
+  .maplibregl-ctrl-logo { display: none !important; }
   #empty {
     position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
     flex-direction: column; gap: 6px; color: var(--cream-dim); font-size: 13px; text-align: center; padding: 20px;
@@ -87,7 +106,9 @@
   </header>
   <main>
     <canvas id="map"></canvas>
+    <div id="terrainMap"></div>
     <button id="resetBtn">reset view</button>
+    <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
     <div id="legend">
       <div class="row"><span class="dot" style="background:var(--ember)"></span> sent</div>
@@ -104,6 +125,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script>
 // ---- config ----
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
@@ -291,6 +313,11 @@ const zoomBehavior = d3.zoom()
     } else if (twist) {
       twist = null; // dropped below 2 touches — momentum takes over in tick()
     }
+    if (transform.k >= HANDOFF_K && !in3D) {
+      const rect = canvas.getBoundingClientRect();
+      const lonlat = lonLatAtScreenPoint(rect.width / 2, rect.height / 2);
+      if (lonlat) enter3D(lonlat[0], lonlat[1]);
+    }
     draw();
   });
 d3.select(canvas).call(zoomBehavior);
@@ -298,6 +325,117 @@ resetBtn.onclick = () => {
   d3.select(canvas).transition().duration(400).call(zoomBehavior.transform, d3.zoomIdentity);
   rotationGamma = 0; spinVelocity = 0;
 };
+
+// ============================================================
+// FLAT-TO-3D HANDOFF
+// Pinch/zoom in far enough on the flat azimuthal map and it crossfades
+// into a real MapLibre 3D terrain view, positioned at whatever point was
+// at the center of the screen. This isn't a continuous reprojection (that
+// would need the two engines to share a coordinate system, which they
+// don't) — it's a deliberate hand-off at a chosen threshold, timed for
+// where the difference between azimuthal equidistant and a standard
+// projection becomes visually irrelevant anyway.
+// ============================================================
+const HANDOFF_K = 5; // d3 zoom scale that triggers the crossfade into 3D
+let in3D = false;
+
+// inverse of screenPointFor(): given a screen pixel, find the lon/lat
+// currently shown there — undoes pan/zoom, then gamma rotation, then the
+// (fixed, gamma=0) projection itself
+function lonLatAtScreenPoint(sx, sy) {
+  const baseX = (sx - transform.x) / transform.k;
+  const baseY = (sy - transform.y) / transform.k;
+  const rad = -rotationGamma * Math.PI / 180;
+  const dx = baseX - discCenter.x, dy = baseY - discCenter.y;
+  const px = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
+  const py = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
+  return projection.invert([px, py]); // [lon, lat] or null
+}
+
+// converts the flat map's current zoom into an equivalent MapLibre zoom
+// level, via actual real-world meters/pixel — not an arbitrary tuned
+// number. discRadius (CSS px) represents pi * earthRadius (meters), since
+// that's the edge of an azimuthal equidistant world map.
+function equivalentMapLibreZoom(lat) {
+  const metersPerPxAtK1 = (Math.PI * 6371000) / discRadius;
+  const metersPerPxNow = metersPerPxAtK1 / transform.k;
+  return Math.log2(156543.03392 * Math.cos(lat * Math.PI / 180) / metersPerPxNow);
+}
+
+let terrainMapInstance = null;
+function initTerrainMap() {
+  if (terrainMapInstance) return terrainMapInstance;
+  terrainMapInstance = new maplibregl.Map({
+    container: 'terrainMap',
+    style: {
+      version: 8,
+      sources: {
+        satellite: {
+          type: 'raster',
+          tiles: ['https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg'],
+          tileSize: 256, maxzoom: 15,
+          attribution: 'Imagery © EOX IT Services GmbH',
+        },
+        terrainSource: {
+          type: 'raster-dem',
+          tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+          tileSize: 256, encoding: 'terrarium', maxzoom: 13,
+          attribution: 'Terrain: <a href="https://github.com/tilezen/joerd" target="_blank">Joerd/Tilezen</a>',
+        },
+      },
+      // deliberately just two layers — no roads, labels, POIs, or icons,
+      // since none of those ship in this style at all
+      layers: [
+        { id: 'bg', type: 'background', paint: { 'background-color': '#15100a' } },
+        {
+          id: 'satellite', type: 'raster', source: 'satellite',
+          paint: { 'raster-saturation': -0.15, 'raster-contrast': 0.08, 'raster-brightness-min': 0.05 },
+        },
+      ],
+      sky: { 'sky-color': '#1d1610', 'sky-horizon-blend': 0.5, 'horizon-color': '#3a2c1c', 'horizon-fog-blend': 0.6 },
+    },
+    attributionControl: { compact: true },
+    maxPitch: 75,
+    dragRotate: true,
+    touchPitch: true,
+  });
+  terrainMapInstance.on('load', () => {
+    terrainMapInstance.setTerrain({ source: 'terrainSource', exaggeration: 1.3 });
+    terrainMapInstance.addLayer({
+      id: 'hillshade', type: 'hillshade', source: 'terrainSource',
+      paint: {
+        'hillshade-exaggeration': 0.6,
+        'hillshade-shadow-color': '#2a1c10',
+        'hillshade-highlight-color': '#e8c99a',
+        'hillshade-accent-color': '#8a6a45',
+      },
+    });
+  });
+  return terrainMapInstance;
+}
+
+function enter3D(lon, lat) {
+  if (in3D) return;
+  in3D = true;
+  const map3d = initTerrainMap();
+  const zoom = Math.max(3, equivalentMapLibreZoom(lat));
+  map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
+  document.getElementById('terrainMap').classList.add('active');
+  canvas.classList.add('faded');
+  backBtn.classList.add('visible');
+  setTimeout(() => map3d.resize(), 50); // container was display:none-adjacent (opacity 0); MapLibre needs a resize once it's actually laid out
+}
+
+function exit3D() {
+  if (!in3D) return;
+  in3D = false;
+  document.getElementById('terrainMap').classList.remove('active');
+  canvas.classList.remove('faded');
+  backBtn.classList.remove('visible');
+  d3.select(canvas).transition().duration(300).call(zoomBehavior.scaleTo, HANDOFF_K * 0.6);
+}
+const backBtn = document.getElementById('backBtn');
+backBtn.onclick = exit3D;
 
 // ---- hover / tap tooltips (accounts for current pan/zoom) ----
 function screenPointFor(geo) {

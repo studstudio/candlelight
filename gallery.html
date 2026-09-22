@@ -172,53 +172,37 @@ async function loadGeo(url, isTopo, objectName) {
 const sphere = { type: 'Sphere' };
 
 // ============================================================
-// TERRAIN: real NASA elevation data (public domain, equirectangular
-// depthmap combining topography + bathymetry), hosted on Wikimedia Commons
-// via their official hotlink mechanism (Special:FilePath, always resolves
-// to the current file regardless of its internal storage path).
-//
-// This is elevation-DERIVED shading and coloring, not true satellite
-// land-cover imagery — it's a hypsometric tint (green lowland -> tan hills
-// -> brown-gray mountains -> white peaks) combined with a real computed
-// hillshade from the elevation gradient. That's a standard, legitimate
-// cartographic technique, but it's worth knowing the honest limitation: a
-// low-lying desert (e.g. the Sahara) will still read green here, since the
-// color comes from elevation, not from what's actually growing there.
+// TERRAIN: real NASA satellite imagery (public domain Blue Marble
+// true-color composite), proxied through our own Worker — see below for
+// why direct browser fetches from Wikimedia kept failing on CORS.
 // ============================================================
-// Wikimedia's Special:FilePath hotlink doesn't set CORS headers on its
-// redirect, which blocks canvas pixel access outright (confirmed via a real
-// browser test), and routing it through a third-party proxy (wsrv.nl) also
-// failed — it likely couldn't follow that wiki-page redirect the way a
-// browser does. Wikimedia's own Action API supports a documented origin=*
-// parameter specifically for cross-origin JS use, which resolves the real
-// upload.wikimedia.org file URL; that direct file host sets proper CORS on
-// media files, so fetching it after resolution should work.
-const ELEVATION_API = "https://commons.wikimedia.org/w/api.php?action=query&titles=File:Earth_dry_elevation.png&prop=imageinfo&iiprop=url&format=json&origin=*";
-const ELEVATION_W = 1080, ELEVATION_H = 540;
-const SEA_LEVEL_LUMA = 141; // this dataset's documented sea-level pixel value
+// This is now proxied through our own Worker (see /gallery/elevation) —
+// Wikimedia's hotlink doesn't set CORS headers, and a third-party proxy
+// (wsrv.nl) also failed to reliably follow the redirect. A server-to-server
+// fetch has no CORS restriction at all (that's a browser policy, not a
+// data-availability one), so the Worker fetches it directly and serves it
+// back with our own headers — this is the durable fix, not another hunt
+// for a magic hotlink URL.
+//
+// The source is NASA's Blue Marble true-color satellite composite — real
+// observed land cover, not an approximation, which is genuinely accurate
+// "greenery" rather than an elevation-based guess. There's no separate DEM
+// here, so "shaded relief" comes from a local-contrast pass over the color
+// image's own real luminance detail (mountains, coastlines, texture do show
+// up this way in Blue Marble, just not as crisply as a true hillshade from
+// dedicated elevation data would give).
+const ELEVATION_URL = `${WORKER_BASE_URL}/gallery/elevation`;
+const ELEVATION_W = 1024, ELEVATION_H = 512;
 let elevData = null, elevW = 0, elevH = 0;
 let terrainCanvas = null;
 
 function loadElevation() {
   return new Promise((resolve) => {
-    console.log('TERRAIN: resolving elevation file URL via Wikimedia API');
-    fetch(ELEVATION_API)
+    console.log('TERRAIN: fetching satellite imagery via', ELEVATION_URL);
+    fetch(ELEVATION_URL)
       .then((res) => {
-        console.log('TERRAIN: API response', res.status);
-        if (!res.ok) throw new Error('API HTTP ' + res.status);
-        return res.json();
-      })
-      .then((data) => {
-        const pages = data.query && data.query.pages;
-        const page = pages && Object.values(pages)[0];
-        const fileUrl = page && page.imageinfo && page.imageinfo[0] && page.imageinfo[0].url;
-        if (!fileUrl) throw new Error('could not find imageinfo.url in API response — ' + JSON.stringify(data).slice(0, 200));
-        console.log('TERRAIN: resolved direct file URL:', fileUrl);
-        return fetch(fileUrl);
-      })
-      .then((res) => {
-        console.log('TERRAIN: image fetch response', res.status);
-        if (!res.ok) throw new Error('image HTTP ' + res.status);
+        console.log('TERRAIN: fetch response', res.status);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.blob();
       })
       .then((blob) => {
@@ -227,8 +211,6 @@ function loadElevation() {
         const img = new Image();
         img.onload = () => {
           console.log('TERRAIN: image decoded,', img.naturalWidth, 'x', img.naturalHeight);
-          // downsample for bake-loop speed — full source detail isn't needed
-          // at the scale we're reprojecting to
           const w = ELEVATION_W, h = ELEVATION_H;
           const off = document.createElement('canvas');
           off.width = w; off.height = h;
@@ -239,7 +221,7 @@ function loadElevation() {
             elevData = id.data; elevW = w; elevH = h;
             console.log('TERRAIN: pixel data read OK,', w, 'x', h);
           } catch (err) {
-            console.error('TERRAIN: getImageData blocked (tainted canvas / CORS)', err);
+            console.error('TERRAIN: getImageData blocked', err);
             elevData = null;
           }
           URL.revokeObjectURL(objectUrl);
@@ -249,42 +231,26 @@ function loadElevation() {
         img.src = objectUrl;
       })
       .catch((err) => {
-        console.error('TERRAIN: fetch failed —', err.message, '— likely CORS, a network issue, or the URL redirect not resolving as expected');
+        console.error('TERRAIN: fetch failed —', err.message);
         resolve();
       });
   });
 }
 
-function sampleLuma(row, col) {
+function sampleRGB(row, col) {
   row = Math.max(0, Math.min(elevH - 1, row));
   col = ((col % elevW) + elevW) % elevW; // wrap around at the antimeridian
-  return elevData[(row * elevW + col) * 4];
+  const i = (row * elevW + col) * 4;
+  return [elevData[i], elevData[i + 1], elevData[i + 2]];
 }
+function luminance([r, g, b]) { return 0.299 * r + 0.587 * g + 0.114 * b; }
 
-// hypsometric tint: green lowland through white peaks, standing in for
-// real land-cover data — see the honest caveat in the block comment above
-function elevationColor(luma) {
-  const stops = [
-    [SEA_LEVEL_LUMA, 110, 143, 74],
-    [172, 168, 152, 96],
-    [202, 138, 120, 96],
-    [232, 218, 212, 198],
-  ];
-  let lo = stops[0], hi = stops[stops.length - 1];
-  for (let i = 0; i < stops.length - 1; i++) {
-    if (luma >= stops[i][0] && luma <= stops[i + 1][0]) { lo = stops[i]; hi = stops[i + 1]; break; }
-  }
-  const span = Math.max(1, hi[0] - lo[0]);
-  const t = Math.max(0, Math.min(1, (luma - lo[0]) / span));
-  return [lo[1] + (hi[1] - lo[1]) * t, lo[2] + (hi[2] - lo[2]) * t, lo[3] + (hi[3] - lo[3]) * t];
-}
-
-// bakes a reprojected, hillshaded, hypsometrically-tinted terrain bitmap at
-// the CURRENT projection (fixed US-centered orientation, gamma=0) — this is
-// the expensive per-pixel step (one projection.invert() per output pixel),
-// so it only ever runs from resize(), never per animation frame
+// bakes a reprojected terrain bitmap at the CURRENT projection (fixed
+// US-centered orientation, gamma=0) — this is the expensive per-pixel step
+// (one projection.invert() per output pixel), so it only ever runs from
+// resize(), never per animation frame
 function bakeTerrain() {
-  if (!elevData) { terrainCanvas = null; console.warn('TERRAIN: bake skipped — no elevation pixel data loaded'); return; }
+  if (!elevData) { terrainCanvas = null; console.warn('TERRAIN: bake skipped — no pixel data loaded'); return; }
   console.time('TERRAIN: bake');
   const rect = canvas.parentElement.getBoundingClientRect();
   const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
@@ -293,8 +259,6 @@ function bakeTerrain() {
   const octx = off.getContext('2d');
   const outData = octx.createImageData(w, h);
   const od = outData.data;
-  const Z_FACTOR = 5; // relief exaggeration, tuned for this raster's coarseness
-  const AZIMUTH = 315 * Math.PI / 180, ALTITUDE = 45 * Math.PI / 180; // fixed light direction, NW
   let drawn = 0;
 
   for (let y = 0; y < h; y++) {
@@ -304,20 +268,19 @@ function bakeTerrain() {
       const [lon, lat] = lonlat;
       const col = Math.floor((lon + 180) / 360 * elevW);
       const row = Math.floor((90 - lat) / 180 * elevH);
-      const luma = sampleLuma(row, col);
-      const l = sampleLuma(row, col - 1), r = sampleLuma(row, col + 1);
-      const t = sampleLuma(row - 1, col), b = sampleLuma(row + 1, col);
-      const dzdx = (r - l) / 2, dzdy = (b - t) / 2;
-      const slope = Math.atan(Math.sqrt(dzdx * dzdx + dzdy * dzdy) * Z_FACTOR / 255);
-      const aspect = Math.atan2(dzdy, -dzdx);
-      let hillshade = Math.cos(ALTITUDE) * Math.cos(slope) + Math.sin(ALTITUDE) * Math.sin(slope) * Math.cos(AZIMUTH - aspect);
-      hillshade = Math.max(0, Math.min(1, hillshade));
-      const brightness = 0.55 + hillshade * 0.75;
-      const [cr, cg, cb] = elevationColor(Math.max(luma, SEA_LEVEL_LUMA));
+      const rgb = sampleRGB(row, col);
+      // local-contrast pass: compare this pixel's luminance to its
+      // immediate neighborhood average — brings out real terrain texture
+      // (coastlines, mountain ranges) already present in the satellite
+      // imagery, without needing a separate elevation dataset
+      const here = luminance(rgb);
+      const neighborAvg = (luminance(sampleRGB(row - 1, col)) + luminance(sampleRGB(row + 1, col)) +
+                            luminance(sampleRGB(row, col - 1)) + luminance(sampleRGB(row, col + 1))) / 4;
+      const contrast = 1 + Math.max(-0.35, Math.min(0.35, (here - neighborAvg) / 90));
       const idx = (y * w + x) * 4;
-      od[idx] = Math.min(255, cr * brightness);
-      od[idx + 1] = Math.min(255, cg * brightness);
-      od[idx + 2] = Math.min(255, cb * brightness);
+      od[idx] = Math.max(0, Math.min(255, rgb[0] * contrast));
+      od[idx + 1] = Math.max(0, Math.min(255, rgb[1] * contrast));
+      od[idx + 2] = Math.max(0, Math.min(255, rgb[2] * contrast));
       od[idx + 3] = 255;
       drawn++;
     }

@@ -13,15 +13,19 @@
     --ember-dim: rgba(232, 130, 60, 0.55);
     --cream: #f2e9d8;
     --cream-dim: rgba(242, 233, 216, 0.55);
-    --land: #2a2117;
-    --land-line: rgba(242, 233, 216, 0.16);
-    --water: #17304a;
-    --river: #3d6f96;
-    --graticule: rgba(242, 233, 216, 0.05);
+    /* bright atlas-style palette for the map surface itself, distinct from
+       the dark app chrome around it — legibility over mood here */
+    --ocean: #b9dde2;
+    --land: #ecd191;
+    --land-line: #b08a4a;
+    --water: #8fc3d6;
+    --river: #4f9fc0;
+    --graticule: rgba(90, 70, 30, 0.18);
+    --sphere-edge: #6b5230;
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; touch-action: none; }
   html, body {
-    height: 100%; margin: 0; background: var(--bg); color: var(--cream);
+    height: 100%; height: 100dvh; margin: 0; background: var(--bg); color: var(--cream);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     padding-top: env(safe-area-inset-top, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -31,13 +35,18 @@
   header {
     padding: 14px 18px; border-bottom: 1px solid var(--line);
     display: flex; align-items: baseline; justify-content: space-between;
-    flex-wrap: wrap; gap: 6px; flex: 0 0 auto;
+    flex-wrap: wrap; gap: 6px; flex: 0 0 auto; background: var(--bg); z-index: 2;
   }
   h1 { font-size: 15px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0; color: var(--ember); font-weight: 700; }
   #status { font-size: 11px; color: var(--cream-dim); }
   #status.live::before { content: '● '; color: var(--ember); }
-  main { position: relative; flex: 1 1 auto; min-height: 0; }
-  canvas { display: block; width: 100%; height: 100%; }
+  #status.error { color: #e88a6c; }
+  main {
+    position: relative; flex: 1 1 auto; min-height: 0;
+    background: radial-gradient(circle at center, #f1e6cf 0%, #ddcda3 55%, #c3ac81 100%);
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
   #tooltip {
     position: absolute; pointer-events: none; background: var(--panel);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
@@ -58,9 +67,15 @@
     font-size: 11px; color: var(--cream-dim); text-align: right;
   }
   #count b { color: var(--cream); font-size: 16px; display: block; }
+  #resetBtn {
+    position: absolute; right: 14px; top: 14px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
+    font-size: 11px; color: var(--cream-dim); z-index: 3;
+  }
   #empty {
     position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
     flex-direction: column; gap: 6px; color: var(--cream-dim); font-size: 13px; text-align: center; padding: 20px;
+    pointer-events: none;
   }
 </style>
 </head>
@@ -72,10 +87,11 @@
   </header>
   <main>
     <canvas id="map"></canvas>
+    <button id="resetBtn">reset view</button>
     <div id="tooltip"></div>
     <div id="legend">
       <div class="row"><span class="dot" style="background:var(--ember)"></span> sent</div>
-      <div class="row"><span class="dot" style="background:var(--cream)"></span> received</div>
+      <div class="row"><span class="dot" style="background:#1d1610"></span> received</div>
       <div class="row"><span class="dot" style="background:var(--ember-dim);opacity:0.6"></span> in flight</div>
     </div>
     <div id="count"><b id="countNum">0</b>lights shared</div>
@@ -93,28 +109,36 @@
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
 const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json";
-const COUNTRIES_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 const LAKES_URL = "https://ne.freemap.online/110m/physical/ne_110m_lakes.json";
 const RIVERS_URL = "https://ne.freemap.online/110m/physical/ne_110m_rivers_lake_centerlines.json";
 
-// ---- canvas + projection setup ----
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const countEl = document.getElementById('countNum');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
+const resetBtn = document.getElementById('resetBtn');
 
-// Azimuthal equidistant, polar aspect (North Pole at center) — the classic
-// "UN flag" world projection: true distance-from-center in every direction,
-// which fits a "who's sending light to whom, right now" map nicely since
-// travel distance reads honestly outward from the pole.
-const projection = d3.geoAzimuthalEquidistant().precision(0.3);
+// Azimuthal equidistant, polar aspect (North Pole at center) — true
+// distance-from-center in every direction. Base scale fits the WHOLE disc
+// in view; d3-zoom (pinch/drag/wheel) layers on top for zooming in.
+// Azimuthal equidistant, centered on the continental US (geographic center,
+// near Lebanon, Kansas: ~39.83N, 98.58W) — the classic "centered on my
+// city" style seen in vintage azimuthal equidistant maps, rather than the
+// default polar-centered aspect. d3's .rotate() takes the negated
+// [longitude, latitude] of the point that should land at the center.
+const US_CENTER = [98.58, -39.83];
+let rotationGamma = 0; // two-finger twist offset, degrees — spins the disc in place around its own center
+let spinVelocity = 0; // degrees/frame of residual spin after a flick, decays via friction in tick()
+const projection = d3.geoAzimuthalEquidistant().rotate([US_CENTER[0], US_CENTER[1], rotationGamma]).precision(0.3);
+function applyRotation() { projection.rotate([US_CENTER[0], US_CENTER[1], rotationGamma]); }
 const path = d3.geoPath(projection, ctx);
 
-let land = null, countryBorders = null, lakes = null, rivers = null;
+let land = null, lakes = null, rivers = null;
 let events = [];
 let dpr = window.devicePixelRatio || 1;
+let transform = d3.zoomIdentity;
 
 function resize() {
   const rect = canvas.parentElement.getBoundingClientRect();
@@ -123,14 +147,11 @@ function resize() {
   canvas.height = rect.height * dpr;
   canvas.style.width = rect.width + 'px';
   canvas.style.height = rect.height + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const size = Math.min(rect.width, rect.height);
-  projection.scale(size * 0.47).translate([rect.width / 2, rect.height / 2]);
+  projection.scale(size * 0.49).translate([rect.width / 2, rect.height / 2]);
   draw();
 }
 
-// ---- data loading (each layer fails independently — a missing river
-// dataset shouldn't take down the whole map) ----
 async function loadGeo(url, isTopo, objectName) {
   try {
     const res = await fetch(url);
@@ -142,31 +163,36 @@ async function loadGeo(url, isTopo, objectName) {
     return null;
   }
 }
-async function loadBorders(url) {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(res.status);
-    const data = await res.json();
-    return topojson.mesh(data, data.objects.countries, (a, b) => a !== b);
-  } catch { return null; }
-}
 
-// ---- drawing ----
-const graticule = d3.geoGraticule10();
 const sphere = { type: 'Sphere' };
 
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
 
 function draw() {
   const rect = canvas.parentElement.getBoundingClientRect();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
 
-  ctx.beginPath(); path(sphere);
-  ctx.fillStyle = '#0d1420'; ctx.fill();
+  // pan/zoom: fold the current d3-zoom transform into the canvas transform
+  // (alongside dpr scaling), then draw everything in fixed projected
+  // coordinates — the standard d3-zoom + canvas pattern
+  ctx.setTransform(transform.k * dpr, 0, 0, transform.k * dpr, transform.x * dpr, transform.y * dpr);
 
-  ctx.beginPath(); path(graticule);
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--graticule');
-  ctx.lineWidth = 1; ctx.stroke();
+  const lw = (px) => px / transform.k; // keep stroke widths visually constant across zoom levels
+  const pr = (px) => px / transform.k; // same for point radii
+
+  // ocean fades to transparent near the disc's outer edge, so it blends
+  // softly into the beige page background instead of a hard circular border
+  const b = path.bounds(sphere);
+  const cx = (b[0][0] + b[1][0]) / 2, cy = (b[0][1] + b[1][1]) / 2;
+  const r = (b[1][0] - b[0][0]) / 2;
+  const oceanGrad = ctx.createRadialGradient(cx, cy, r * 0.92, cx, cy, r);
+  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
+  oceanGrad.addColorStop(0, oceanColor);
+  oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
+  ctx.beginPath(); path(sphere);
+  ctx.fillStyle = oceanGrad;
+  ctx.fill();
 
   if (land) {
     ctx.beginPath(); path(land);
@@ -176,26 +202,18 @@ function draw() {
   if (rivers) {
     ctx.beginPath(); path(rivers);
     ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--river');
-    ctx.lineWidth = 0.6; ctx.stroke();
+    ctx.lineWidth = lw(0.8); ctx.stroke();
   }
   if (lakes) {
     ctx.beginPath(); path(lakes);
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--water');
     ctx.fill();
   }
-  if (countryBorders) {
-    ctx.beginPath(); path(countryBorders);
-    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--land-line');
-    ctx.lineWidth = 0.5; ctx.stroke();
-  }
-  ctx.beginPath(); path(sphere);
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--line');
-  ctx.lineWidth = 1; ctx.stroke();
 
-  drawEvents();
+  drawEvents(lw, pr);
 }
 
-function drawEvents() {
+function drawEvents(lw, pr) {
   const now = Date.now();
   for (const ev of events) {
     const from = project(ev.sentGeo);
@@ -204,39 +222,90 @@ function drawEvents() {
     if (from && to) {
       ctx.beginPath();
       path({ type: 'LineString', coordinates: [from, to] });
-      ctx.strokeStyle = 'rgba(232,130,60,0.4)';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(232,130,60,0.55)';
+      ctx.lineWidth = lw(1.3);
       ctx.stroke();
     }
     if (from) {
       const inFlight = !ev.downloadedAt;
       const pulse = inFlight ? (0.5 + 0.5 * Math.sin(now / 400)) : 1;
       ctx.beginPath();
-      path.pointRadius(inFlight ? 3.5 : 2.5)({ type: 'Point', coordinates: from });
-      ctx.fillStyle = inFlight ? `rgba(232,130,60,${0.35 + 0.35 * pulse})` : '#e8823c';
+      path.pointRadius(pr(inFlight ? 4 : 3))({ type: 'Point', coordinates: from });
+      ctx.fillStyle = inFlight ? `rgba(232,130,60,${0.4 + 0.4 * pulse})` : '#e8823c';
       ctx.fill();
+      ctx.lineWidth = lw(0.8); ctx.strokeStyle = '#1d1610'; ctx.stroke();
     }
     if (to) {
       ctx.beginPath();
-      path.pointRadius(2.5)({ type: 'Point', coordinates: to });
-      ctx.fillStyle = '#f2e9d8';
+      path.pointRadius(pr(3))({ type: 'Point', coordinates: to });
+      ctx.fillStyle = '#1d1610';
       ctx.fill();
+      ctx.lineWidth = lw(0.8); ctx.strokeStyle = '#f2e9d8'; ctx.stroke();
     }
   }
+  path.pointRadius(2.5); // reset default used elsewhere
 }
 
-// ---- hover tooltips ----
-canvas.addEventListener('mousemove', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  let best = null, bestDist = 14;
+// ---- pan / pinch-zoom ----
+const zoomBehavior = d3.zoom()
+  .scaleExtent([0.25, 10])
+  .on('zoom', (event) => { transform = event.transform; draw(); });
+d3.select(canvas).call(zoomBehavior);
+resetBtn.onclick = () => {
+  d3.select(canvas).transition().duration(400).call(zoomBehavior.transform, d3.zoomIdentity);
+  rotationGamma = 0; spinVelocity = 0; applyRotation();
+};
+
+// ---- two-finger twist to spin the globe in place, loose and fidgety ----
+// Runs alongside d3.zoom's own pinch handling above (which reads the same
+// touches for scale) — this only reads the ANGLE between the two touches,
+// so pinch-to-zoom and twist-to-spin both work at once, naturally.
+let twist = null; // { prevAngle, lastTime } while two fingers are down
+function touchAngle(touches) {
+  const dx = touches[1].clientX - touches[0].clientX;
+  const dy = touches[1].clientY - touches[0].clientY;
+  return Math.atan2(dy, dx) * 180 / Math.PI;
+}
+canvas.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) {
+    twist = { prevAngle: touchAngle(e.touches), lastTime: performance.now() };
+    spinVelocity = 0; // grabbing it again stops any residual momentum spin
+  }
+}, { passive: true });
+canvas.addEventListener('touchmove', (e) => {
+  if (e.touches.length === 2 && twist) {
+    const angle = touchAngle(e.touches);
+    let delta = angle - twist.prevAngle;
+    if (delta > 180) delta -= 360; // shortest-path across the atan2 wrap point
+    if (delta < -180) delta += 360;
+    const now = performance.now();
+    const dt = Math.max(now - twist.lastTime, 1);
+    spinVelocity = (delta / dt) * 16; // ~degrees per animation frame, feeds the momentum below
+    rotationGamma += delta;
+    applyRotation();
+    twist.prevAngle = angle;
+    twist.lastTime = now;
+  }
+}, { passive: true });
+canvas.addEventListener('touchend', (e) => {
+  if (e.touches.length < 2) twist = null; // fewer than 2 fingers left: momentum takes over in tick()
+}, { passive: true });
+
+// ---- hover / tap tooltips (accounts for current pan/zoom) ----
+function screenPointFor(geo) {
+  const p = project(geo);
+  if (!p) return null;
+  const base = projection(p);
+  if (!base) return null;
+  return [transform.x + transform.k * base[0], transform.y + transform.k * base[1]];
+}
+function handlePointer(mx, my) {
+  let best = null, bestDist = 16;
   for (const ev of events) {
     for (const [geo, kind] of [[ev.sentGeo, 'sent'], [ev.downloadGeo, 'received']]) {
-      const p = project(geo);
-      if (!p) continue;
-      const proj = projection(p);
-      if (!proj) continue;
-      const d = Math.hypot(proj[0] - mx, proj[1] - my);
+      const s = screenPointFor(geo);
+      if (!s) continue;
+      const d = Math.hypot(s[0] - mx, s[1] - my);
       if (d < bestDist) { bestDist = d; best = { ev, kind, geo }; }
     }
   }
@@ -252,45 +321,59 @@ canvas.addEventListener('mousemove', (e) => {
     }
     tooltipEl.innerHTML = html;
     tooltipEl.style.display = 'block';
+    const rect = canvas.getBoundingClientRect();
     tooltipEl.style.left = Math.min(mx + 14, rect.width - 230) + 'px';
     tooltipEl.style.top = Math.max(my - 10, 4) + 'px';
-    canvas.style.cursor = 'pointer';
   } else {
     tooltipEl.style.display = 'none';
-    canvas.style.cursor = 'default';
   }
+}
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  handlePointer(e.clientX - rect.left, e.clientY - rect.top);
 });
 canvas.addEventListener('mouseleave', () => { tooltipEl.style.display = 'none'; });
 
-// ---- polling ----
+// ---- polling, with a real reason shown on failure instead of a vague message ----
 async function poll() {
   try {
     const res = await fetch(`${WORKER_BASE_URL}/gallery/events?limit=200`);
-    if (!res.ok) throw new Error(res.status);
+    if (!res.ok) {
+      statusEl.textContent = `worker returned ${res.status} — check it's deployed`;
+      statusEl.classList.add('error'); statusEl.classList.remove('live');
+      return;
+    }
     const data = await res.json();
     events = data.events || [];
     countEl.textContent = events.length;
     emptyEl.style.display = events.length === 0 ? 'flex' : 'none';
     statusEl.textContent = 'live';
-    statusEl.classList.add('live');
+    statusEl.classList.add('live'); statusEl.classList.remove('error');
   } catch (err) {
-    statusEl.textContent = 'connection lost — retrying…';
-    statusEl.classList.remove('live');
+    console.error('gallery: poll failed', err);
+    statusEl.textContent = 'network error — retrying… (see console for detail)';
+    statusEl.classList.add('error'); statusEl.classList.remove('live');
   }
 }
 
-// ---- animation loop (only needed for the in-flight pulse) ----
-function tick() { draw(); requestAnimationFrame(tick); }
+function tick() {
+  if (!twist && Math.abs(spinVelocity) > 0.01) {
+    rotationGamma += spinVelocity;
+    spinVelocity *= 0.94; // friction — tuned for a loose, fidgety settle rather than a hard stop
+    applyRotation();
+  }
+  draw();
+  requestAnimationFrame(tick);
+}
 
 (async function init() {
   window.addEventListener('resize', resize);
-  const [landData, borderData, lakeData, riverData] = await Promise.all([
+  const [landData, lakeData, riverData] = await Promise.all([
     loadGeo(LAND_URL, true, 'land'),
-    loadBorders(COUNTRIES_URL),
     loadGeo(LAKES_URL, false),
     loadGeo(RIVERS_URL, false),
   ]);
-  land = landData; countryBorders = borderData; lakes = lakeData; rivers = riverData;
+  land = landData; lakes = lakeData; rivers = riverData;
   resize();
   await poll();
   setInterval(poll, POLL_MS);

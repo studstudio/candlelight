@@ -108,9 +108,9 @@
 // ---- config ----
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
-const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json";
-const LAKES_URL = "https://ne.freemap.online/110m/physical/ne_110m_lakes.json";
-const RIVERS_URL = "https://ne.freemap.online/110m/physical/ne_110m_rivers_lake_centerlines.json";
+const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json";
+const LAKES_URL = "https://ne.freemap.online/50m/physical/ne_50m_lakes.json";
+const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_centerlines.json";
 
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
@@ -153,7 +153,6 @@ function resize() {
   const b = path.bounds(sphere);
   discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
   discRadius = (b[1][0] - b[0][0]) / 2;
-  bakeTerrain(); // expensive (per-pixel reprojection) — only runs here, on load/resize, never per-frame
   draw();
 }
 
@@ -171,130 +170,6 @@ async function loadGeo(url, isTopo, objectName) {
 
 const sphere = { type: 'Sphere' };
 
-// ============================================================
-// TERRAIN: real NASA satellite imagery (public domain Blue Marble
-// true-color composite), proxied through our own Worker — see below for
-// why direct browser fetches from Wikimedia kept failing on CORS.
-// ============================================================
-// This is now proxied through our own Worker (see /gallery/elevation) —
-// Wikimedia's hotlink doesn't set CORS headers, and a third-party proxy
-// (wsrv.nl) also failed to reliably follow the redirect. A server-to-server
-// fetch has no CORS restriction at all (that's a browser policy, not a
-// data-availability one), so the Worker fetches it directly and serves it
-// back with our own headers — this is the durable fix, not another hunt
-// for a magic hotlink URL.
-//
-// The source is NASA's Blue Marble true-color satellite composite — real
-// observed land cover, not an approximation, which is genuinely accurate
-// "greenery" rather than an elevation-based guess. There's no separate DEM
-// here, so "shaded relief" comes from a local-contrast pass over the color
-// image's own real luminance detail (mountains, coastlines, texture do show
-// up this way in Blue Marble, just not as crisply as a true hillshade from
-// dedicated elevation data would give).
-const ELEVATION_URL = `${WORKER_BASE_URL}/gallery/elevation`;
-const ELEVATION_W = 1024, ELEVATION_H = 512;
-let elevData = null, elevW = 0, elevH = 0;
-let terrainCanvas = null;
-
-function loadElevation() {
-  return new Promise((resolve) => {
-    console.log('TERRAIN: fetching satellite imagery via', ELEVATION_URL);
-    fetch(ELEVATION_URL)
-      .then(async (res) => {
-        console.log('TERRAIN: fetch response', res.status);
-        if (!res.ok) {
-          const errBody = await res.json().catch(() => null);
-          console.error('TERRAIN: Worker error detail:', errBody);
-          throw new Error('HTTP ' + res.status + (errBody ? ' — ' + JSON.stringify(errBody) : ''));
-        }
-        return res.blob();
-      })
-      .then((blob) => {
-        console.log('TERRAIN: got blob, size', blob.size, 'type', blob.type);
-        const objectUrl = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-          console.log('TERRAIN: image decoded,', img.naturalWidth, 'x', img.naturalHeight);
-          const w = ELEVATION_W, h = ELEVATION_H;
-          const off = document.createElement('canvas');
-          off.width = w; off.height = h;
-          const octx = off.getContext('2d');
-          octx.drawImage(img, 0, 0, w, h);
-          try {
-            const id = octx.getImageData(0, 0, w, h);
-            elevData = id.data; elevW = w; elevH = h;
-            console.log('TERRAIN: pixel data read OK,', w, 'x', h);
-          } catch (err) {
-            console.error('TERRAIN: getImageData blocked', err);
-            elevData = null;
-          }
-          URL.revokeObjectURL(objectUrl);
-          resolve();
-        };
-        img.onerror = (e) => { console.error('TERRAIN: blob failed to decode as an image', e); resolve(); };
-        img.src = objectUrl;
-      })
-      .catch((err) => {
-        console.error('TERRAIN: fetch failed —', err.message);
-        resolve();
-      });
-  });
-}
-
-function sampleRGB(row, col) {
-  row = Math.max(0, Math.min(elevH - 1, row));
-  col = ((col % elevW) + elevW) % elevW; // wrap around at the antimeridian
-  const i = (row * elevW + col) * 4;
-  return [elevData[i], elevData[i + 1], elevData[i + 2]];
-}
-function luminance([r, g, b]) { return 0.299 * r + 0.587 * g + 0.114 * b; }
-
-// bakes a reprojected terrain bitmap at the CURRENT projection (fixed
-// US-centered orientation, gamma=0) — this is the expensive per-pixel step
-// (one projection.invert() per output pixel), so it only ever runs from
-// resize(), never per animation frame
-function bakeTerrain() {
-  if (!elevData) { terrainCanvas = null; console.warn('TERRAIN: bake skipped — no pixel data loaded'); return; }
-  console.time('TERRAIN: bake');
-  const rect = canvas.parentElement.getBoundingClientRect();
-  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
-  const off = document.createElement('canvas');
-  off.width = w; off.height = h;
-  const octx = off.getContext('2d');
-  const outData = octx.createImageData(w, h);
-  const od = outData.data;
-  let drawn = 0;
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const lonlat = projection.invert([x, y]);
-      if (!lonlat || !isFinite(lonlat[0]) || !isFinite(lonlat[1])) continue; // leave transparent outside the sphere
-      const [lon, lat] = lonlat;
-      const col = Math.floor((lon + 180) / 360 * elevW);
-      const row = Math.floor((90 - lat) / 180 * elevH);
-      const rgb = sampleRGB(row, col);
-      // local-contrast pass: compare this pixel's luminance to its
-      // immediate neighborhood average — brings out real terrain texture
-      // (coastlines, mountain ranges) already present in the satellite
-      // imagery, without needing a separate elevation dataset
-      const here = luminance(rgb);
-      const neighborAvg = (luminance(sampleRGB(row - 1, col)) + luminance(sampleRGB(row + 1, col)) +
-                            luminance(sampleRGB(row, col - 1)) + luminance(sampleRGB(row, col + 1))) / 4;
-      const contrast = 1 + Math.max(-0.35, Math.min(0.35, (here - neighborAvg) / 90));
-      const idx = (y * w + x) * 4;
-      od[idx] = Math.max(0, Math.min(255, rgb[0] * contrast));
-      od[idx + 1] = Math.max(0, Math.min(255, rgb[1] * contrast));
-      od[idx + 2] = Math.max(0, Math.min(255, rgb[2] * contrast));
-      od[idx + 3] = 255;
-      drawn++;
-    }
-  }
-  console.timeEnd('TERRAIN: bake');
-  console.log('TERRAIN: baked', w, 'x', h, '—', drawn, 'pixels drawn out of', w * h);
-  octx.putImageData(outData, 0, 0);
-  terrainCanvas = off;
-  console.log('TERRAIN: terrainCanvas set, ready to draw');
-}
 
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
 
@@ -330,19 +205,9 @@ function draw() {
   ctx.fill();
 
   if (land) {
-    ctx.save();
-    ctx.beginPath(); path(land); ctx.clip();
-    if (terrainCanvas) {
-      // baked at CSS-pixel dimensions matching the container, in the same
-      // (gamma=0) projected coordinate space the vector paths use — drawing
-      // it 1:1 here lets the current ctx transform (pan/zoom/spin) place it
-      // correctly, same as any vector path
-      ctx.drawImage(terrainCanvas, 0, 0, terrainCanvas.width, terrainCanvas.height);
-    } else {
-      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
-      ctx.fill();
-    }
-    ctx.restore();
+    ctx.beginPath(); path(land);
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
+    ctx.fill();
   }
   if (rivers) {
     ctx.beginPath(); path(rivers);
@@ -520,7 +385,6 @@ function tick() {
     loadGeo(LAND_URL, true, 'land'),
     loadGeo(LAKES_URL, false),
     loadGeo(RIVERS_URL, false),
-    loadElevation(), // populates elevData/elevW/elevH; resize() below bakes the first terrain frame from it
   ]);
   land = landData; lakes = lakeData; rivers = riverData;
   resize();

@@ -69,6 +69,30 @@
   }
   .layer-tab.active { background: var(--ember); border-color: var(--ember); color: #1a1108; font-weight: 600; }
   .layer-tab.layer-tab-add { border-style: dashed; opacity: 0.75; }
+
+  .mode-toggle { display: flex; gap: 8px; margin-bottom: 8px; }
+  .mode-btn {
+    flex: 1; padding: 9px 0; border-radius: 10px; border: 1px solid var(--line);
+    background: transparent; color: var(--cream-dim); font-size: 12px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .mode-btn.active { background: var(--ember); border-color: var(--ember); color: #1a1108; }
+
+  .frame-filmstrip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
+  .frame-tab {
+    flex: 0 0 auto; width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--line);
+    background: transparent; color: var(--cream-dim); font-size: 12px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; position: relative;
+  }
+  .frame-tab.active { background: var(--ember); border-color: var(--ember); color: #1a1108; }
+  .frame-tab.frame-tab-add { border-style: dashed; opacity: 0.75; font-size: 16px; }
+  .frame-remove {
+    position: absolute; top: -6px; right: -6px; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--bg-elevated); border: 1px solid var(--line); color: var(--cream-dim);
+    font-size: 11px; line-height: 14px; text-align: center;
+  }
+  .anim-interval-value { font-size: 11px; color: var(--cream-dim); flex: 0 0 32px; text-align: right; }
+
   .layer-remove {
     display: inline-block; width: 13px; height: 13px; line-height: 13px; text-align: center;
     border-radius: 50%; background: rgba(0,0,0,0.25); font-size: 10px;
@@ -271,7 +295,23 @@
 </head>
 <body>
 
+<div class="mode-toggle" id="modeToggle">
+  <button class="mode-btn active" id="modeStillBtn">still</button>
+  <button class="mode-btn" id="modeCycleBtn">cycle</button>
+</div>
+
 <div class="layer-tabs" id="layerTabs"></div>
+<div class="frame-filmstrip" id="frameFilmstrip" style="display:none;"></div>
+
+<div class="anim-controls" id="animControls" style="display:none; margin-bottom:10px;">
+  <div class="moire-row">
+    <span class="moire-label">speed</span>
+    <input type="range" id="animIntervalSlider" min="0.3" max="30" step="0.1" value="0.3">
+    <span class="anim-interval-value" id="animIntervalValue">0.3s</span>
+  </div>
+  <button class="pill" id="animPlayBtn" style="margin-top:8px; width:100%; padding:9px 0;">▶ preview</button>
+  <button class="pill" id="duplicateFrameBtn" style="margin-top:8px; width:100%; padding:9px 0;">⧉ duplicate current frame</button>
+</div>
 
 <div class="photo-wrap" id="photoWrap">
   <img id="sourceImg" src="" style="display:none;">
@@ -417,7 +457,7 @@
 </div>
 
 <script>
-const WORKER_BASE_URL = "https://your-worker-name.workers.dev"; // <-- edit this
+const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
 
 const layerTabs = document.getElementById('layerTabs');
 const fileInput = document.getElementById('fileInput');
@@ -473,6 +513,7 @@ let naturalW = 0, naturalH = 0;
 let hasPhoto = false;
 let editingContactIdx = null;
 let selectedContact = null;
+let selectedContactQueueFull = false;
 // gray-level/tone-curve state now lives in STEPS + stepIndex, defined near the scrub handler below
 
 // crop box state, in DISPLAYED (CSS) pixel coordinates relative to photoWrap.
@@ -496,6 +537,34 @@ const CHUNK_TYPE = 'epRb';
 let layers = [null, null, null]; // index 0 = base, 1/2 = overlays
 let activeLayerIdx = 0;
 let pendingUploadTargetLayer = 0; // which layer slot the next file picker result goes into
+
+// ============================================================
+// ANIMATION ("cycle") MODE: up to 10 independent frames. Each frame is
+// itself a full layer stack — a base plus up to 2 overlays, edited and
+// composited exactly like still mode (see LAYERS above) — just forced to
+// pure black & white (2 levels) instead of whatever tone step you dial in,
+// since the panel can't do partial refresh in 4-gray mode and cycling
+// relies on fast B/W partial refresh instead.
+// currentStack() is the single source of truth for "whichever layer stack
+// is being edited right now" — the base `layers` array in still mode, or
+// frames[activeFrameIdx] in cycle mode — so all the existing layer-tab /
+// snapshot / load / switch machinery below works unmodified in both modes.
+// ============================================================
+const MAX_FRAMES = 10;
+let mode = 'still'; // 'still' | 'cycle'
+let frames = []; // each entry is itself a [base, overlay1, overlay2] stack, or null
+let activeFrameIdx = 0; // which frame is being edited in cycle mode
+let pendingNewFrameIdx = null; // set only by the filmstrip's + button; committed in fileInput.onchange once a photo is actually chosen
+let animIntervalSec = 0.3; // global, defaults to real partial-refresh speed
+let animPlaying = false;
+let animPlayTimer = null;
+
+function currentStack() {
+  if (mode !== 'cycle') return layers;
+  if (!frames[activeFrameIdx]) frames[activeFrameIdx] = [null, null, null];
+  return frames[activeFrameIdx];
+}
+function frameIsFilled(f) { return !!(f && f[0] && f[0].img); }
 
 function makeDefaultLayerParams() {
   return {
@@ -532,7 +601,7 @@ function computeFittedBox(vis, aspect) {
 // into the active layer's stored record — always called before a render so
 // the composite reflects the latest scrub/slider/crop changes
 function snapshotActiveLayerState() {
-  const layer = layers[activeLayerIdx];
+  const layer = currentStack()[activeLayerIdx];
   if (!layer) return;
   layer.box = { ...box };
   layer.coverScale = coverScale; layer.coverX0 = coverX0; layer.coverY0 = coverY0;
@@ -554,7 +623,7 @@ function snapshotActiveLayerState() {
 // so whichever layer you tap becomes the one the crop box / sliders / pills
 // actually affect
 function loadLayerStateToGlobals(idx) {
-  const layer = layers[idx];
+  const layer = currentStack()[idx];
   if (!layer) return;
   activeLayerIdx = idx;
   naturalW = layer.naturalW; naturalH = layer.naturalH;
@@ -599,16 +668,18 @@ function loadLayerStateToGlobals(idx) {
 }
 
 function switchToLayer(idx) {
-  if (!layers[idx] || idx === activeLayerIdx) return;
+  if (!currentStack()[idx] || idx === activeLayerIdx) return;
   snapshotActiveLayerState();
   loadLayerStateToGlobals(idx);
   updateLayerTabs();
+  updateFrameFilmstrip();
   render();
 }
 
 function removeLayer(idx) {
-  if (idx === 0 || !layers[idx]) return; // base can't be removed
-  layers[idx] = null;
+  const stack = currentStack();
+  if (idx === 0 || !stack[idx]) return; // base can't be removed
+  stack[idx] = null;
   if (activeLayerIdx === idx) loadLayerStateToGlobals(0);
   updateLayerTabs();
   render();
@@ -616,10 +687,11 @@ function removeLayer(idx) {
 
 function updateLayerTabs() {
   layerTabs.innerHTML = '';
-  if (!layers[0]) return; // nothing to show until a base photo exists — the empty-state placeholder covers this
+  const stack = currentStack();
+  if (!stack[0]) return; // nothing to show until a base photo exists — the empty-state placeholder covers this
   const LABELS = ['base', 'overlay 1', 'overlay 2'];
   for (let i = 0; i < 3; i++) {
-    const layer = layers[i];
+    const layer = stack[i];
     const tab = document.createElement('button');
     tab.className = 'layer-tab' + (i === activeLayerIdx ? ' active' : '') + (!layer ? ' layer-tab-add' : '');
     tab.textContent = layer ? LABELS[i] : '+ overlay';
@@ -637,6 +709,221 @@ function updateLayerTabs() {
     layerTabs.appendChild(tab);
   }
 }
+
+// ---------- animation ("cycle") mode: frame filmstrip + controls ----------
+const modeStillBtn = document.getElementById('modeStillBtn');
+const modeCycleBtn = document.getElementById('modeCycleBtn');
+const frameFilmstrip = document.getElementById('frameFilmstrip');
+const animControls = document.getElementById('animControls');
+const animIntervalSlider = document.getElementById('animIntervalSlider');
+const animIntervalValue = document.getElementById('animIntervalValue');
+const animPlayBtn = document.getElementById('animPlayBtn');
+
+// composites a whole layer stack (base + overlays) into one gray buffer —
+// shared by render() (still mode, and the active frame in cycle mode) and
+// the preview/send paths below (which need to composite OTHER frames, not
+// just whichever one is currently loaded into the editing globals)
+function compositeStack(stack, forceLevels) {
+  const W = targetW, H = targetH;
+  let composite = null;
+  for (let i = 0; i < stack.length; i++) {
+    const layer = stack[i];
+    if (!layer || !layer.img) continue;
+    const gray = computeLayerGray(layer, W, H, forceLevels);
+    if (!composite) { composite = gray; continue; }
+    const opacity = layer.opacityAmount;
+    if (opacity >= 0.999) {
+      for (let p = 0; p < W*H; p++) { if (gray[p] < 255) composite[p] = gray[p]; }
+    } else if (opacity > 0.001) {
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const idx = y * W + x;
+          if (gray[idx] >= 255) continue;
+          const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
+          if (opacity > threshold) composite[idx] = gray[idx];
+        }
+      }
+    }
+  }
+  return composite;
+}
+
+function switchToFrame(frameIdx) {
+  if (mode !== 'cycle' || frameIdx === activeFrameIdx) return;
+  snapshotActiveLayerState(); // saves into the OLD frame's stack, still active at this point
+  activeFrameIdx = frameIdx;
+  if (!frames[activeFrameIdx]) frames[activeFrameIdx] = [null, null, null];
+  activeLayerIdx = 0;
+  const stack = frames[activeFrameIdx];
+  if (stack[0]) {
+    loadLayerStateToGlobals(0);
+  } else {
+    sourceImg.style.display = 'none';
+    emptyState.style.display = 'flex';
+    cropBox.style.display = 'none';
+    cropHint.style.display = 'none';
+  }
+  updateLayerTabs();
+  updateFrameFilmstrip();
+  render();
+}
+
+function updateFrameFilmstrip() {
+  frameFilmstrip.innerHTML = '';
+  if (mode !== 'cycle') return;
+  const filledFrames = frames.map((f, i) => ({ f, i })).filter(x => frameIsFilled(x.f));
+  filledFrames.forEach(({ f, i }) => {
+    const tab = document.createElement('button');
+    tab.className = 'frame-tab' + (i === activeFrameIdx ? ' active' : '');
+    tab.textContent = String(i + 1);
+    tab.onclick = () => switchToFrame(i);
+    if (filledFrames.length > 1) {
+      const remove = document.createElement('span');
+      remove.className = 'frame-remove';
+      remove.textContent = '×';
+      remove.onclick = (e) => { e.stopPropagation(); removeFrame(i); };
+      tab.appendChild(remove);
+    }
+    frameFilmstrip.appendChild(tab);
+  });
+  if (filledFrames.length > 0 && filledFrames.length < MAX_FRAMES) {
+    const add = document.createElement('button');
+    add.className = 'frame-tab frame-tab-add';
+    add.textContent = '+';
+    add.title = 'add a new photo as the next frame';
+    add.onclick = () => {
+      snapshotActiveLayerState();
+      let newIdx = -1;
+      for (let i = 0; i < MAX_FRAMES; i++) { if (!frameIsFilled(frames[i])) { newIdx = i; break; } }
+      if (newIdx === -1) return;
+      // don't touch activeFrameIdx/frames yet — if the user cancels the photo
+      // picker, no 'change' event fires at all, and mutating state now would
+      // silently strand the app pointed at an empty frame nothing ever
+      // refreshes to show. Commit only once a photo is actually chosen.
+      pendingNewFrameIdx = newIdx;
+      pendingUploadTargetLayer = 0;
+      fileInput.click();
+    };
+    frameFilmstrip.appendChild(add);
+  }
+}
+
+function duplicateActiveFrame() {
+  if (mode !== 'cycle') return;
+  snapshotActiveLayerState();
+  const source = frames[activeFrameIdx];
+  if (!frameIsFilled(source)) return;
+  let newIdx = -1;
+  for (let i = 0; i < MAX_FRAMES; i++) { if (!frameIsFilled(frames[i])) { newIdx = i; break; } }
+  if (newIdx === -1) return; // all 10 slots full
+  // deep-clone every layer in the stack (base + any overlays) except the
+  // shared <img> element, which can't survive a JSON round-trip
+  frames[newIdx] = source.map(layer => {
+    if (!layer) return null;
+    const clone = JSON.parse(JSON.stringify(layer, (k, v) => k === 'img' ? undefined : v));
+    clone.img = layer.img;
+    return clone;
+  });
+  switchToFrame(newIdx);
+}
+document.getElementById('duplicateFrameBtn').onclick = duplicateActiveFrame;
+
+function removeFrame(idx) {
+  if (!frames[idx]) return;
+  frames[idx] = null;
+  if (activeFrameIdx === idx) {
+    let nextIdx = -1;
+    for (let i = idx - 1; i >= 0; i--) { if (frameIsFilled(frames[i])) { nextIdx = i; break; } }
+    if (nextIdx === -1) {
+      for (let i = idx + 1; i < frames.length; i++) { if (frameIsFilled(frames[i])) { nextIdx = i; break; } }
+    }
+    if (nextIdx !== -1) {
+      activeFrameIdx = nextIdx; // switchToFrame no-ops on equal index, so set then load directly
+      activeLayerIdx = 0;
+      loadLayerStateToGlobals(0);
+      updateLayerTabs();
+    } else {
+      frames[0] = [null, null, null];
+      activeFrameIdx = 0;
+      activeLayerIdx = 0;
+      sourceImg.style.display = 'none';
+      emptyState.style.display = 'flex';
+      cropBox.style.display = 'none';
+      cropHint.style.display = 'none';
+      updateLayerTabs();
+    }
+  }
+  updateFrameFilmstrip();
+  render();
+}
+
+function setMode(next) {
+  if (mode === next) return;
+  stopAnimPreview();
+  snapshotActiveLayerState();
+  mode = next;
+  modeStillBtn.classList.toggle('active', mode === 'still');
+  modeCycleBtn.classList.toggle('active', mode === 'cycle');
+  frameFilmstrip.style.display = mode === 'cycle' ? 'flex' : 'none';
+  animControls.style.display = mode === 'cycle' ? 'block' : 'none';
+
+  activeLayerIdx = 0;
+  const stack = currentStack();
+  if (stack[0] && stack[0].img) {
+    loadLayerStateToGlobals(0);
+  } else {
+    sourceImg.style.display = 'none';
+    emptyState.style.display = 'flex';
+    cropBox.style.display = 'none';
+    cropHint.style.display = 'none';
+  }
+  updateLayerTabs();
+  updateFrameFilmstrip();
+  render();
+}
+modeStillBtn.onclick = () => setMode('still');
+modeCycleBtn.onclick = () => setMode('cycle');
+
+animIntervalSlider.oninput = () => {
+  animIntervalSec = Math.max(0.3, parseFloat(animIntervalSlider.value));
+  animIntervalValue.textContent = (Math.round(animIntervalSec * 10) / 10) + 's';
+};
+
+// composites and draws one whole frame (base + its overlays) straight to
+// the canvas without disturbing whichever frame is currently being edited
+// (crop box, sliders, etc.) — used only for the play/pause preview loop
+function renderFrameForPreview(idx) {
+  const stack = frames[idx];
+  if (!frameIsFilled(stack)) return;
+  const composite = compositeStack(stack, 2);
+  if (!composite) return;
+  const W = targetW, H = targetH;
+  const outData = lctx.createImageData(W, H);
+  const od = outData.data;
+  for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,composite[i])); od[i*4]=v;od[i*4+1]=v;od[i*4+2]=v;od[i*4+3]=255; }
+  lctx.putImageData(outData,0,0);
+}
+
+function stopAnimPreview() {
+  animPlaying = false;
+  if (animPlayTimer) { clearInterval(animPlayTimer); animPlayTimer = null; }
+  animPlayBtn.textContent = '▶ preview';
+  render(); // restore the currently-edited frame to the canvas
+}
+
+animPlayBtn.onclick = () => {
+  if (animPlaying) { stopAnimPreview(); return; }
+  const filled = frames.map((f,i)=>({f,i})).filter(x => frameIsFilled(x.f));
+  if (filled.length === 0) return;
+  animPlaying = true;
+  animPlayBtn.textContent = '■ stop';
+  let cursor = 0;
+  renderFrameForPreview(filled[0].i);
+  animPlayTimer = setInterval(() => {
+    cursor = (cursor + 1) % filled.length;
+    renderFrameForPreview(filled[cursor].i);
+  }, animIntervalSec * 1000);
+};
 
 // ---------- contacts ----------
 function loadContacts() {
@@ -723,7 +1010,7 @@ modalRemove.onclick = () => {
   updateSendState();
 };
 
-function updateSendState() { sendBtn.disabled = !(hasPhoto && selectedContact !== null); }
+function updateSendState() { sendBtn.disabled = !(hasPhoto && selectedContact !== null) || selectedContactQueueFull; }
 
 async function checkLastSeen(lampId) {
   lastSeen.textContent = 'checking…';
@@ -731,7 +1018,10 @@ async function checkLastSeen(lampId) {
     const res = await fetch(`${WORKER_BASE_URL}/lamp/${lampId}/status`);
     if (!res.ok) throw new Error();
     const info = await res.json();
-    if (info.lastUpload) {
+    selectedContactQueueFull = !!info.queueFull;
+    if (selectedContactQueueFull) {
+      lastSeen.textContent = 'queue full. wait for next flame to clear the canvas.';
+    } else if (info.lastUpload) {
       const mins = Math.round((Date.now() - info.lastUpload) / 60000);
       let human;
       if (mins < 1) human = 'just now';
@@ -740,7 +1030,8 @@ async function checkLastSeen(lampId) {
       else human = `${Math.round(mins/1440)}d ago`;
       lastSeen.textContent = `last light sent ${human}`;
     } else lastSeen.textContent = 'no uploads yet';
-  } catch { lastSeen.textContent = ''; }
+  } catch { selectedContactQueueFull = false; lastSeen.textContent = ''; }
+  updateSendState();
 }
 
 // ---------- orientation: which way the physical panel is mounted ----------
@@ -796,11 +1087,17 @@ fileInput.onchange = (e) => {
   const targetIdx = pendingUploadTargetLayer;
   const img = new Image();
   img.onload = () => {
-    const layer = layers[targetIdx] || makeDefaultLayerParams();
+    if (pendingNewFrameIdx !== null) {
+      activeFrameIdx = pendingNewFrameIdx;
+      frames[activeFrameIdx] = frames[activeFrameIdx] || [null, null, null];
+      pendingNewFrameIdx = null;
+    }
+    const list = currentStack();
+    const layer = list[targetIdx] || makeDefaultLayerParams();
     layer.img = img;
     layer.naturalW = img.naturalWidth;
     layer.naturalH = img.naturalHeight;
-    layers[targetIdx] = layer;
+    list[targetIdx] = layer;
 
     hasPhoto = true;
     photoWrap.classList.add('has-photo');
@@ -820,6 +1117,7 @@ fileInput.onchange = (e) => {
       activeLayerIdx = targetIdx;
       loadLayerStateToGlobals(targetIdx);
       updateLayerTabs();
+      updateFrameFilmstrip();
       render();
       lastWrapW = photoWrap.clientWidth;
     });
@@ -967,7 +1265,7 @@ window.addEventListener('resize', () => {
 // + tone curve + dither, run entirely against ONE layer's own stored settings.
 // Draws into the shared offscreen scratch canvas and returns a quantized,
 // dithered Float32Array of gray values (0-255) at panel resolution.
-function computeLayerGray(layer, W, H) {
+function computeLayerGray(layer, W, H, forceLevels) {
   // map crop box (container coordinates) back to natural image pixel coordinates
   // using the same cover-fit math the browser used to render the photo
   const sx = (layer.box.left - layer.coverX0) / layer.coverScale;
@@ -1224,7 +1522,7 @@ function computeLayerGray(layer, W, H) {
     gray[i] = t * 255;
   }
 
-  const levelCount = cfg.levels;
+  const levelCount = forceLevels || cfg.levels;
   const step = 255/(levelCount-1);
   function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
 
@@ -1254,45 +1552,14 @@ function render() {
   snapshotActiveLayerState(); // make sure the layer being edited right now is up to date before compositing
 
   const W = targetW, H = targetH;
-  let composite = null;
-  for (let i = 0; i < layers.length; i++) {
-    const layer = layers[i];
-    if (!layer || !layer.img) continue;
-    const gray = computeLayerGray(layer, W, H);
-    if (!composite) {
-      composite = gray; // base always shows in full, nothing beneath it to blend with
-      continue;
-    }
-    const opacity = layer.opacityAmount;
-    if (opacity >= 0.999) {
-      // full strength: simple punch-through, every ink pixel shows
-      for (let p = 0; p < W*H; p++) { if (gray[p] < 255) composite[p] = gray[p]; }
-    } else if (opacity > 0.001) {
-      // partial strength: rather than alpha-blending pixel values (which just
-      // rounds back to solid black/white on a 2-4 level display), each ink
-      // pixel is kept or dropped via the same ordered Bayer pattern used for
-      // dithering elsewhere — comparing the opacity against a per-pixel
-      // threshold. Surviving pixels stay at full, crisp intensity; the FADE
-      // comes from the density of surviving pixels, like a halftone screen,
-      // which reads as a genuine blend at the panel's real resolution instead
-      // of muddy in-between grays the hardware can't actually display.
-      for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-          const idx = y * W + x;
-          if (gray[idx] >= 255) continue; // background stays transparent regardless of opacity
-          const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
-          if (opacity > threshold) composite[idx] = gray[idx];
-        }
-      }
-    }
-    // opacity <= 0.001: overlay contributes nothing, skip entirely
-  }
+  const stack = currentStack(); // layers (still) or frames[activeFrameIdx] (cycle) — see compositeStack() for the shared logic
+  const composite = compositeStack(stack, mode === 'cycle' ? 2 : undefined);
   if (!composite) return;
 
-  // postcard text is stamped LAST, on top of the fully composited image —
-  // so it always sits above every overlay, no matter the compositing order
-  // or opacity settings above.
-  if (postcardText.trim()) stampPostcardText(composite, W, H);
+  // postcard text isn't supported on animation frames for now — skip it
+  // in cycle mode rather than risk it referencing the (possibly untouched)
+  // still-mode base layer.
+  if (mode !== 'cycle' && postcardText.trim()) stampPostcardText(composite, W, H);
 
   const outData = lctx.createImageData(W, H);
   const od = outData.data;
@@ -1777,17 +2044,72 @@ const crcTable = (() => { const t=[]; for(let n=0;n<256;n++){let c=n;for(let k=0
 function crc32(bytes){ let c=0xFFFFFFFF; for(let i=0;i<bytes.length;i++){c=crcTable[(c^bytes[i])&0xFF]^(c>>>8);} return (c^0xFFFFFFFF)>>>0; }
 function u32be(n){ return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]); }
 
+// GDEY042T81 (SSD1683) is a native 4-grayscale panel, so each pixel is packed
+// as a 2-bit code (0 = black .. 3 = white) rather than 1 bit. Whatever
+// firmware eventually reads this can re-encode these codes into the
+// controller's own old-data/new-data bitplane format however it needs to —
+// this app doesn't need to know that detail, just deliver 4 real gray levels.
+// The gray value is already quantized by applyDither() to whichever level
+// count (2/3/4-gray) was chosen via the tone-curve scrub, so dividing by 85
+// and rounding recovers that exact level as a 0-3 code without re-thresholding
+// it back down to pure black/white.
+// packs a grayscale buffer at `bpp` bits per pixel (2^bpp gray levels,
+// 0=black .. max=white), MSB-first within each byte
+function packBits(gray, W, H, bpp) {
+  const bytesPerRow = Math.ceil(W * bpp / 8);
+  const packed = new Uint8Array(bytesPerRow * H);
+  const maxCode = (1 << bpp) - 1;
+  const divisor = 255 / maxCode;
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+    const code = Math.max(0, Math.min(maxCode, Math.round(gray[y*W+x] / divisor)));
+    const bitOffset = (x * bpp) % 8;
+    const byteIndex = y*bytesPerRow + ((x * bpp) >> 3);
+    packed[byteIndex] |= code << (8 - bpp - bitOffset);
+  }
+  return packed;
+}
+
+// builds one complete PNG chunk (length + type + data + CRC) as raw bytes
+function makeChunk(typeStr, dataBytes) {
+  const typeBytes = new Uint8Array([typeStr.charCodeAt(0),typeStr.charCodeAt(1),typeStr.charCodeAt(2),typeStr.charCodeAt(3)]);
+  const crcInput = new Uint8Array(typeBytes.length + dataBytes.length);
+  crcInput.set(typeBytes,0); crcInput.set(dataBytes, typeBytes.length);
+  const crc = crc32(crcInput);
+  const chunk = new Uint8Array(4+4+dataBytes.length+4);
+  chunk.set(u32be(dataBytes.length),0);
+  chunk.set(typeBytes,4);
+  chunk.set(dataBytes,8);
+  chunk.set(u32be(crc), 8+dataBytes.length);
+  return chunk;
+}
+
 async function buildChunkedPNG() {
   const W = targetW, H = targetH;
-  const gray = liveCanvas._grayCache;
-  const bytesPerRow = Math.ceil(W/8);
-  const packed = new Uint8Array(bytesPerRow*H);
-  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
-    if (gray[y*W+x] > 127) packed[y*bytesPerRow+(x>>3)] |= (0x80 >> (x&7));
+  const customChunks = [];
+
+  if (mode === 'cycle') {
+    snapshotActiveLayerState(); // make sure the frame being edited right now is fully up to date
+    const activeFrames = frames.filter(f => frameIsFilled(f));
+    const intervalMs = Math.max(300, Math.round(animIntervalSec * 1000));
+    // epRa: animation header — panel dims, bpp (always 1 = B/W here),
+    // frame count, interval in ms (16-bit, so up to ~65s)
+    const animHeader = new Uint8Array([
+      (W>>8)&255, W&255, (H>>8)&255, H&255, 1, activeFrames.length,
+      (intervalMs>>8)&255, intervalMs&255
+    ]);
+    customChunks.push(makeChunk('epRa', animHeader));
+    for (const stack of activeFrames) {
+      const gray = compositeStack(stack, 2); // forced B/W, base + overlays composited
+      customChunks.push(makeChunk(CHUNK_TYPE, packBits(gray, W, H, 1)));
+    }
+  } else {
+    const gray = liveCanvas._grayCache;
+    const packed = packBits(gray, W, H, 2);
+    const header = new Uint8Array([(W>>8)&255,W&255,(H>>8)&255,H&255,2]);
+    const chunkData = new Uint8Array(header.length+packed.length);
+    chunkData.set(header,0); chunkData.set(packed,header.length);
+    customChunks.push(makeChunk(CHUNK_TYPE, chunkData));
   }
-  const header = new Uint8Array([(W>>8)&255,W&255,(H>>8)&255,H&255]);
-  const chunkData = new Uint8Array(header.length+packed.length);
-  chunkData.set(header,0); chunkData.set(packed,header.length);
 
   const blob = await new Promise(res => liveCanvas.toBlob(res,'image/png'));
   const pngBytes = new Uint8Array(await blob.arrayBuffer());
@@ -1798,20 +2120,14 @@ async function buildChunkedPNG() {
     if(type==='IEND'){ iendOffset=offset; break; }
     offset += 8+len+4;
   }
-  const typeBytes = new Uint8Array([CHUNK_TYPE.charCodeAt(0),CHUNK_TYPE.charCodeAt(1),CHUNK_TYPE.charCodeAt(2),CHUNK_TYPE.charCodeAt(3)]);
-  const crcInput = new Uint8Array(typeBytes.length+chunkData.length);
-  crcInput.set(typeBytes,0); crcInput.set(chunkData,typeBytes.length);
-  const crc = crc32(crcInput);
-  const newChunk = new Uint8Array(4+4+chunkData.length+4);
-  newChunk.set(u32be(chunkData.length),0);
-  newChunk.set(typeBytes,4);
-  newChunk.set(chunkData,8);
-  newChunk.set(u32be(crc),8+chunkData.length);
 
-  const finalBytes = new Uint8Array(pngBytes.length+newChunk.length);
+  let totalLen = 0;
+  for (const c of customChunks) totalLen += c.length;
+  const finalBytes = new Uint8Array(pngBytes.length + totalLen);
   finalBytes.set(pngBytes.slice(0,iendOffset),0);
-  finalBytes.set(newChunk, iendOffset);
-  finalBytes.set(pngBytes.slice(iendOffset), iendOffset+newChunk.length);
+  let pos = iendOffset;
+  for (const c of customChunks) { finalBytes.set(c, pos); pos += c.length; }
+  finalBytes.set(pngBytes.slice(iendOffset), pos);
   return new Blob([finalBytes], { type:'image/png' });
 }
 
@@ -1827,10 +2143,21 @@ sendBtn.onclick = async () => {
     const res = await fetch(`${WORKER_BASE_URL}/lamp/${target.id}/upload`, {
       method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob
     });
+    if (res.status === 409) {
+      let body = {};
+      try { body = await res.json(); } catch {}
+      if (body.error === 'queue_full') {
+        selectedContactQueueFull = true;
+        sendStatus.textContent = 'queue full. wait for next flame to clear the canvas.';
+        sendStatus.classList.add('fail');
+        lastSeen.textContent = 'queue full. wait for next flame to clear the canvas.';
+        updateSendState();
+        return;
+      }
+    }
     if (!res.ok) throw new Error('Upload failed');
     sendStatus.textContent = `sent to ${target.name}`;
     sendStatus.classList.add('success');
-    checkLastSeen(target.id);
   } catch (err) {
     sendStatus.textContent = 'could not send — check connection';
     sendStatus.classList.add('fail');

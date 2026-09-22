@@ -192,27 +192,44 @@ let terrainCanvas = null;
 
 function loadElevation() {
   return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      // downsample for bake-loop speed — full source detail isn't needed at
-      // the scale we're reprojecting to
-      const w = 1080, h = 540;
-      const off = document.createElement('canvas');
-      off.width = w; off.height = h;
-      const octx = off.getContext('2d');
-      octx.drawImage(img, 0, 0, w, h);
-      try {
-        const id = octx.getImageData(0, 0, w, h);
-        elevData = id.data; elevW = w; elevH = h;
-      } catch (err) {
-        console.warn('gallery: could not read elevation pixel data (CORS?)', err);
-        elevData = null;
-      }
-      resolve();
-    };
-    img.onerror = () => { console.warn('gallery: elevation image failed to load'); resolve(); };
-    img.src = ELEVATION_URL;
+    console.log('TERRAIN: fetching elevation data from', ELEVATION_URL);
+    fetch(ELEVATION_URL)
+      .then((res) => {
+        console.log('TERRAIN: fetch response', res.status, res.type, [...res.headers.entries()]);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.blob();
+      })
+      .then((blob) => {
+        console.log('TERRAIN: got blob, size', blob.size, 'type', blob.type);
+        const objectUrl = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          console.log('TERRAIN: image decoded,', img.naturalWidth, 'x', img.naturalHeight);
+          // downsample for bake-loop speed — full source detail isn't needed
+          // at the scale we're reprojecting to
+          const w = 1080, h = 540;
+          const off = document.createElement('canvas');
+          off.width = w; off.height = h;
+          const octx = off.getContext('2d');
+          octx.drawImage(img, 0, 0, w, h);
+          try {
+            const id = octx.getImageData(0, 0, w, h);
+            elevData = id.data; elevW = w; elevH = h;
+            console.log('TERRAIN: pixel data read OK,', w, 'x', h);
+          } catch (err) {
+            console.error('TERRAIN: getImageData blocked (tainted canvas / CORS)', err);
+            elevData = null;
+          }
+          URL.revokeObjectURL(objectUrl);
+          resolve();
+        };
+        img.onerror = (e) => { console.error('TERRAIN: blob failed to decode as an image', e); resolve(); };
+        img.src = objectUrl;
+      })
+      .catch((err) => {
+        console.error('TERRAIN: fetch failed —', err.message, '— likely CORS, a network issue, or the URL redirect not resolving as expected');
+        resolve();
+      });
   });
 }
 
@@ -245,7 +262,8 @@ function elevationColor(luma) {
 // the expensive per-pixel step (one projection.invert() per output pixel),
 // so it only ever runs from resize(), never per animation frame
 function bakeTerrain() {
-  if (!elevData) { terrainCanvas = null; return; }
+  if (!elevData) { terrainCanvas = null; console.warn('TERRAIN: bake skipped — no elevation pixel data loaded'); return; }
+  console.time('TERRAIN: bake');
   const rect = canvas.parentElement.getBoundingClientRect();
   const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
   const off = document.createElement('canvas');
@@ -255,6 +273,7 @@ function bakeTerrain() {
   const od = outData.data;
   const Z_FACTOR = 5; // relief exaggeration, tuned for this raster's coarseness
   const AZIMUTH = 315 * Math.PI / 180, ALTITUDE = 45 * Math.PI / 180; // fixed light direction, NW
+  let drawn = 0;
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -278,10 +297,14 @@ function bakeTerrain() {
       od[idx + 1] = Math.min(255, cg * brightness);
       od[idx + 2] = Math.min(255, cb * brightness);
       od[idx + 3] = 255;
+      drawn++;
     }
   }
+  console.timeEnd('TERRAIN: bake');
+  console.log('TERRAIN: baked', w, 'x', h, '—', drawn, 'pixels drawn out of', w * h);
   octx.putImageData(outData, 0, 0);
   terrainCanvas = off;
+  console.log('TERRAIN: terrainCanvas set, ready to draw');
 }
 
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }

@@ -902,10 +902,21 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        // Antarctica is pure white — no beige land palette or polar tint.
+        // Antarctica gets its own geographic ice palette while preserving
+        // the existing terrain/hillshade stack. The white fill replaces the
+        // warm elevation palette only inside the Antarctic polygon; a soft
+        // cool translucent pass lets the real terrain relief remain visible.
         {
-          id: 'antarctica-ice', type: 'fill', source: 'antarcticaGeo',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 1, 'fill-antialias': true },
+          id: 'antarctica-ice-base', type: 'fill', source: 'antarcticaGeo',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.96, 'fill-antialias': true },
+        },
+        {
+          id: 'antarctica-ice-shadow', type: 'fill', source: 'antarcticaGeo',
+          paint: {
+            'fill-color': '#dcecf4',
+            'fill-opacity': 0.22,
+            'fill-antialias': true,
+          },
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },

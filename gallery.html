@@ -49,6 +49,11 @@
       rgba(242,233,216,0) 100%);
     pointer-events: none; z-index: 0;
   }
+  #transitionFade {
+    position: absolute; inset: 0; z-index: 4; pointer-events: none;
+    background: var(--ocean); opacity: 0;
+  }
+  #transitionFade.active { opacity: 1; }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; position: relative; z-index: 2; }
   canvas:active { cursor: grabbing; }
   #tooltip {
@@ -106,6 +111,7 @@
   <span id="status" style="display:none"></span>
   <main>
     <div id="mapInlay"></div>
+    <div id="transitionFade"></div>
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
     <button id="resetBtn">reset view</button>
@@ -179,6 +185,7 @@ let discCenter = { x: 0, y: 0 }, discRadius = 0; // fixed once per resize(), sin
 // disc is on screen again docks it back into the inlay.
 // ============================================================
 let docked = true;
+let hasInitializedOnce = false;
 let DOCK_K = 1, POP_OUT_K = 2, REDOCK_K = 1.05;
 let dockTransform = { x: 0, y: 0 };
 let inlayClipPath = 'none';
@@ -215,7 +222,18 @@ function resize() {
   POP_OUT_K = DOCK_K * 1.35; // a real deliberate zoom-in, not a tap or the spin gesture
   REDOCK_K = 1.05; // ~k=1 is "whole disc fits the full viewport" — a touch of margin so it doesn't flicker right at the edge
 
-  if (docked) dockMap(); else draw();
+  if (docked) {
+    if (!hasInitializedOnce) {
+      // first load: position instantly, no fade — nothing was visible before this anyway
+      canvas.style.clipPath = inlayClipPath;
+      d3.select(canvas).interrupt().call(zoomBehavior.transform, d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K));
+      hasInitializedOnce = true;
+    } else {
+      dockMap();
+    }
+  } else {
+    draw();
+  }
 }
 
 // rivers/lakes, pre-rendered WITH their blur applied once, at the same
@@ -401,7 +419,7 @@ const zoomBehavior = d3.zoom()
       // zoomed back out until the whole disc is on screen again — dock
       // back into the inlay (only relevant outside 3D, which has its own
       // exit path already)
-      if (!in3D && transform.k <= REDOCK_K) dockMap();
+      if (!in3D && !transitioning && transform.k <= REDOCK_K) dockWithFade();
     }
     draw();
   });
@@ -411,66 +429,66 @@ d3.select(canvas).call(zoomBehavior);
 // plain native click, which the browser already only fires for a genuine
 // tap (no meaningful movement between press and release), not a drag
 canvas.addEventListener('click', (e) => {
-  console.log('GALLERY: canvas click, docked =', docked);
-  if (!docked) return;
+  if (!docked || transitioning) return;
   const rect = canvas.getBoundingClientRect();
   const lonlat = lonLatAtScreenPoint(e.clientX - rect.left, e.clientY - rect.top);
-  console.log('GALLERY: tap resolved to', lonlat);
-  if (lonlat) tapToZoomIn(lonlat[0], lonlat[1]);
+  if (lonlat) undockWithFade(lonlat[0], lonlat[1]);
 });
 
-function dockMap() {
-  docked = true;
-  canvas.style.clipPath = inlayClipPath;
-  // deferred to the next tick — calling the transform setter synchronously
-  // from inside the 'zoom' handler that may have just called this would
-  // re-enter that same handler while it's still executing
+// ============================================================
+// DOCK/UNDOCK TRANSITIONS: rather than animating the map's own transform
+// smoothly between docked and undocked states (which kept breaking — d3's
+// internal tracking and our own locked-render override could drift apart),
+// the whole state swap now happens behind a solid color cover: fade out,
+// swap everything instantly while hidden, fade back in. Simpler and far
+// more robust, since nothing about the swap itself needs to look smooth.
+// ============================================================
+let transitioning = false;
+
+function playFadeTransition(swapStateFn) {
+  transitioning = true;
+  const fadeEl = document.getElementById('transitionFade');
+  fadeEl.classList.add('active');
   setTimeout(() => {
-    d3.select(canvas).interrupt().transition().duration(450).call(
-      zoomBehavior.transform,
-      d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K)
-    );
-  }, 0);
+    swapStateFn(); // fully covered by solid color now — safe to do the actual (instant, possibly jumpy) state change
+    requestAnimationFrame(() => {
+      fadeEl.classList.remove('active');
+      setTimeout(() => { transitioning = false; }, 350);
+    });
+  }, 350);
 }
 
-function undockMap() {
-  docked = false;
-  twist = null;
-  spinVelocity = 0;
-  canvas.style.clipPath = 'none';
+function undockWithFade(lon, lat) {
+  playFadeTransition(() => {
+    docked = false;
+    twist = null;
+    spinVelocity = 0;
+    canvas.style.clipPath = 'none';
+    const base = projection([lon, lat]);
+    if (base) {
+      const rad = rotationGamma * Math.PI / 180;
+      const dx = base[0] - discCenter.x, dy = base[1] - discCenter.y;
+      const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
+      const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
+      const rect = canvas.getBoundingClientRect();
+      const targetK = 2.4; // a comfortable "now exploring fullscreen" starting zoom, well below the 3D handoff threshold
+      const tx = rect.width / 2 - targetK * rx, ty = rect.height / 2 - targetK * ry;
+      d3.select(canvas).interrupt().call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(targetK));
+    }
+    draw();
+  });
 }
 
-// tapping a point while docked pops the map out to fill the screen,
-// zoomed in on wherever was tapped
-function tapToZoomIn(lon, lat) {
-  const base = projection([lon, lat]);
-  if (!base) return;
-  const rad = rotationGamma * Math.PI / 180;
-  const dx = base[0] - discCenter.x, dy = base[1] - discCenter.y;
-  const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
-  const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
-  const rect = canvas.getBoundingClientRect();
-  const targetK = 2.2; // a comfortable "now exploring fullscreen" starting zoom, well below the 3D handoff threshold
-  const tx = rect.width / 2 - targetK * rx, ty = rect.height / 2 - targetK * ry;
-  undockMap();
-  setTimeout(() => {
-    // reset d3's OWN internal transform tracking to the known-correct
-    // docked baseline first, with no transition — while docked, gestures
-    // like spin were visually locked (we override what gets rendered) but
-    // d3 itself was still silently accumulating its own tracked transform
-    // from those same gesture deltas underneath. Without this reset, the
-    // transition below would interpolate from that drifted, wrong state
-    // instead of from where the map actually looked like it was.
-    d3.select(canvas).interrupt().call(
-      zoomBehavior.transform,
-      d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K)
-    );
-    d3.select(canvas).transition().duration(500).call(
-      zoomBehavior.transform,
-      d3.zoomIdentity.translate(tx, ty).scale(targetK)
-    );
-  }, 0);
+function dockWithFade() {
+  playFadeTransition(() => {
+    docked = true;
+    canvas.style.clipPath = inlayClipPath;
+    d3.select(canvas).interrupt().call(zoomBehavior.transform, d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K));
+    draw();
+  });
 }
+
+function dockMap() { dockWithFade(); } // resetBtn / initial-load call sites — same mechanism
 
 resetBtn.onclick = () => {
   rotationGamma = 0; spinVelocity = 0;

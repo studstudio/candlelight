@@ -64,9 +64,14 @@
       radial-gradient(circle at 84% 74%, rgba(255,255,255,.78) 0 1.5px, transparent 3px),
       rgba(255,255,255,.98);
     background-size: 150px 130px, 190px 160px, 170px 150px, 210px 180px, auto;
-    transition: opacity .22s ease;
+    transition: opacity .48s ease;
+    animation: none;
   }
-  #poleFade.active { opacity: 1; }
+  #poleFade.active { opacity: 1; animation: snowDrift 3.6s ease-in-out infinite; }
+  @keyframes snowDrift {
+    0%,100% { background-position: 0 0, 0 0, 0 0, 0 0, 0 0; }
+    50% { background-position: 18px 10px, -14px 8px, 12px -9px, -16px -6px, 0 0; }
+  }
   #transitionCoords {
     font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
     font-weight: 300; font-size: 13px; letter-spacing: 0.1em;
@@ -181,6 +186,7 @@ async function loadMapLibre() {
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
 const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json";
+const COUNTRIES_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json";
 const LAKES_URL = "https://ne.freemap.online/50m/physical/ne_50m_lakes.json";
 const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_centerlines.json";
 
@@ -222,7 +228,7 @@ let DOCK_K = 1, POP_OUT_K = 2, REDOCK_K = 0.65;
 let dockTransform = { x: 0, y: 0 };
 let inlayClipPath = 'none';
 
-let land = null, lakes = null, rivers = null;
+let land = null, lakes = null, rivers = null, antarctica = null;
 
 // ============================================================
 // LOCATION READOUT: nearest major city + lat/long, shown on the dashboard,
@@ -243,7 +249,7 @@ const MAJOR_CITIES = [
   ['Paris', 48.85, 2.35], ['Berlin', 52.52, 13.40], ['Madrid', 40.42, -3.70],
   ['Rome', 41.90, 12.50], ['Amsterdam', 52.37, 4.90], ['Moscow', 55.76, 37.62],
   ['Istanbul', 41.01, 28.98], ['Cairo', 30.04, 31.24], ['Lagos', 6.52, 3.38],
-  ['Nairobi', -1.29, 36.82], ['Johannesburg', -26.20, 28.05], ['Dubai', 25.20, 55.27],
+  ['Nairobi', -1.29, 36.82], ['Johannesburg', -26.20, 28.05], ['Antarctica', -82.00, 0.00], ['Dubai', 25.20, 55.27],
   ['Mumbai', 19.08, 72.88], ['Delhi', 28.70, 77.10], ['Bangkok', 13.76, 100.50],
   ['Singapore', 1.35, 103.82], ['Jakarta', -6.21, 106.85], ['Manila', 14.60, 120.98],
   ['Beijing', 39.90, 116.41], ['Shanghai', 31.23, 121.47], ['Hong Kong', 22.32, 114.17],
@@ -280,8 +286,9 @@ function updateLocationReadout() {
   } else {
     lon = HOME_LON; lat = HOME_LAT;
   }
-  const city = nearestCity(lat, lon);
-  document.getElementById('locationCity').textContent = city ? 'near ' + city[0] : '';
+  const polarPlace = lat <= -60 ? 'Antarctica' : (lat >= 60 ? 'Arctic' : null);
+  const city = polarPlace ? null : nearestCity(lat, lon);
+  document.getElementById('locationCity').textContent = polarPlace || (city ? 'near ' + city[0] : '');
   document.getElementById('locationCoords').textContent = formatLatLon(lon, lat);
 }
 
@@ -810,9 +817,9 @@ function handlePoleWrap() {
       setTimeout(() => {
         setPoleFade(false);
         setTimeout(() => { poleWrapping = false; }, 240);
-      }, 90);
+      }, 150);
     });
-  }, 230);
+  }, 420);
 }
 
 function initTerrainMap() {
@@ -841,12 +848,19 @@ function initTerrainMap() {
         // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
+        // Natural Earth country geometry for Antarctica only; this gives the polar continent
+        // its own white ice surface while the real DEM hillshade remains visible above it.
+        antarcticaGeo: { type: 'geojson', data: antarctica || { type: 'FeatureCollection', features: [] } },
         // Stadia Maps / Stamen Toner labels — transparent raster overlay
         // containing place names and road names. Use the raw 256px XYZ PNG
         // endpoint because MapLibre does not interpret the {r} retina
         // placeholder itself. This is intentionally an overlay only; it does
         // not replace the existing terrain, color relief, hillshade, lakes,
         // or rivers sources.
+        southPolarOuter: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-55.0],[180,-55.0],[180,-85.05112878],[-180,-85.05112878],[-180,-55.0]]] }, properties: {} } },
+        southPolarMid: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-65.0],[180,-65.0],[180,-85.05112878],[-180,-85.05112878],[-180,-65.0]]] }, properties: {} } },
+        southPolarInner: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-72.0],[180,-72.0],[180,-85.05112878],[-180,-85.05112878],[-180,-72.0]]] }, properties: {} } },
+        southPolarCore: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-78.0],[180,-78.0],[180,-85.05112878],[-180,-85.05112878],[-180,-78.0]]] }, properties: {} } },
         stamenTonerLabels: {
           type: 'raster',
           tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
@@ -879,6 +893,33 @@ function initTerrainMap() {
               4200, '#f5ecd4',   // peaks, lightest tone in the palette
             ],
           },
+        },
+        {
+          id: 'antarctica-ice', type: 'fill', source: 'antarcticaGeo',
+          paint: {
+            'fill-color': '#ffffff',
+            'fill-opacity': 0.92,
+          },
+        },
+        // A soft polar extension fades the southern continent into white before
+        // the blue sky/horizon. It is intentionally made from broad latitude
+        // bands so it continues to the finite Mercator pole rather than ending
+        // at the coastline like a hard mask.
+        {
+          id: 'south-polar-mist-outer', type: 'fill', source: 'southPolarOuter',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.12 },
+        },
+        {
+          id: 'south-polar-mist-mid', type: 'fill', source: 'southPolarMid',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.28 },
+        },
+        {
+          id: 'south-polar-mist-inner', type: 'fill', source: 'southPolarInner',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.52 },
+        },
+        {
+          id: 'south-polar-mist-core', type: 'fill', source: 'southPolarCore',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.78 },
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
@@ -1092,12 +1133,14 @@ function tick() {
 
 (async function init() {
   window.addEventListener('resize', resize);
-  const [landData, lakeData, riverData] = await Promise.all([
+  const [landData, lakeData, riverData, countriesData] = await Promise.all([
     loadGeo(LAND_URL, true, 'land'),
     loadGeo(LAKES_URL, false),
     loadGeo(RIVERS_URL, false),
+    loadGeo(COUNTRIES_URL, true, 'countries'),
   ]);
   land = landData; lakes = lakeData; rivers = riverData;
+  antarctica = countriesData?.features?.find(f => String(f.id).padStart(3, '0') === '010' || f.properties?.name === 'Antarctica') || null;
   resize();
   await poll();
   setInterval(poll, POLL_MS);

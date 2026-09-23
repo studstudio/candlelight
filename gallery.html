@@ -90,6 +90,8 @@
   #terrainMap {
     position: absolute; inset: 0; opacity: 0; pointer-events: none;
     transition: opacity 0.6s ease; z-index: 1;
+    /* Clean white surround for the finite Earth/globe. */
+    background: #ffffff;
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }
@@ -759,6 +761,8 @@ function initTerrainMap() {
   initWeatherProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
+    // Render one Earth only; do not repeat it past the antimeridian.
+    renderWorldCopies: false,
     style: {
       version: 8,
       sources: {
@@ -821,11 +825,18 @@ function initTerrainMap() {
       // Keep the 3D camera's exposed sky/horizon vividly blue instead of
       // inheriting the app's dark chrome. The horizon blend is kept moderate
       // so the blue remains visible when the camera is pitched steeply.
+      // A globe projection gives the 3D view one finite Earth instead of
+      // an endlessly repeating rectangular world. The white horizon/fog
+      // creates the soft fade at the circular edge.
+      projection: { type: 'globe' },
       sky: {
         'sky-color': '#18BFFF',
-        'sky-horizon-blend': 0.28,
-        'horizon-color': '#72D8FF',
-        'horizon-fog-blend': 0.18
+        'sky-horizon-blend': 0.18,
+        'horizon-color': '#FFFFFF',
+        'horizon-fog-blend': 0.22,
+        'fog-color': '#FFFFFF',
+        'fog-ground-blend': 0.22,
+        'atmosphere-blend': 0.9
       },
     },
     attributionControl: { compact: true },

@@ -476,10 +476,10 @@ function initWeatherProtocol() {
           const cx = x + CELL / 2, cy = y + CELL / 2;
           const grad = octx.createRadialGradient(cx, cy, 0, cx, cy, RADIUS);
           if (isSnow) {
-            grad.addColorStop(0, 'rgba(255,255,255,0.85)');
+            grad.addColorStop(0, 'rgba(255,255,255,0.95)');
             grad.addColorStop(1, 'rgba(255,255,255,0)');
           } else {
-            grad.addColorStop(0, `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.7)`);
+            grad.addColorStop(0, `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.85)`);
             grad.addColorStop(1, `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0)`);
           }
           octx.fillStyle = grad;
@@ -506,7 +506,7 @@ function addWeatherLayerIfReady() {
       tileSize: 256, maxzoom: 7,
       attribution: 'Weather: <a href="https://rainviewer.com" target="_blank">RainViewer</a>',
     });
-    terrainMapInstance.addLayer({ id: 'weather', type: 'raster', source: 'weather', paint: { 'raster-opacity': 0.9, 'raster-resampling': 'linear' } });
+    terrainMapInstance.addLayer({ id: 'weather', type: 'raster', source: 'weather', paint: { 'raster-opacity': 0.45, 'raster-resampling': 'linear' } });
   };
   if (terrainMapInstance.isStyleLoaded()) addIt(); else terrainMapInstance.once('load', addIt);
 }
@@ -597,6 +597,7 @@ function equivalentD3Zoom(mapLibreZoom, lat) {
 // zoom/rotation — this is what makes exiting 3D feel like a continuation
 // instead of a hard reset
 function syncFlatMapToMapLibre() {
+  rotationGamma = -terrainMapInstance.getBearing(); // preserve whatever rotation happened in 3D (entry used bearing: -rotationGamma, so this is its inverse)
   const c = terrainMapInstance.getCenter();
   const k = Math.max(0.25, Math.min(10, equivalentD3Zoom(terrainMapInstance.getZoom(), c.lat)));
   const base = projection([c.lng, c.lat]);
@@ -612,8 +613,9 @@ function syncFlatMapToMapLibre() {
 
 const EXIT_ZOOM = 6.5; // MapLibre zoom that triggers handoff back — roughly US-state scale
 const EXIT_GRACE_MS = 400; // ignore the very first zoom event or two right after entry/jumpTo settling
+const TREND_WINDOW_MS = 500; // exit is judged against zoom from this long ago, not the single previous event — absorbs gesture restarts/jitter that were eating pinch progress
 let enteredAt = 0;
-let lastMapLibreZoom = null; // tracks direction — exit should only fire while actively zooming OUT, never from a single low reading
+let zoomHistory = []; // rolling [{t, z}, ...] samples, trimmed to TREND_WINDOW_MS
 
 async function enter3D(lon, lat) {
   if (in3D) return;
@@ -621,7 +623,7 @@ async function enter3D(lon, lat) {
   await loadMapLibre();
   const map3d = initTerrainMap();
   const zoom = Math.max(3, equivalentMapLibreZoom(lat)); // matches where you actually were on the flat map — no artificial floor
-  lastMapLibreZoom = zoom;
+  zoomHistory = [{ t: performance.now(), z: zoom }];
   enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   document.getElementById('terrainMap').classList.add('active');
@@ -632,11 +634,13 @@ async function enter3D(lon, lat) {
 
 function autoExitCheck() {
   if (!in3D) return;
+  const now = performance.now();
   const z = terrainMapInstance.getZoom();
-  const prev = lastMapLibreZoom;
-  lastMapLibreZoom = z;
-  if (performance.now() - enteredAt < EXIT_GRACE_MS) return; // still settling from entry — ignore
-  if (prev !== null && z < EXIT_ZOOM && z < prev) exit3D(); // below threshold AND actively decreasing — a real zoom-out, not a blip
+  zoomHistory.push({ t: now, z });
+  while (zoomHistory.length > 1 && now - zoomHistory[0].t > TREND_WINDOW_MS) zoomHistory.shift();
+  if (now - enteredAt < EXIT_GRACE_MS) return; // still settling from entry — ignore
+  const oldest = zoomHistory[0];
+  if (z < EXIT_ZOOM && z < oldest.z) exit3D(); // below threshold AND net lower than ~500ms ago — a real sustained zoom-out, not gesture-restart noise
 }
 
 function exit3D() {

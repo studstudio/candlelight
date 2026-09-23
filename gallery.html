@@ -42,11 +42,7 @@
     position: absolute; left: 50%; top: 8%; transform: translateX(-50%);
     width: 78vmin; height: 78vmin; max-width: 96vw; max-height: 64vh;
     border-radius: 50%;
-    background: radial-gradient(circle at center,
-      rgba(185,221,226,0.4) 0%,
-      rgba(185,221,226,0.25) 55%,
-      rgba(255,255,255,0.55) 78%,
-      rgba(242,233,216,0) 100%);
+    background: var(--land); /* matches main's background exactly — invisible, geometry still drives the dock math */
     pointer-events: none; z-index: 0;
   }
   #transitionFade {
@@ -319,12 +315,15 @@ function draw() {
   const lw = (px) => px / transform.k; // keep stroke widths visually constant across zoom levels
   const pr = (px) => px / transform.k; // same for point radii
 
-  // ocean fades to transparent near the disc's outer edge, so it blends
-  // softly into the beige page background instead of a hard circular border
-  const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
+  // ocean fades through an icy white band near the disc's outer edge before
+  // going transparent — reads as pack ice / glaciers at the edge of the
+  // world, and absorbs the hard cutoff rather than just fading to nothing
+  const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.88, discCenter.x, discCenter.y, discRadius);
   const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
   oceanGrad.addColorStop(0, oceanColor);
-  oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
+  oceanGrad.addColorStop(0.75, oceanColor);
+  oceanGrad.addColorStop(0.9, '#ffffff');
+  oceanGrad.addColorStop(1, 'rgba(255,255,255,0)');
   ctx.beginPath(); path(sphere);
   ctx.fillStyle = oceanGrad;
   ctx.fill();
@@ -336,6 +335,19 @@ function draw() {
   }
   if (waterCanvas) {
     ctx.drawImage(waterCanvas, 0, 0, waterCanvas.width, waterCanvas.height);
+  }
+
+  // a few penguins on the ice ring — easter egg, fixed size on screen
+  // regardless of zoom (same lw()/pr() compensation used elsewhere)
+  const penguinSize = pr(14);
+  ctx.font = `${penguinSize}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2 + 0.4;
+    const px = discCenter.x + Math.cos(angle) * discRadius * 0.94;
+    const py = discCenter.y + Math.sin(angle) * discRadius * 0.94;
+    ctx.fillText('🐧', px, py);
   }
 
   drawEvents(lw, pr);
@@ -753,6 +765,7 @@ function initTerrainMap() {
       terrain: { source: 'terrainSource', exaggeration: 1 },
       sky: { 'sky-color': '#1d1610', 'sky-horizon-blend': 0.5, 'horizon-color': '#3a2c1c', 'horizon-fog-blend': 0.6 },
     },
+    maxBounds: [[-185, -84], [185, 84]], // keeps the camera out of the polar void where Mercator tiles simply don't exist — a small margin past ±180/±84 so it doesn't feel hard-clamped at the boundary
     attributionControl: { compact: true },
     maxPitch: 75,
     dragRotate: true,
@@ -795,9 +808,10 @@ function syncFlatMapToMapLibre() {
   d3.select(canvas).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(k));
 }
 
-const EXIT_ZOOM = 6.5; // MapLibre zoom that triggers handoff back — roughly US-state scale
+const EXIT_ZOOM = 4.5; // lowered from 6.5 — gives real buffer room so rotating at a moderate zoom doesn't brush the threshold
 const EXIT_GRACE_MS = 400; // ignore the very first zoom event or two right after entry/jumpTo settling
 const TREND_WINDOW_MS = 500; // exit is judged against zoom from this long ago, not the single previous event — absorbs gesture restarts/jitter that were eating pinch progress
+const MIN_EXIT_DELTA = 0.35; // must have genuinely dropped by this much over the window, not just crossed the line — rotating the camera alone can nudge the reported zoom slightly, and this keeps that from misreading as a real zoom-out
 let enteredAt = 0;
 let zoomHistory = []; // rolling [{t, z}, ...] samples, trimmed to TREND_WINDOW_MS
 
@@ -824,7 +838,7 @@ function autoExitCheck() {
   while (zoomHistory.length > 1 && now - zoomHistory[0].t > TREND_WINDOW_MS) zoomHistory.shift();
   if (now - enteredAt < EXIT_GRACE_MS) return; // still settling from entry — ignore
   const oldest = zoomHistory[0];
-  if (z < EXIT_ZOOM && z < oldest.z) exit3D(); // below threshold AND net lower than ~500ms ago — a real sustained zoom-out, not gesture-restart noise
+  if (z < EXIT_ZOOM && (oldest.z - z) > MIN_EXIT_DELTA) exit3D(); // below threshold AND a real, sustained zoom-out over the window — not rotation noise or gesture-restart jitter
 }
 
 function exit3D() {

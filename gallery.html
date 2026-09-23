@@ -315,15 +315,12 @@ function draw() {
   const lw = (px) => px / transform.k; // keep stroke widths visually constant across zoom levels
   const pr = (px) => px / transform.k; // same for point radii
 
-  // ocean fades through an icy white band near the disc's outer edge before
-  // going transparent — reads as pack ice / glaciers at the edge of the
-  // world, and absorbs the hard cutoff rather than just fading to nothing
-  const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.88, discCenter.x, discCenter.y, discRadius);
+  // ocean fades to transparent near the disc's outer edge, so it blends
+  // softly into the beige page background instead of a hard circular border
+  const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
   const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
   oceanGrad.addColorStop(0, oceanColor);
-  oceanGrad.addColorStop(0.75, oceanColor);
-  oceanGrad.addColorStop(0.9, '#ffffff');
-  oceanGrad.addColorStop(1, 'rgba(255,255,255,0)');
+  oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
   ctx.beginPath(); path(sphere);
   ctx.fillStyle = oceanGrad;
   ctx.fill();
@@ -335,19 +332,6 @@ function draw() {
   }
   if (waterCanvas) {
     ctx.drawImage(waterCanvas, 0, 0, waterCanvas.width, waterCanvas.height);
-  }
-
-  // a few penguins on the ice ring — easter egg, fixed size on screen
-  // regardless of zoom (same lw()/pr() compensation used elsewhere)
-  const penguinSize = pr(14);
-  ctx.font = `${penguinSize}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i < 6; i++) {
-    const angle = (i / 6) * Math.PI * 2 + 0.4;
-    const px = discCenter.x + Math.cos(angle) * discRadius * 0.94;
-    const py = discCenter.y + Math.sin(angle) * discRadius * 0.94;
-    ctx.fillText('🐧', px, py);
   }
 
   drawEvents(lw, pr);
@@ -717,55 +701,49 @@ function initTerrainMap() {
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
-        // lakes/rivers reuse the exact same GeoJSON already fetched for the
-        // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
-        // fed to MapLibre as plain in-memory GeoJSON
-        lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
-        riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
+        // real OpenStreetMap cartography — same source the official 3D
+        // Terrain example uses — instead of an elevation-only color ramp.
+        // This is what actually shows parks, water, and land-use as real
+        // varied detail rather than a smooth synthetic gradient.
+        osm: {
+          type: 'raster',
+          tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
+          tileSize: 256, maxzoom: 19,
+          attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
+        },
       },
       layers: [
-        // color-relief: colors the terrain BY ELEVATION straight from the
-        // DEM — ocean blue at/below sea level, light green through olive
-        // going up. This is the real fix for both "no ocean color" and
-        // "add greenery": one elevation-driven color ramp, not a raster
-        // photo or a guessed threshold.
+        // OSM tinted warm toward our beige palette rather than shown at its
+        // normal saturation — keeps parks/water/roads visually distinct
+        // (the actual cartographic detail being asked for) without looking
+        // like a generic web map
         {
-          id: 'color-relief', type: 'color-relief', source: 'terrainSource',
+          id: 'osm', type: 'raster', source: 'osm',
           paint: {
-            'color-relief-color': [
-              'interpolate', ['linear'], ['elevation'],
-              -200, '#8fc3d6',   // below sea level (bathymetry in the DEM) — matches --water
-              0, '#b9dde2',      // sea level — matches the flat map's --ocean exactly
-              5, '#a9d089',      // coast, real green starts immediately
-              300, '#8fbd68',    // lowland — plentiful, saturated green like a standard hypsometric ramp
-              900, '#a8c478',    // mid elevation, green easing toward olive
-              1800, '#c9b989',   // transition band, olive into beige
-              2800, '#ecd191',   // the actual flat-map --land beige
-              4200, '#f5e6c0',   // peaks, lightest tone in the palette
-            ],
+            'raster-saturation': -0.35,
+            'raster-hue-rotate': 18,
+            'raster-brightness-min': 0.18,
+            'raster-brightness-max': 1,
           },
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
-            // full-strength exaggeration (like the official example's
-            // default) is what actually reads as "sharp" — our previous
-            // 0.35 was washing the relief out to near-flat. Shadow color
-            // needs real contrast against the highlight to show it, not
-            // just a lighter shade of the same beige.
-            'hillshade-shadow-color': '#8a6a45',
-            'hillshade-highlight-color': '#faf3e0',
-            'hillshade-accent-color': '#c9a86a',
+            // shifted lighter/creamier overall (matching our warm beige
+            // palette) while keeping real contrast between shadow and
+            // highlight — a lighter shadow tone still reads as relief as
+            // long as it's clearly darker than the highlight, it's just no
+            // longer a deep brown
+            'hillshade-shadow-color': '#c9ad7a',
+            'hillshade-highlight-color': '#fdf6e3',
+            'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
           },
         },
-        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#b9dde2' } },
-        { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
       sky: { 'sky-color': '#1d1610', 'sky-horizon-blend': 0.5, 'horizon-color': '#3a2c1c', 'horizon-fog-blend': 0.6 },
     },
-    maxBounds: [[-185, -84], [185, 84]], // keeps the camera out of the polar void where Mercator tiles simply don't exist — a small margin past ±180/±84 so it doesn't feel hard-clamped at the boundary
     attributionControl: { compact: true },
     maxPitch: 75,
     dragRotate: true,

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>candlelight — gallery</title>
-<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@6.10.0/dist/maplibre-gl.css" rel="stylesheet">
 <style>
   :root {
     --bg: #15100a;
@@ -125,7 +125,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@6.10.0/dist/maplibre-gl.js"></script>
 <script>
 // ---- config ----
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
@@ -470,20 +470,44 @@ function initTerrainMap() {
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        // lakes/rivers reuse the exact same GeoJSON already fetched for the
+        // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
+        // fed to MapLibre as plain in-memory GeoJSON
+        lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
+        riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
       },
-      // no imagery layer at all — just a flat beige background under the
-      // hillshade, so the terrain relief itself (tinted in our palette) is
-      // the whole visual, not a photo
       layers: [
-        { id: 'bg', type: 'background', paint: { 'background-color': '#ddcda3' } },
+        // color-relief: colors the terrain BY ELEVATION straight from the
+        // DEM — ocean blue at/below sea level, light green through olive
+        // going up. This is the real fix for both "no ocean color" and
+        // "add greenery": one elevation-driven color ramp, not a raster
+        // photo or a guessed threshold.
+        {
+          id: 'color-relief', type: 'color-relief', source: 'terrainSource',
+          paint: {
+            'color-relief-color': [
+              'interpolate', ['linear'], ['elevation'],
+              -200, '#8fc3d6',   // below sea level (bathymetry in the DEM) — matches --water
+              0, '#b9dde2',      // sea level — matches the flat map's --ocean exactly
+              4, '#a9c98a',      // coastline, light green
+              200, '#8fae5c',    // lowland, olive-green
+              900, '#c3ac81',    // hills — our existing tan
+              2200, '#ddcda3',   // mountains — our existing beige
+              3800, '#f1e6cf',   // peaks, lightest tone in our palette (no separate snow-white — kept in-palette)
+            ],
+          },
+        },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
-            'hillshade-shadow-color': '#8a6a45',
+            'hillshade-shadow-color': '#5a4530',
             'hillshade-highlight-color': '#f1e6cf',
-            'hillshade-accent-color': '#c3ac81',
+            'hillshade-accent-color': '#8a6a45',
+            'hillshade-exaggeration': 0.7,
           },
         },
+        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#b9dde2' } },
+        { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
       sky: { 'sky-color': '#1d1610', 'sky-horizon-blend': 0.5, 'horizon-color': '#3a2c1c', 'horizon-fog-blend': 0.6 },
@@ -494,8 +518,37 @@ function initTerrainMap() {
     touchPitch: true,
   });
   terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); });
+  terrainMapInstance.on('zoom', autoExitCheck);
   return terrainMapInstance;
 }
+
+// inverse of equivalentMapLibreZoom: given a MapLibre zoom + latitude,
+// what d3 transform.k gives the same real-world meters/pixel
+function equivalentD3Zoom(mapLibreZoom, lat) {
+  const metersPerPxAtK1 = (Math.PI * 6371000) / discRadius;
+  const metersPerPxNow = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, mapLibreZoom);
+  return metersPerPxAtK1 / metersPerPxNow;
+}
+
+// positions the flat map so whatever MapLibre is currently centered on
+// lands at the center of the flat map's viewport too, at the equivalent
+// zoom/rotation — this is what makes exiting 3D feel like a continuation
+// instead of a hard reset
+function syncFlatMapToMapLibre() {
+  const c = terrainMapInstance.getCenter();
+  const k = Math.max(0.25, Math.min(10, equivalentD3Zoom(terrainMapInstance.getZoom(), c.lat)));
+  const base = projection([c.lng, c.lat]);
+  if (!base) return;
+  const rad = rotationGamma * Math.PI / 180;
+  const dx = base[0] - discCenter.x, dy = base[1] - discCenter.y;
+  const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
+  const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
+  const rect = canvas.getBoundingClientRect();
+  const tx = rect.width / 2 - k * rx, ty = rect.height / 2 - k * ry;
+  d3.select(canvas).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(k));
+}
+
+const EXIT_ZOOM = 6.5; // MapLibre zoom that triggers handoff back — roughly US-state scale
 
 function enter3D(lon, lat) {
   if (in3D) return;
@@ -509,13 +562,18 @@ function enter3D(lon, lat) {
   setTimeout(() => map3d.resize(), 50); // container was display:none-adjacent (opacity 0); MapLibre needs a resize once it's actually laid out
 }
 
+function autoExitCheck() {
+  if (in3D && terrainMapInstance.getZoom() < EXIT_ZOOM) exit3D();
+}
+
 function exit3D() {
   if (!in3D) return;
   in3D = false;
+  syncFlatMapToMapLibre();
   document.getElementById('terrainMap').classList.remove('active');
   canvas.classList.remove('faded');
   backBtn.classList.remove('visible');
-  d3.select(canvas).transition().duration(300).call(zoomBehavior.scaleTo, HANDOFF_K * 0.6);
+  draw();
 }
 const backBtn = document.getElementById('backBtn');
 backBtn.onclick = exit3D;

@@ -64,13 +64,13 @@
       radial-gradient(circle at 84% 74%, rgba(255,255,255,.78) 0 1.5px, transparent 3px),
       rgba(255,255,255,.98);
     background-size: 150px 130px, 190px 160px, 170px 150px, 210px 180px, auto;
-    transition: opacity .72s ease;
+    transition: opacity .48s ease;
     animation: none;
   }
-  #poleFade.active { opacity: 1; animation: snowDrift 5.8s ease-in-out infinite; }
+  #poleFade.active { opacity: 1; animation: snowDrift 3.6s ease-in-out infinite; }
   @keyframes snowDrift {
     0%,100% { background-position: 0 0, 0 0, 0 0, 0 0, 0 0; }
-    50% { background-position: 10px 6px, -8px 5px, 7px -5px, -9px -4px, 0 0; }
+    50% { background-position: 18px 10px, -14px 8px, 12px -9px, -16px -6px, 0 0; }
   }
   #transitionCoords {
     font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
@@ -848,17 +848,19 @@ function initTerrainMap() {
         // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
-        antarcticaGeo: { type: 'geojson', data: antarctica || { type: 'FeatureCollection', features: [] } },
+        // Natural Earth country geometry for Antarctica only; this gives the polar continent
+        // its own white ice surface while the real DEM hillshade remains visible above it.
+        antarcticaGeo: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
         // Stadia Maps / Stamen Toner labels — transparent raster overlay
         // containing place names and road names. Use the raw 256px XYZ PNG
         // endpoint because MapLibre does not interpret the {r} retina
         // placeholder itself. This is intentionally an overlay only; it does
         // not replace the existing terrain, color relief, hillshade, lakes,
         // or rivers sources.
-        southPolarOuter: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-76.0],[180,-76.0],[180,-85.05112878],[-180,-85.05112878],[-180,-76.0]]] }, properties: {} } },
-        southPolarMid: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-80.0],[180,-80.0],[180,-85.05112878],[-180,-85.05112878],[-180,-80.0]]] }, properties: {} } },
-        southPolarInner: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-83.0],[180,-83.0],[180,-85.05112878],[-180,-85.05112878],[-180,-83.0]]] }, properties: {} } },
-        southPolarCore: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-84.5],[180,-84.5],[180,-85.05112878],[-180,-85.05112878],[-180,-84.5]]] }, properties: {} } },
+        southPolarOuter: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-55.0],[180,-55.0],[180,-85.05112878],[-180,-85.05112878],[-180,-55.0]]] }, properties: {} } },
+        southPolarMid: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-65.0],[180,-65.0],[180,-85.05112878],[-180,-85.05112878],[-180,-65.0]]] }, properties: {} } },
+        southPolarInner: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-72.0],[180,-72.0],[180,-85.05112878],[-180,-85.05112878],[-180,-72.0]]] }, properties: {} } },
+        southPolarCore: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-78.0],[180,-78.0],[180,-85.05112878],[-180,-85.05112878],[-180,-78.0]]] }, properties: {} } },
         stamenTonerLabels: {
           type: 'raster',
           tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
@@ -892,17 +894,28 @@ function initTerrainMap() {
             ],
           },
         },
-        // Antarctica gets a translucent cool-white ice treatment. It is only a
-        // color wash over the existing terrain — no geographic silhouette/mask.
+        // A soft polar extension fades the southern continent into white before
+        // the blue sky/horizon. It is intentionally made from broad latitude
+        // bands so it continues to the finite Mercator pole rather than ending
+        // at the coastline like a hard mask.
         {
-          id: 'antarctica-ice-tint', type: 'fill', source: 'antarcticaGeo',
-          paint: { 'fill-color': '#f4f9ff', 'fill-opacity': 0.38, 'fill-antialias': true },
+          id: 'south-polar-mist-outer', type: 'fill', source: 'southPolarOuter',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.12 },
         },
-        // Keep the white transition only at the southern edge; it should not wash over the map.
-        { id: 'south-polar-mist-outer', type: 'fill', source: 'southPolarOuter', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.08 } },
-        { id: 'south-polar-mist-mid', type: 'fill', source: 'southPolarMid', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.18 } },
-        { id: 'south-polar-mist-inner', type: 'fill', source: 'southPolarInner', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.42 } },
-        { id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
+        {
+          id: 'south-polar-mist-mid', type: 'fill', source: 'southPolarMid',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.28 },
+        },
+        {
+          id: 'south-polar-mist-inner', type: 'fill', source: 'southPolarInner',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.52 },
+        },
+        {
+          id: 'south-polar-mist-core', type: 'fill', source: 'southPolarCore',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.78 },
+        },
+        {
+          id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
             // lighter/creamier overall (matching our warm beige palette)
             // while keeping real contrast between shadow and highlight —
@@ -914,10 +927,12 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        // Cool the Antarctic relief without replacing the real DEM hillshade.
+        // Antarctica uses the same DEM + hillshade as every other landmass.
+        // This restrained cool-white overlay only shifts its land color toward ice;
+        // the real hillshade remains visible underneath for blue/gray relief.
         {
-          id: 'antarctica-ice-cool-wash', type: 'fill', source: 'antarcticaGeo',
-          paint: { 'fill-color': '#dcecff', 'fill-opacity': 0.24, 'fill-antialias': true },
+          id: 'antarctica-ice', type: 'fill', source: 'antarcticaGeo',
+          paint: { 'fill-color': '#f4f9ff', 'fill-opacity': 0.48, 'fill-antialias': true },
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
@@ -1118,18 +1133,24 @@ function tick() {
 
 (async function init() {
   window.addEventListener('resize', resize);
-  const [landData, lakeData, riverData, countriesData] = await Promise.all([
+  const [landData, lakeData, riverData] = await Promise.all([
     loadGeo(LAND_URL, true, 'land'),
     loadGeo(LAKES_URL, false),
     loadGeo(RIVERS_URL, false),
-    loadGeo(COUNTRIES_URL, true, 'countries'),
   ]);
   land = landData; lakes = lakeData; rivers = riverData;
-  antarctica = countriesData?.features?.find(f => String(f.id).padStart(3, '0') === '010' || f.properties?.name === 'Antarctica') || null;
-  if (map3d && map3d.getSource('antarcticaGeo')) {
-    map3d.getSource('antarcticaGeo').setData(antarctica || { type:'FeatureCollection', features:[] });
-  }
+  // Start the base azimuthal immediately. Antarctica is an enhancement for
+  // the 3D view and must never delay or break the first inlay render.
   resize();
+  // Fetch the country geometry in the background and inject only Antarctica
+  // once MapLibre has a live GeoJSON source. A failure here cannot affect the
+  // base map or dashboard.
+  loadGeo(COUNTRIES_URL, true, 'countries').then(countriesData => {
+    antarctica = countriesData?.features?.find(f => String(f.id).padStart(3, '0') === '010' || f.properties?.name === 'Antarctica') || null;
+    if (terrainMapInstance && terrainMapInstance.getSource('antarcticaGeo')) {
+      terrainMapInstance.getSource('antarcticaGeo').setData(antarctica || { type:'FeatureCollection', features:[] });
+    }
+  }).catch(err => console.warn('gallery: Antarctica geometry unavailable', err));
   await poll();
   setInterval(poll, POLL_MS);
   tick();

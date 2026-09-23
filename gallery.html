@@ -855,10 +855,10 @@ function initTerrainMap() {
         // placeholder itself. This is intentionally an overlay only; it does
         // not replace the existing terrain, color relief, hillshade, lakes,
         // or rivers sources.
-        southPolarOuter: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-55.0],[180,-55.0],[180,-85.05112878],[-180,-85.05112878],[-180,-55.0]]] }, properties: {} } },
-        southPolarMid: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-65.0],[180,-65.0],[180,-85.05112878],[-180,-85.05112878],[-180,-65.0]]] }, properties: {} } },
-        southPolarInner: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-72.0],[180,-72.0],[180,-85.05112878],[-180,-85.05112878],[-180,-72.0]]] }, properties: {} } },
-        southPolarCore: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-78.0],[180,-78.0],[180,-85.05112878],[-180,-85.05112878],[-180,-78.0]]] }, properties: {} } },
+        southPolarOuter: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-76.0],[180,-76.0],[180,-85.05112878],[-180,-85.05112878],[-180,-76.0]]] }, properties: {} } },
+        southPolarMid: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-80.0],[180,-80.0],[180,-85.05112878],[-180,-85.05112878],[-180,-80.0]]] }, properties: {} } },
+        southPolarInner: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-83.0],[180,-83.0],[180,-85.05112878],[-180,-85.05112878],[-180,-83.0]]] }, properties: {} } },
+        southPolarCore: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-84.5],[180,-84.5],[180,-85.05112878],[-180,-85.05112878],[-180,-84.5]]] }, properties: {} } },
         stamenTonerLabels: {
           type: 'raster',
           tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
@@ -892,11 +892,11 @@ function initTerrainMap() {
             ],
           },
         },
-        // Subtle Antarctica ice tint: the terrain DEM and real hillshade remain visible.
-        // This is intentionally translucent rather than an opaque geographic mask.
+        // Antarctica gets a translucent cool-white ice treatment. It is only a
+        // color wash over the existing terrain — no geographic silhouette/mask.
         {
           id: 'antarctica-ice-tint', type: 'fill', source: 'antarcticaGeo',
-          paint: { 'fill-color': '#f7fbff', 'fill-opacity': 0.58, 'fill-antialias': true },
+          paint: { 'fill-color': '#f4f9ff', 'fill-opacity': 0.38, 'fill-antialias': true },
         },
         // Keep the white transition only at the southern edge; it should not wash over the map.
         { id: 'south-polar-mist-outer', type: 'fill', source: 'southPolarOuter', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.08 } },
@@ -913,6 +913,11 @@ function initTerrainMap() {
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
           },
+        },
+        // Cool the Antarctic relief without replacing the real DEM hillshade.
+        {
+          id: 'antarctica-ice-cool-wash', type: 'fill', source: 'antarcticaGeo',
+          paint: { 'fill-color': '#dcecff', 'fill-opacity': 0.24, 'fill-antialias': true },
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
@@ -1121,6 +1126,9 @@ function tick() {
   ]);
   land = landData; lakes = lakeData; rivers = riverData;
   antarctica = countriesData?.features?.find(f => String(f.id).padStart(3, '0') === '010' || f.properties?.name === 'Antarctica') || null;
+  if (map3d && map3d.getSource('antarcticaGeo')) {
+    map3d.getSource('antarcticaGeo').setData(antarctica || { type:'FeatureCollection', features:[] });
+  }
   resize();
   await poll();
   setInterval(poll, POLL_MS);

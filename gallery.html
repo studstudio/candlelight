@@ -362,6 +362,97 @@ function equivalentMapLibreZoom(lat) {
   return Math.log2(156543.03392 * Math.cos(lat * Math.PI / 180) / metersPerPxNow);
 }
 
+// ============================================================
+// WEATHER: RainViewer's free public radar API, with snow and rain given
+// distinct client-side styling — soft fuzzy white for snow, faint blue for
+// rain — since RainViewer's own tiles just render both as one continuous
+// color ramp. There's no MapLibre style-spec paint property that can do
+// this kind of per-pixel conditional recoloring on a plain raster layer
+// (that needs actual pixel access), so this uses maplibregl.addProtocol to
+// intercept each tile, recolor it on a canvas, and hand the result back —
+// still fully client-side, no backend involved, just the real mechanism
+// for this rather than a style-property that doesn't exist.
+//
+// Real, verified API: https://api.rainviewer.com/public/weather-maps.json
+// gives {host, radar:{past:[...]}}; tiles are
+// {host}{path}/256/{z}/{x}/{y}/{color}/{smooth}_{snow}.png — color=2 is
+// RainViewer's "Universal Blue" scheme, and snow=1 renders snow in a
+// visually distinct blue/purple range from the green-yellow-red rain ramp.
+// Free tier caps at zoom 7 (set as maxzoom below; MapLibre stretches those
+// tiles at deeper zoom, which is fine — radar resolution wouldn't show
+// more detail anyway). The exact RGB split between "snow blue" and "rain"
+// below is a reasonable starting heuristic, not a value from an official
+// RainViewer color table (I couldn't find one to verify against) — likely
+// worth eyeballing against a real snowy tile and adjusting.
+// ============================================================
+let weatherTileUrl = null;
+fetch('https://api.rainviewer.com/public/weather-maps.json')
+  .then((res) => res.json())
+  .then((data) => {
+    const frame = data.radar && data.radar.past && data.radar.past[data.radar.past.length - 1];
+    if (!frame) throw new Error('no radar frames in RainViewer response');
+    weatherTileUrl = `${data.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`;
+    console.log('GALLERY: weather tile template resolved:', weatherTileUrl);
+    addWeatherLayerIfReady();
+  })
+  .catch((err) => console.warn('GALLERY: RainViewer weather-maps.json fetch failed —', err.message));
+
+maplibregl.addProtocol('rainviewer', async (params) => {
+  const realUrl = params.url.replace('rainviewer://', '');
+  const res = await fetch(realUrl);
+  if (!res.ok) throw new Error('tile fetch failed: ' + res.status);
+  const blob = await res.blob();
+  const bitmap = await createImageBitmap(blob);
+  const off = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const octx = off.getContext('2d');
+  octx.drawImage(bitmap, 0, 0);
+  const id = octx.getImageData(0, 0, bitmap.width, bitmap.height);
+  const d = id.data;
+  const alpha = new Float32Array(bitmap.width * bitmap.height); // classified alpha, blurred below for the "fuzzy" edge
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+    const p = i / 4;
+    if (a < 10) { alpha[p] = 0; continue; }
+    const isSnow = b > 130 && r < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
+    if (isSnow) { d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; alpha[p] = 150; }
+    else { d[i] = 150; d[i + 1] = 190; d[i + 2] = 235; alpha[p] = 70; }
+  }
+  // light 3x3 box blur on alpha only — gives snow a soft fuzzy edge instead
+  // of a hard classification boundary; color channels stay sharp
+  const w = bitmap.width, h = bitmap.height;
+  const blurred = new Float32Array(alpha.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+        sum += alpha[ny * w + nx]; n++;
+      }
+      blurred[y * w + x] = sum / n;
+    }
+  }
+  for (let p = 0; p < blurred.length; p++) d[p * 4 + 3] = blurred[p];
+  octx.putImageData(id, 0, 0);
+  const outBlob = await off.convertToBlob({ type: 'image/png' });
+  return { data: await outBlob.arrayBuffer() };
+});
+
+function addWeatherLayerIfReady() {
+  if (!terrainMapInstance || !weatherTileUrl) return;
+  if (terrainMapInstance.getSource('weather')) return; // already added
+  const addIt = () => {
+    terrainMapInstance.addSource('weather', {
+      type: 'raster',
+      tiles: [`rainviewer://${weatherTileUrl}`],
+      tileSize: 256, maxzoom: 7,
+      attribution: 'Weather: <a href="https://rainviewer.com" target="_blank">RainViewer</a>',
+    });
+    terrainMapInstance.addLayer({ id: 'weather', type: 'raster', source: 'weather', paint: { 'raster-opacity': 0.9, 'raster-resampling': 'linear' } });
+  };
+  if (terrainMapInstance.isStyleLoaded()) addIt(); else terrainMapInstance.once('load', addIt);
+}
+
 let terrainMapInstance = null;
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
@@ -370,28 +461,31 @@ function initTerrainMap() {
     style: {
       version: 8,
       sources: {
-        satellite: {
-          type: 'raster',
-          tiles: ['https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg'],
-          tileSize: 256, maxzoom: 15,
-          attribution: 'Imagery © EOX IT Services GmbH',
-        },
-        terrainSource: {
-          type: 'raster-dem',
-          tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
-          tileSize: 256, encoding: 'terrarium', maxzoom: 13,
-          attribution: 'Terrain: <a href="https://github.com/tilezen/joerd" target="_blank">Joerd/Tilezen</a>',
-        },
+        // Mapterhorn — the terrain source MapLibre's own official 3D
+        // Terrain example uses. Faster and higher-res (512px) than the AWS
+        // Terrarium tiles tried before, which are documented as slow to
+        // fetch directly from a browser. Two separate source entries
+        // pointing at the same TileJSON, matching the official example's
+        // own pattern for improved render quality (terrain mesh + hillshade
+        // drawn from independent caches instead of sharing one).
+        terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
       },
-      // deliberately just two layers — no roads, labels, POIs, or icons,
-      // since none of those ship in this style at all
+      // no imagery layer at all — just a flat beige background under the
+      // hillshade, so the terrain relief itself (tinted in our palette) is
+      // the whole visual, not a photo
       layers: [
-        { id: 'bg', type: 'background', paint: { 'background-color': '#15100a' } },
+        { id: 'bg', type: 'background', paint: { 'background-color': '#ddcda3' } },
         {
-          id: 'satellite', type: 'raster', source: 'satellite',
-          paint: { 'raster-saturation': -0.15, 'raster-contrast': 0.08, 'raster-brightness-min': 0.05 },
+          id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
+          paint: {
+            'hillshade-shadow-color': '#8a6a45',
+            'hillshade-highlight-color': '#f1e6cf',
+            'hillshade-accent-color': '#c3ac81',
+          },
         },
       ],
+      terrain: { source: 'terrainSource', exaggeration: 1 },
       sky: { 'sky-color': '#1d1610', 'sky-horizon-blend': 0.5, 'horizon-color': '#3a2c1c', 'horizon-fog-blend': 0.6 },
     },
     attributionControl: { compact: true },
@@ -399,18 +493,7 @@ function initTerrainMap() {
     dragRotate: true,
     touchPitch: true,
   });
-  terrainMapInstance.on('load', () => {
-    terrainMapInstance.setTerrain({ source: 'terrainSource', exaggeration: 1.3 });
-    terrainMapInstance.addLayer({
-      id: 'hillshade', type: 'hillshade', source: 'terrainSource',
-      paint: {
-        'hillshade-exaggeration': 0.6,
-        'hillshade-shadow-color': '#2a1c10',
-        'hillshade-highlight-color': '#e8c99a',
-        'hillshade-accent-color': '#8a6a45',
-      },
-    });
-  });
+  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); });
   return terrainMapInstance;
 }
 

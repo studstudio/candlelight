@@ -36,7 +36,7 @@
   #status { display: none; } /* kept in the DOM only so existing status-update code has somewhere to write to */
   main {
     position: relative; flex: 1 1 auto; min-height: 0;
-    background: radial-gradient(circle at center, #f1e6cf 0%, #ddcda3 55%, #c3ac81 100%);
+    background: var(--land);
   }
   #mapInlay {
     position: absolute; left: 50%; top: 8%; transform: translateX(-50%);
@@ -360,26 +360,16 @@ function touchAngle(touches) {
   const dy = touches[1].clientY - touches[0].clientY;
   return Math.atan2(dy, dx) * 180 / Math.PI;
 }
-let gestureStart = null; // {t, x, y, touchCount} — used to distinguish a genuine tap from a drag/pinch while docked
-
 const zoomBehavior = d3.zoom()
   .scaleExtent([0.25, 10])
-  .on('start', (event) => {
-    const se = event.sourceEvent;
-    if (!se) { gestureStart = null; return; }
-    const touchCount = se.touches ? se.touches.length : 1;
-    const point = se.touches ? se.touches[0] : se;
-    gestureStart = { t: performance.now(), x: point.clientX, y: point.clientY, touchCount };
-  })
   .on('zoom', (event) => {
     const se = event.sourceEvent;
 
     if (docked) {
-      // spin still works while docked; pan/zoom stay fully locked below —
-      // no zoom-threshold pop-out check here anymore (see the tap handler
-      // in 'end' instead) — that check was also spuriously triggered by
-      // ordinary two-finger rotation incidentally shifting pinch distance
-      // a little, which was interrupting the spin gesture itself
+      // spin still works while docked; pan/zoom stay fully locked below.
+      // Popping out is handled by a plain click listener further down, not
+      // here — trying to detect "was that a tap" from zoom-gesture timing
+      // was unreliable and is gone now.
       if (se && se.touches && se.touches.length === 2) {
         const angle = touchAngle(se.touches);
         const now = performance.now();
@@ -414,25 +404,20 @@ const zoomBehavior = d3.zoom()
       if (!in3D && transform.k <= REDOCK_K) dockMap();
     }
     draw();
-  })
-  .on('end', (event) => {
-    if (docked && gestureStart && gestureStart.touchCount === 1) {
-      const se = event.sourceEvent;
-      const endPoint = se && (se.changedTouches ? se.changedTouches[0] : se);
-      if (endPoint) {
-        const dist = Math.hypot(endPoint.clientX - gestureStart.x, endPoint.clientY - gestureStart.y);
-        const dt = performance.now() - gestureStart.t;
-        if (dist < 12 && dt < 400) {
-          // a genuine tap — zoom in on whatever point was tapped
-          const rect = canvas.getBoundingClientRect();
-          const lonlat = lonLatAtScreenPoint(endPoint.clientX - rect.left, endPoint.clientY - rect.top);
-          if (lonlat) tapToZoomIn(lonlat[0], lonlat[1]);
-        }
-      }
-    }
-    gestureStart = null;
   });
 d3.select(canvas).call(zoomBehavior);
+
+// tapping the inlay pops the map out, zoomed in on whatever was tapped —
+// plain native click, which the browser already only fires for a genuine
+// tap (no meaningful movement between press and release), not a drag
+canvas.addEventListener('click', (e) => {
+  console.log('GALLERY: canvas click, docked =', docked);
+  if (!docked) return;
+  const rect = canvas.getBoundingClientRect();
+  const lonlat = lonLatAtScreenPoint(e.clientX - rect.left, e.clientY - rect.top);
+  console.log('GALLERY: tap resolved to', lonlat);
+  if (lonlat) tapToZoomIn(lonlat[0], lonlat[1]);
+});
 
 function dockMap() {
   docked = true;

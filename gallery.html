@@ -52,8 +52,14 @@
   #transitionFade {
     position: absolute; inset: 0; z-index: 4; pointer-events: none;
     background: var(--ocean); opacity: 0;
+    display: flex; align-items: center; justify-content: center;
   }
   #transitionFade.active { opacity: 1; }
+  #transitionCoords {
+    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
+    font-weight: 300; font-size: 13px; letter-spacing: 0.1em;
+    color: #1d3a44; opacity: 0.8;
+  }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; position: relative; z-index: 2; }
   canvas:active { cursor: grabbing; }
   #tooltip {
@@ -111,7 +117,7 @@
   <span id="status" style="display:none"></span>
   <main>
     <div id="mapInlay"></div>
-    <div id="transitionFade"></div>
+    <div id="transitionFade"><span id="transitionCoords"></span></div>
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
     <button id="resetBtn">reset view</button>
@@ -186,7 +192,7 @@ let discCenter = { x: 0, y: 0 }, discRadius = 0; // fixed once per resize(), sin
 // ============================================================
 let docked = true;
 let hasInitializedOnce = false;
-let DOCK_K = 1, POP_OUT_K = 2, REDOCK_K = 1.05;
+let DOCK_K = 1, POP_OUT_K = 2, REDOCK_K = 0.65;
 let dockTransform = { x: 0, y: 0 };
 let inlayClipPath = 'none';
 
@@ -220,7 +226,7 @@ function resize() {
   dockTransform = { x: inlayCenterX - DOCK_K * discCenter.x, y: inlayCenterY - DOCK_K * discCenter.y };
   inlayClipPath = `circle(${inlayRadiusPx}px at ${inlayCenterX}px ${inlayCenterY}px)`;
   POP_OUT_K = DOCK_K * 1.35; // a real deliberate zoom-in, not a tap or the spin gesture
-  REDOCK_K = 1.05; // ~k=1 is "whole disc fits the full viewport" — a touch of margin so it doesn't flicker right at the edge
+  REDOCK_K = 0.65; // requires zooming out noticeably further than "whole disc just fits" before it pops back into the inlay
 
   if (docked) {
     if (!hasInitializedOnce) {
@@ -458,7 +464,14 @@ function playFadeTransition(swapStateFn) {
   }, 350);
 }
 
+function formatLatLon(lon, lat) {
+  const latStr = Math.abs(lat).toFixed(2) + '°' + (lat >= 0 ? 'N' : 'S');
+  const lonStr = Math.abs(lon).toFixed(2) + '°' + (lon >= 0 ? 'E' : 'W');
+  return `${latStr}, ${lonStr}`;
+}
+
 function undockWithFade(lon, lat) {
+  document.getElementById('transitionCoords').textContent = formatLatLon(lon, lat);
   playFadeTransition(() => {
     docked = false;
     twist = null;
@@ -471,7 +484,7 @@ function undockWithFade(lon, lat) {
       const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
       const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
       const rect = canvas.getBoundingClientRect();
-      const targetK = 2.4; // a comfortable "now exploring fullscreen" starting zoom, well below the 3D handoff threshold
+      const targetK = 1.7; // a comfortable "now exploring fullscreen" starting zoom, well below the 3D handoff threshold
       const tx = rect.width / 2 - targetK * rx, ty = rect.height / 2 - targetK * ry;
       d3.select(canvas).interrupt().call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(targetK));
     }
@@ -480,6 +493,7 @@ function undockWithFade(lon, lat) {
 }
 
 function dockWithFade() {
+  document.getElementById('transitionCoords').textContent = '';
   playFadeTransition(() => {
     docked = true;
     canvas.style.clipPath = inlayClipPath;

@@ -798,6 +798,20 @@ function initTerrainMap() {
         // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
+        // Stadia Maps / Stamen Toner labels — transparent raster overlay
+        // containing place names and road names. Use the raw 256px XYZ PNG
+        // endpoint because MapLibre does not interpret the {r} retina
+        // placeholder itself. This is intentionally an overlay only; it does
+        // not replace the existing terrain, color relief, hillshade, lakes,
+        // or rivers sources.
+        stamenTonerLabels: {
+          type: 'raster',
+          tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 20,
+          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
+        },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -838,6 +852,17 @@ function initTerrainMap() {
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#b9dde2' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
+        // Keep labels last so the transparent Toner label artwork stays
+        // readable above the terrain, hillshade, lakes, and rivers.
+        {
+          id: 'stamen-toner-labels',
+          type: 'raster',
+          source: 'stamenTonerLabels',
+          paint: {
+            'raster-opacity': 0.92,
+            'raster-fade-duration': 0
+          }
+        },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
       // Keep the 3D camera's exposed sky/horizon vividly blue instead of

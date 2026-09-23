@@ -467,17 +467,24 @@ function initWeatherProtocol() {
           const bottomX = x0 + interp(bl, br) * spacing, bottomY = y1;
           const leftX = x0, leftY = y0 + interp(tl, bl) * spacing;
           const add = (a, b, cc, d) => segs.push([a, b, cc, d]);
+          const center = (tl + tr + br + bl) / 4; // resolves the ambiguous saddle cases below
           switch (c) {
             case 1: add(leftX, leftY, bottomX, bottomY); break;
             case 2: add(bottomX, bottomY, rightX, rightY); break;
             case 3: add(leftX, leftY, rightX, rightY); break;
             case 4: add(topX, topY, rightX, rightY); break;
-            case 5: add(leftX, leftY, topX, topY); add(bottomX, bottomY, rightX, rightY); break;
+            case 5: // saddle — which pair connects depends on the cell's average vs threshold, or the two diagonal "high" corners get wrongly joined
+              if (center >= T) { add(leftX, leftY, topX, topY); add(rightX, rightY, bottomX, bottomY); }
+              else { add(leftX, leftY, bottomX, bottomY); add(topX, topY, rightX, rightY); }
+              break;
             case 6: add(topX, topY, bottomX, bottomY); break;
             case 7: add(leftX, leftY, topX, topY); break;
             case 8: add(topX, topY, leftX, leftY); break;
             case 9: add(topX, topY, bottomX, bottomY); break;
-            case 10: add(topX, topY, rightX, rightY); add(leftX, leftY, bottomX, bottomY); break;
+            case 10: // saddle, mirror of case 5
+              if (center >= T) { add(topX, topY, leftX, leftY); add(bottomX, bottomY, rightX, rightY); }
+              else { add(topX, topY, rightX, rightY); add(leftX, leftY, bottomX, bottomY); }
+              break;
             case 11: add(topX, topY, rightX, rightY); break;
             case 12: add(leftX, leftY, rightX, rightY); break;
             case 13: add(bottomX, bottomY, rightX, rightY); break;
@@ -528,9 +535,10 @@ function initWeatherProtocol() {
       const src = sctx.getImageData(0, 0, w, h).data;
 
       // sample the source at a coarse grid into binary presence, then
-      // smooth into a density field per type — real data, redrawn as our
-      // own contour shapes, not the raw pixels themselves
-      const STEP = 8;
+      // smooth heavily into a density field per type — real data used only
+      // as a rough guide for where lines flow, not traced literally, per
+      // "worry less about the data, more about nice connecting lines"
+      const STEP = 12; // coarser than before — fewer, larger cells, simpler resulting shapes
       const gw = Math.floor(w / STEP) + 1, gh = Math.floor(h / STEP) + 1;
       const rawSnow = new Float32Array(gw * gh);
       const rawRain = new Float32Array(gw * gh);
@@ -543,14 +551,22 @@ function initWeatherProtocol() {
           if (isSnow) rawSnow[gy * gw + gx] = 1; else rawRain[gy * gw + gx] = 1;
         }
       }
-      const snowField = smoothGrid(rawSnow, gw, gh, 2, 2);
-      const rainField = smoothGrid(rawRain, gw, gh, 2, 2);
+      const snowField = smoothGrid(rawSnow, gw, gh, 3, 3); // heavier smoothing than before — softer, more gently curving lines
+      const rainField = smoothGrid(rawRain, gw, gh, 3, 3);
 
-      const out = new OffscreenCanvas(w, h);
+      // render at 2x the source tile's pixel size — MapLibre stretches this
+      // to fill much more screen space once zoomed in, and the extra native
+      // detail here is what keeps the lines crisp instead of visibly
+      // blurred by that upscaling (raster-resampling stays 'linear', so
+      // nearest-neighbor jaggedness isn't traded in for it)
+      const SCALE = 2;
+      const out = new OffscreenCanvas(w * SCALE, h * SCALE);
       const octx = out.getContext('2d');
-      octx.lineWidth = 1.1;
+      octx.scale(SCALE, SCALE);
+      octx.lineWidth = 0.7; // thinner
       octx.lineJoin = 'round';
-      const LEVELS = [0.15, 0.32, 0.5, 0.68, 0.85]; // contour intervals — outer (low) to inner (high) rings
+      octx.lineCap = 'round';
+      const LEVELS = [0.25, 0.55, 0.85]; // fewer, more spread-out contour intervals than before
 
       octx.strokeStyle = 'rgba(255,255,255,0.8)';
       for (const T of LEVELS) {

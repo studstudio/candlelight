@@ -899,8 +899,19 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#b9dde2' } },
+        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
+        // The atlas boundary is part of MapLibre rendering, above the map
+        // layers, rather than a CSS frame around the map container.
+        {
+          id: 'atlas-ocean-mist',
+          type: 'fill',
+          source: 'atlasWhiteEdge',
+          paint: {
+            'fill-color': '#18BFFF',
+            'fill-opacity': ['get', 'opacity']
+          }
+        },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.
         {
@@ -908,19 +919,8 @@ function initTerrainMap() {
           type: 'raster',
           source: 'stamenTonerLabels',
           paint: {
-            'raster-opacity': 0.92,
+            'raster-opacity': 1.0,
             'raster-fade-duration': 0
-          }
-        },
-        // The atlas boundary is part of MapLibre rendering, above the map
-        // layers, rather than a CSS frame around the map container.
-        {
-          id: 'atlas-white-edge',
-          type: 'fill',
-          source: 'atlasWhiteEdge',
-          paint: {
-            'fill-color': '#b9dde2',
-            'fill-opacity': ['get', 'opacity']
           }
         },
       ],

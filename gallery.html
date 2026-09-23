@@ -818,7 +818,15 @@ function initTerrainMap() {
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
-      sky: { 'sky-color': '#1d1610', 'sky-horizon-blend': 0.5, 'horizon-color': '#3a2c1c', 'horizon-fog-blend': 0.6 },
+      // Keep the 3D camera's exposed sky/horizon vividly blue instead of
+      // inheriting the app's dark chrome. The horizon blend is kept moderate
+      // so the blue remains visible when the camera is pitched steeply.
+      sky: {
+        'sky-color': '#18BFFF',
+        'sky-horizon-blend': 0.28,
+        'horizon-color': '#72D8FF',
+        'horizon-fog-blend': 0.18
+      },
     },
     attributionControl: { compact: true },
     maxPitch: 75,

@@ -39,11 +39,14 @@
     background: radial-gradient(circle at center, #f1e6cf 0%, #ddcda3 55%, #c3ac81 100%);
   }
   #mapInlay {
-    position: absolute; left: 50%; top: 10%; transform: translateX(-50%);
-    width: 62vmin; height: 62vmin; max-width: 92vw; max-height: 55vh;
-    border-radius: 50%; border: 1px solid var(--line);
-    background: radial-gradient(circle at center, rgba(0,0,0,0.03), rgba(0,0,0,0.1));
-    box-shadow: 0 8px 30px rgba(0,0,0,0.15), inset 0 0 0 6px rgba(242,233,216,0.35);
+    position: absolute; left: 50%; top: 8%; transform: translateX(-50%);
+    width: 78vmin; height: 78vmin; max-width: 96vw; max-height: 64vh;
+    border-radius: 50%;
+    background: radial-gradient(circle at center,
+      rgba(185,221,226,0.4) 0%,
+      rgba(185,221,226,0.25) 55%,
+      rgba(255,255,255,0.55) 78%,
+      rgba(242,233,216,0) 100%);
     pointer-events: none; z-index: 0;
   }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; position: relative; z-index: 2; }
@@ -357,13 +360,26 @@ function touchAngle(touches) {
   const dy = touches[1].clientY - touches[0].clientY;
   return Math.atan2(dy, dx) * 180 / Math.PI;
 }
+let gestureStart = null; // {t, x, y, touchCount} — used to distinguish a genuine tap from a drag/pinch while docked
+
 const zoomBehavior = d3.zoom()
   .scaleExtent([0.25, 10])
+  .on('start', (event) => {
+    const se = event.sourceEvent;
+    if (!se) { gestureStart = null; return; }
+    const touchCount = se.touches ? se.touches.length : 1;
+    const point = se.touches ? se.touches[0] : se;
+    gestureStart = { t: performance.now(), x: point.clientX, y: point.clientY, touchCount };
+  })
   .on('zoom', (event) => {
     const se = event.sourceEvent;
 
     if (docked) {
-      // spin still works while docked
+      // spin still works while docked; pan/zoom stay fully locked below —
+      // no zoom-threshold pop-out check here anymore (see the tap handler
+      // in 'end' instead) — that check was also spuriously triggered by
+      // ordinary two-finger rotation incidentally shifting pinch distance
+      // a little, which was interrupting the spin gesture itself
       if (se && se.touches && se.touches.length === 2) {
         const angle = touchAngle(se.touches);
         const now = performance.now();
@@ -383,21 +399,9 @@ const zoomBehavior = d3.zoom()
       } else if (twist) {
         twist = null; // dropped below 2 touches — momentum takes over in tick()
       }
-      // a real, deliberate zoom-in (not a tap, not the spin gesture) pops
-      // it out — checked against the raw d3 zoom level even though we
-      // otherwise keep the map visually locked in place below
-      if (event.transform.k > POP_OUT_K) undockMap();
-    }
-
-    if (docked) {
-      // still docked after the check above — stay locked in the inlay,
-      // ignoring whatever pan the gesture implied; only the zoom reading
-      // itself matters, for the pop-out check
-      transform = { k: event.transform.k, x: dockTransform.x, y: dockTransform.y };
+      transform = { k: DOCK_K, x: dockTransform.x, y: dockTransform.y }; // locked in place regardless of the gesture
     } else {
-      // either already undocked, or just popped out this same event —
-      // full freedom from here, spin fully disabled
-      twist = null;
+      twist = null; // spin fully disabled once undocked
       transform = event.transform;
       if (transform.k >= HANDOFF_K && !in3D) {
         const rect = canvas.getBoundingClientRect();
@@ -410,12 +414,28 @@ const zoomBehavior = d3.zoom()
       if (!in3D && transform.k <= REDOCK_K) dockMap();
     }
     draw();
+  })
+  .on('end', (event) => {
+    if (docked && gestureStart && gestureStart.touchCount === 1) {
+      const se = event.sourceEvent;
+      const endPoint = se && (se.changedTouches ? se.changedTouches[0] : se);
+      if (endPoint) {
+        const dist = Math.hypot(endPoint.clientX - gestureStart.x, endPoint.clientY - gestureStart.y);
+        const dt = performance.now() - gestureStart.t;
+        if (dist < 12 && dt < 400) {
+          // a genuine tap — zoom in on whatever point was tapped
+          const rect = canvas.getBoundingClientRect();
+          const lonlat = lonLatAtScreenPoint(endPoint.clientX - rect.left, endPoint.clientY - rect.top);
+          if (lonlat) tapToZoomIn(lonlat[0], lonlat[1]);
+        }
+      }
+    }
+    gestureStart = null;
   });
 d3.select(canvas).call(zoomBehavior);
 
 function dockMap() {
   docked = true;
-  zoomBehavior.scaleExtent([DOCK_K * 0.9, POP_OUT_K * 1.25]);
   canvas.style.clipPath = inlayClipPath;
   // deferred to the next tick — calling the transform setter synchronously
   // from inside the 'zoom' handler that may have just called this would
@@ -432,8 +452,28 @@ function undockMap() {
   docked = false;
   twist = null;
   spinVelocity = 0;
-  zoomBehavior.scaleExtent([0.25, 10]);
   canvas.style.clipPath = 'none';
+}
+
+// tapping a point while docked pops the map out to fill the screen,
+// zoomed in on wherever was tapped
+function tapToZoomIn(lon, lat) {
+  const base = projection([lon, lat]);
+  if (!base) return;
+  const rad = rotationGamma * Math.PI / 180;
+  const dx = base[0] - discCenter.x, dy = base[1] - discCenter.y;
+  const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x;
+  const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
+  const rect = canvas.getBoundingClientRect();
+  const targetK = 2.2; // a comfortable "now exploring fullscreen" starting zoom, well below the 3D handoff threshold
+  const tx = rect.width / 2 - targetK * rx, ty = rect.height / 2 - targetK * ry;
+  undockMap();
+  setTimeout(() => {
+    d3.select(canvas).transition().duration(500).call(
+      zoomBehavior.transform,
+      d3.zoomIdentity.translate(tx, ty).scale(targetK)
+    );
+  }, 0);
 }
 
 resetBtn.onclick = () => {

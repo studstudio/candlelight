@@ -53,6 +53,7 @@
     position: absolute; inset: 0; z-index: 4; pointer-events: none;
     background: var(--ocean); opacity: 0;
     display: flex; align-items: center; justify-content: center;
+    transition: opacity 0.3s ease;
   }
   #transitionFade.active { opacity: 1; }
   #transitionCoords {
@@ -226,7 +227,7 @@ function resize() {
   dockTransform = { x: inlayCenterX - DOCK_K * discCenter.x, y: inlayCenterY - DOCK_K * discCenter.y };
   inlayClipPath = `circle(${inlayRadiusPx}px at ${inlayCenterX}px ${inlayCenterY}px)`;
   POP_OUT_K = DOCK_K * 1.35; // a real deliberate zoom-in, not a tap or the spin gesture
-  REDOCK_K = 0.65; // requires zooming out noticeably further than "whole disc just fits" before it pops back into the inlay
+  REDOCK_K = 0.45; // requires zooming out noticeably further than "whole disc just fits" before it pops back into the inlay
 
   if (docked) {
     if (!hasInitializedOnce) {
@@ -451,17 +452,19 @@ canvas.addEventListener('click', (e) => {
 // ============================================================
 let transitioning = false;
 
-function playFadeTransition(swapStateFn) {
+function playFadeTransition(swapStateFn, fadeInMs, fadeOutMs) {
   transitioning = true;
   const fadeEl = document.getElementById('transitionFade');
+  fadeEl.style.transitionDuration = fadeInMs + 'ms';
   fadeEl.classList.add('active');
   setTimeout(() => {
     swapStateFn(); // fully covered by solid color now — safe to do the actual (instant, possibly jumpy) state change
     requestAnimationFrame(() => {
+      fadeEl.style.transitionDuration = fadeOutMs + 'ms';
       fadeEl.classList.remove('active');
-      setTimeout(() => { transitioning = false; }, 350);
+      setTimeout(() => { transitioning = false; }, fadeOutMs);
     });
-  }, 350);
+  }, fadeInMs + 80); // small hold once fully covered, before revealing the new state
 }
 
 function formatLatLon(lon, lat) {
@@ -489,7 +492,7 @@ function undockWithFade(lon, lat) {
       d3.select(canvas).interrupt().call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(targetK));
     }
     draw();
-  });
+  }, 260, 300); // quick in, quick out — entering doesn't need to linger
 }
 
 function dockWithFade() {
@@ -499,7 +502,7 @@ function dockWithFade() {
     canvas.style.clipPath = inlayClipPath;
     d3.select(canvas).interrupt().call(zoomBehavior.transform, d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K));
     draw();
-  });
+  }, 900, 1100); // slow, calm — settling back into the inlay, not snapping
 }
 
 function dockMap() { dockWithFade(); } // resetBtn / initial-load call sites — same mechanism
@@ -561,94 +564,125 @@ function equivalentMapLibreZoom(lat) {
 // {host}{path}/256/{z}/{x}/{y}/{color}/{smooth}_{snow}.png — color=2 is
 // RainViewer's "Universal Blue" scheme, and snow=1 renders snow in a
 // visually distinct blue/purple range from the green-yellow-red rain ramp.
-// Free tier caps at zoom 7 (set as maxzoom below; MapLibre stretches those
-// tiles at deeper zoom, which is fine — radar resolution wouldn't show
-// more detail anyway). The exact RGB split between "snow blue" and "rain"
-// below is a reasonable starting heuristic, not a value from an official
-// RainViewer color table (I couldn't find one to verify against) — likely
-// worth eyeballing against a real snowy tile and adjusting.
+// Free tier caps at zoom 7 — but critically, that's a data-resolution
+// limit, not a rendering one: we convert each classified sample pixel to
+// its real lon/lat and hand the whole set to MapLibre as GeoJSON, rendered
+// through a native 'circle' layer. That's the actual fix for the blur
+// complaint — a raster tile gets stretched and blurred like any image when
+// magnified, but vector circles are redrawn fresh every frame at whatever
+// resolution the screen needs, so they stay crisp at any zoom regardless
+// of the source data's fixed z7 resolution. The exact RGB split between
+// "snow blue" and "rain" below is a reasonable starting heuristic, not a
+// value from an official RainViewer color table (I couldn't find one to
+// verify against) — likely worth eyeballing against a real snowy tile.
 // ============================================================
 let weatherTileUrl = null;
-let weatherProtocolReady = false;
+let weatherReady = false;
+const WEATHER_Z = 7; // RainViewer's free-tier max
+
+function lonLatToTile(lon, lat, z) {
+  const n = Math.pow(2, z);
+  const x = Math.floor((lon + 180) / 360 * n);
+  const latRad = lat * Math.PI / 180;
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+  return [x, y];
+}
+function tilePixelToLonLat(tx, ty, z, px, py, tileSize) {
+  const n = Math.pow(2, z);
+  const fx = tx + px / tileSize, fy = ty + py / tileSize;
+  const lon = fx / n * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * fy / n))) * 180 / Math.PI;
+  return [lon, lat];
+}
+
+async function fetchWeatherTilePoints(tx, ty) {
+  const url = weatherTileUrl.replace('{z}', WEATHER_Z).replace('{x}', tx).replace('{y}', ty);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const blob = await res.blob();
+    const bitmap = await createImageBitmap(blob);
+    const w = bitmap.width, h = bitmap.height;
+    const off = new OffscreenCanvas(w, h);
+    const octx = off.getContext('2d');
+    octx.drawImage(bitmap, 0, 0);
+    const src = octx.getImageData(0, 0, w, h).data;
+
+    const STEP = 5; // fine sampling — every few source pixels, not a coarse grid
+    const points = [];
+    for (let py = 0; py < h; py += STEP) {
+      for (let px = 0; px < w; px += STEP) {
+        const i = (py * w + px) * 4;
+        if (src[i + 3] < 10) continue; // no signal here
+        // "not too dense that you can't see through" — only keep a
+        // fraction of eligible points, thinning an otherwise-solid area
+        // into a scattered, see-through pattern
+        if (Math.random() > 0.55) continue;
+        const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
+        const jx = px + (Math.random() - 0.5) * STEP, jy = py + (Math.random() - 0.5) * STEP; // small jitter so points read as organic scatter, not a rigid grid
+        const [lon, lat] = tilePixelToLonLat(tx, ty, WEATHER_Z, jx, jy, w);
+        points.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { kind: isSnow ? 'snow' : 'rain' } });
+      }
+    }
+    return points;
+  } catch (err) {
+    console.warn('GALLERY: weather tile fetch failed for', tx, ty, '—', err.message);
+    return [];
+  }
+}
+
+async function refreshWeatherPoints() {
+  if (!weatherTileUrl || !terrainMapInstance) return;
+  const src = terrainMapInstance.getSource('weatherPoints');
+  if (!src) return;
+  const bounds = terrainMapInstance.getBounds();
+  const n = Math.pow(2, WEATHER_Z);
+  const [xMin, yMax] = lonLatToTile(bounds.getWest(), bounds.getSouth(), WEATHER_Z);
+  const [xMax, yMin] = lonLatToTile(bounds.getEast(), bounds.getNorth(), WEATHER_Z);
+  const tiles = [];
+  for (let x = Math.max(0, xMin); x <= Math.min(n - 1, xMax); x++) {
+    for (let y = Math.max(0, yMin); y <= Math.min(n - 1, yMax); y++) tiles.push([x, y]);
+  }
+  if (tiles.length === 0 || tiles.length > 16) return; // zoomed too far out for this to mean anything — leave whatever was last shown
+  const results = await Promise.all(tiles.map(([x, y]) => fetchWeatherTilePoints(x, y)));
+  const features = results.flat();
+  src.setData({ type: 'FeatureCollection', features });
+}
 
 function initWeatherProtocol() {
-  if (weatherProtocolReady) return;
-  weatherProtocolReady = true;
-  try {
-    fetch('https://api.rainviewer.com/public/weather-maps.json')
-      .then((res) => res.json())
-      .then((data) => {
-        const frame = data.radar && data.radar.past && data.radar.past[data.radar.past.length - 1];
-        if (!frame) throw new Error('no radar frames in RainViewer response');
-        weatherTileUrl = `${data.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`;
-        console.log('GALLERY: weather tile template resolved:', weatherTileUrl);
-        addWeatherLayerIfReady();
-      })
-      .catch((err) => console.warn('GALLERY: RainViewer weather-maps.json fetch failed —', err.message));
-
-    maplibregl.addProtocol('rainviewer', async (params) => {
-      const realUrl = params.url.replace('rainviewer://', '');
-      const res = await fetch(realUrl);
-      if (!res.ok) throw new Error('tile fetch failed: ' + res.status);
-      const blob = await res.blob();
-      const bitmap = await createImageBitmap(blob);
-      const w = bitmap.width, h = bitmap.height;
-
-      const srcCanvas = new OffscreenCanvas(w, h);
-      const sctx = srcCanvas.getContext('2d');
-      sctx.drawImage(bitmap, 0, 0);
-      const src = sctx.getImageData(0, 0, w, h).data;
-
-      // render at a high internal resolution (4x the source tile) so the
-      // dots stay crisp — not blurred, not chunky — even when MapLibre
-      // stretches this tile to fill a lot of screen space at close zoom
-      const SCALE = 4;
-      const out = new OffscreenCanvas(w * SCALE, h * SCALE);
-      const octx = out.getContext('2d');
-      octx.scale(SCALE, SCALE);
-
-      const STEP = 3; // fine sampling — every few source pixels, not a coarse grid
-      const JITTER = STEP * 0.45; // small random offset so dots read as organic scatter, not a rigid grid
-      const DOT_R = 0.55; // tiny — source-pixel space
-      const OCEAN = [185, 221, 226]; // matches --ocean, per "make rain that same blue"
-
-      for (let y = 0; y < h; y += STEP) {
-        for (let x = 0; x < w; x += STEP) {
-          const i = (y * w + x) * 4;
-          if (src[i + 3] < 10) continue; // no signal here
-          const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
-          // "not too dense that you can't see through" — only draw a
-          // fraction of eligible points, thinning out an otherwise-solid
-          // area into a scattered, see-through dot pattern
-          if (Math.random() > 0.55) continue;
-          const dx = x + (Math.random() - 0.5) * 2 * JITTER;
-          const dy = y + (Math.random() - 0.5) * 2 * JITTER;
-          octx.fillStyle = isSnow ? 'rgba(255,255,255,0.85)' : `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.8)`;
-          octx.beginPath();
-          octx.arc(dx, dy, DOT_R, 0, Math.PI * 2);
-          octx.fill();
-        }
-      }
-
-      const outBlob = await out.convertToBlob({ type: 'image/png' });
-      return { data: await outBlob.arrayBuffer() };
-    });
-  } catch (err) {
-    console.warn('GALLERY: weather protocol setup failed —', err.message);
-  }
+  if (weatherReady) return;
+  weatherReady = true;
+  fetch('https://api.rainviewer.com/public/weather-maps.json')
+    .then((res) => res.json())
+    .then((data) => {
+      const frame = data.radar && data.radar.past && data.radar.past[data.radar.past.length - 1];
+      if (!frame) throw new Error('no radar frames in RainViewer response');
+      weatherTileUrl = `${data.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`;
+      console.log('GALLERY: weather tile template resolved:', weatherTileUrl);
+      addWeatherLayerIfReady();
+    })
+    .catch((err) => console.warn('GALLERY: RainViewer weather-maps.json fetch failed —', err.message));
 }
 
 function addWeatherLayerIfReady() {
   if (!terrainMapInstance || !weatherTileUrl) return;
-  if (terrainMapInstance.getSource('weather')) return; // already added
+  if (terrainMapInstance.getSource('weatherPoints')) { refreshWeatherPoints(); return; }
   const addIt = () => {
-    terrainMapInstance.addSource('weather', {
-      type: 'raster',
-      tiles: [`rainviewer://${weatherTileUrl}`],
-      tileSize: 256, maxzoom: 7,
+    terrainMapInstance.addSource('weatherPoints', {
+      type: 'geojson', data: { type: 'FeatureCollection', features: [] },
       attribution: 'Weather: <a href="https://rainviewer.com" target="_blank">RainViewer</a>',
     });
-    terrainMapInstance.addLayer({ id: 'weather', type: 'raster', source: 'weather', paint: { 'raster-opacity': 0.8, 'raster-resampling': 'linear' } });
+    terrainMapInstance.addLayer({
+      id: 'weatherPoints', type: 'circle', source: 'weatherPoints',
+      paint: {
+        'circle-radius': 2,
+        'circle-color': ['case', ['==', ['get', 'kind'], 'snow'], '#ffffff', '#b9dde2'],
+        'circle-opacity': 0.85,
+        'circle-blur': 0.1,
+      },
+    });
+    terrainMapInstance.on('moveend', refreshWeatherPoints);
+    refreshWeatherPoints();
   };
   if (terrainMapInstance.isStyleLoaded()) addIt(); else terrainMapInstance.once('load', addIt);
 }
@@ -702,12 +736,15 @@ function initTerrainMap() {
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
-            // several light beige tones instead of one flat shadow color —
-            // reads as varied terrain texture rather than a uniform tint
-            'hillshade-shadow-color': '#d9c297',
+            // full-strength exaggeration (like the official example's
+            // default) is what actually reads as "sharp" — our previous
+            // 0.35 was washing the relief out to near-flat. Shadow color
+            // needs real contrast against the highlight to show it, not
+            // just a lighter shade of the same beige.
+            'hillshade-shadow-color': '#8a6a45',
             'hillshade-highlight-color': '#faf3e0',
-            'hillshade-accent-color': '#e8d4a0',
-            'hillshade-exaggeration': 0.35,
+            'hillshade-accent-color': '#c9a86a',
+            'hillshade-exaggeration': 1.0,
           },
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#b9dde2' } },

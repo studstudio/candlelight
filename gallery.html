@@ -185,6 +185,16 @@ async function loadMapLibre() {
 // ---- config ----
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
+// Stadia Maps tiles (used for the Stamen Toner labels overlay below) require
+// auth for anything not served from localhost/127.0.0.1 — this site is
+// served from a workers.dev domain, so unauthenticated requests 401 and the
+// (transparent, so silently) overlay never appears. Get a free key at
+// https://client.stadiamaps.com/signup/ and paste it here, OR skip this
+// entirely and instead add this exact domain under "Authentication
+// Configuration" in the Stadia client dashboard for domain-based auth —
+// either one is sufficient on its own, and if you use domain auth this can
+// stay blank.
+const STADIA_API_KEY = "121d3e47-f89d-4f87-b987-49d42aa7f800";
 const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json";
 const COUNTRIES_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json";
 const LAKES_URL = "https://ne.freemap.online/50m/physical/ne_50m_lakes.json";
@@ -855,14 +865,17 @@ function initTerrainMap() {
         // endpoint because MapLibre does not interpret the {r} retina
         // placeholder itself. This is intentionally an overlay only; it does
         // not replace the existing terrain, color relief, hillshade, lakes,
-        // or rivers sources. properties: {} } }, properties: {} } }, properties: {} } }, properties: {} } },
+        // or rivers sources.
         stamenTonerLabels: {
           type: 'raster',
-          tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
+          tiles: [
+            'https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png' +
+              (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
+          ],
           tileSize: 256,
           minzoom: 0,
           maxzoom: 20,
-          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
+          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
       },
       layers: [

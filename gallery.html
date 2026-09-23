@@ -75,6 +75,9 @@
     background: var(--land); border-top: 1px solid var(--land-line); z-index: 10;
   }
   #legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4a3a22; }
+  #location { text-align: center; font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; color: #4a3a22; }
+  #locationCity { font-size: 12px; font-weight: 500; letter-spacing: 0.03em; }
+  #locationCoords { font-size: 10px; font-weight: 300; letter-spacing: 0.06em; opacity: 0.75; margin-top: 2px; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   #count { font-size: 11px; color: #4a3a22; text-align: right; }
@@ -130,6 +133,10 @@
       <div class="row"><span class="dot" style="background:var(--ember)"></span> sent</div>
       <div class="row"><span class="dot" style="background:#1d1610"></span> received</div>
       <div class="row"><span class="dot" style="background:var(--ember-dim);opacity:0.6"></span> in flight</div>
+    </div>
+    <div id="location">
+      <div id="locationCity"></div>
+      <div id="locationCoords"></div>
     </div>
     <div id="count"><b id="countNum">0</b>lights shared</div>
   </div>
@@ -194,6 +201,68 @@ let dockTransform = { x: 0, y: 0 };
 let inlayClipPath = 'none';
 
 let land = null, lakes = null, rivers = null;
+
+// ============================================================
+// LOCATION READOUT: nearest major city + lat/long, shown on the dashboard,
+// tracking whatever's currently at the center of the view (flat map when
+// undocked, or the 3D camera's center when in 3D).
+// ============================================================
+const MAJOR_CITIES = [
+  ['New York', 40.71, -74.01], ['Los Angeles', 34.05, -118.24], ['Chicago', 41.88, -87.63],
+  ['Houston', 29.76, -95.37], ['Phoenix', 33.45, -112.07], ['Philadelphia', 39.95, -75.16],
+  ['San Antonio', 29.42, -98.49], ['San Diego', 32.72, -117.16], ['Dallas', 32.78, -96.80],
+  ['Austin', 30.27, -97.74], ['San Francisco', 37.77, -122.42], ['Seattle', 47.61, -122.33],
+  ['Denver', 39.74, -104.99], ['Boston', 42.36, -71.06], ['Miami', 25.76, -80.19],
+  ['Atlanta', 33.75, -84.39], ['Washington DC', 38.91, -77.04], ['Las Vegas', 36.17, -115.14],
+  ['Portland', 45.52, -122.68], ['Detroit', 42.33, -83.05], ['Minneapolis', 44.98, -93.27],
+  ['New Orleans', 29.95, -90.07], ['Kansas City', 39.10, -94.58], ['Nashville', 36.16, -86.78],
+  ['Salt Lake City', 40.76, -111.89], ['Toronto', 43.65, -79.38], ['Vancouver', 49.28, -123.12],
+  ['Montreal', 45.50, -73.57], ['Mexico City', 19.43, -99.13], ['London', 51.51, -0.13],
+  ['Paris', 48.85, 2.35], ['Berlin', 52.52, 13.40], ['Madrid', 40.42, -3.70],
+  ['Rome', 41.90, 12.50], ['Amsterdam', 52.37, 4.90], ['Moscow', 55.76, 37.62],
+  ['Istanbul', 41.01, 28.98], ['Cairo', 30.04, 31.24], ['Lagos', 6.52, 3.38],
+  ['Nairobi', -1.29, 36.82], ['Johannesburg', -26.20, 28.05], ['Dubai', 25.20, 55.27],
+  ['Mumbai', 19.08, 72.88], ['Delhi', 28.70, 77.10], ['Bangkok', 13.76, 100.50],
+  ['Singapore', 1.35, 103.82], ['Jakarta', -6.21, 106.85], ['Manila', 14.60, 120.98],
+  ['Beijing', 39.90, 116.41], ['Shanghai', 31.23, 121.47], ['Hong Kong', 22.32, 114.17],
+  ['Tokyo', 35.68, 139.65], ['Seoul', 37.57, 126.98], ['Sydney', -33.87, 151.21],
+  ['Melbourne', -37.81, 144.96], ['Auckland', -36.85, 174.76], ['São Paulo', -23.55, -46.63],
+  ['Rio de Janeiro', -22.91, -43.17], ['Buenos Aires', -34.60, -58.38], ['Lima', -12.05, -77.04],
+  ['Bogotá', 4.71, -74.07], ['Santiago', -33.45, -70.67],
+];
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371, d2r = Math.PI / 180;
+  const dLat = (lat2 - lat1) * d2r, dLon = (lon2 - lon1) * d2r;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * d2r) * Math.cos(lat2 * d2r) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+function nearestCity(lat, lon) {
+  let best = null, bestDist = Infinity;
+  for (const c of MAJOR_CITIES) {
+    const d = haversineKm(lat, lon, c[1], c[2]);
+    if (d < bestDist) { bestDist = d; best = c; }
+  }
+  return best;
+}
+const HOME_LAT = 39.83, HOME_LON = -98.58; // matches the flat map's projection center
+function updateLocationReadout() {
+  let lon, lat;
+  if (in3D && terrainMapInstance) {
+    const c = terrainMapInstance.getCenter();
+    lon = c.lng; lat = c.lat;
+  } else if (!docked) {
+    const rect = canvas.getBoundingClientRect();
+    const ll = lonLatAtScreenPoint(rect.width / 2, rect.height / 2);
+    if (!ll) return;
+    [lon, lat] = ll;
+  } else {
+    lon = HOME_LON; lat = HOME_LAT;
+  }
+  const city = nearestCity(lat, lon);
+  document.getElementById('locationCity').textContent = city ? 'near ' + city[0] : '';
+  document.getElementById('locationCoords').textContent = formatLatLon(lon, lat);
+}
+
 let events = [];
 let dpr = window.devicePixelRatio || 1;
 let transform = d3.zoomIdentity;
@@ -335,6 +404,7 @@ function draw() {
   }
 
   drawEvents(lw, pr);
+  updateLocationReadout();
 }
 
 function drawEvents(lw, pr) {
@@ -701,45 +771,51 @@ function initTerrainMap() {
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
-        // real OpenStreetMap cartography — same source the official 3D
-        // Terrain example uses — instead of an elevation-only color ramp.
-        // This is what actually shows parks, water, and land-use as real
-        // varied detail rather than a smooth synthetic gradient.
-        osm: {
-          type: 'raster',
-          tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
-          tileSize: 256, maxzoom: 19,
-          attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
-        },
+        // lakes/rivers reuse the exact same GeoJSON already fetched for the
+        // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
+        // fed to MapLibre as plain in-memory GeoJSON
+        lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
+        riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
       },
       layers: [
-        // OSM tinted warm toward our beige palette rather than shown at its
-        // normal saturation — keeps parks/water/roads visually distinct
-        // (the actual cartographic detail being asked for) without looking
-        // like a generic web map
+        // color-relief: colors the terrain BY ELEVATION straight from the
+        // DEM. The color stops aren't monotonic — green genuinely
+        // reappears at a higher band (alpine forest/meadow), not just a
+        // single strip near sea level fading permanently to tan — since
+        // MapLibre only requires the elevation stops themselves to
+        // increase, not the colors.
         {
-          id: 'osm', type: 'raster', source: 'osm',
+          id: 'color-relief', type: 'color-relief', source: 'terrainSource',
           paint: {
-            'raster-saturation': -0.35,
-            'raster-hue-rotate': 18,
-            'raster-brightness-min': 0.18,
-            'raster-brightness-max': 1,
+            'color-relief-color': [
+              'interpolate', ['linear'], ['elevation'],
+              -200, '#8fc3d6',   // below sea level (bathymetry in the DEM) — matches --water
+              0, '#b9dde2',      // sea level — matches the flat map's --ocean exactly
+              5, '#a9d089',      // coast, green starts immediately
+              300, '#7fb85c',    // lowland — saturated forest green
+              1000, '#96c46e',   // mid elevation, still solidly green
+              1700, '#c2b57e',   // transition band, green easing toward tan
+              2400, '#8fae5c',   // green reappears — alpine forest/meadow band
+              3100, '#d9c68f',   // higher slopes, tan
+              4200, '#f5ecd4',   // peaks, lightest tone in the palette
+            ],
           },
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
-            // shifted lighter/creamier overall (matching our warm beige
-            // palette) while keeping real contrast between shadow and
-            // highlight — a lighter shadow tone still reads as relief as
-            // long as it's clearly darker than the highlight, it's just no
-            // longer a deep brown
+            // lighter/creamier overall (matching our warm beige palette)
+            // while keeping real contrast between shadow and highlight —
+            // a lighter shadow tone still reads as relief as long as it's
+            // clearly darker than the highlight, it just isn't a deep brown
             'hillshade-shadow-color': '#c9ad7a',
             'hillshade-highlight-color': '#fdf6e3',
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
           },
         },
+        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#b9dde2' } },
+        { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
       sky: { 'sky-color': '#1d1610', 'sky-horizon-blend': 0.5, 'horizon-color': '#3a2c1c', 'horizon-fog-blend': 0.6 },
@@ -751,6 +827,7 @@ function initTerrainMap() {
   });
   terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); });
   terrainMapInstance.on('zoom', autoExitCheck);
+  terrainMapInstance.on('move', updateLocationReadout);
   return terrainMapInstance;
 }
 

@@ -453,39 +453,39 @@ function initWeatherProtocol() {
       const w = bitmap.width, h = bitmap.height;
 
       // read the source only to sample it at a coarse grid — not to process
-      // its pixels directly. What actually gets drawn is our own shape: a
-      // soft radial gradient per active cell, overlapping its neighbors, so
-      // the result is a genuinely smooth organic blob built from the data's
-      // rough shape rather than a blurred copy of its blocky raw pixels.
+      // its pixels directly. What actually gets drawn is our own shape:
+      // a few thin concentric rings per active cell, contour-map style.
+      // Overlapping rings from neighboring active cells weave into a
+      // topographic-looking mesh, denser (so visually stronger) wherever
+      // more neighboring cells overlap — an intensity cue without needing
+      // real contour math. Thin lines also cover far less area than a
+      // filled blob, so hillshade shows through the gaps naturally.
       const srcCanvas = new OffscreenCanvas(w, h);
       const sctx = srcCanvas.getContext('2d');
       sctx.drawImage(bitmap, 0, 0);
       const src = sctx.getImageData(0, 0, w, h).data;
 
       const CELL = 14; // sampling grid spacing, in source pixels — coarser than the raw data on purpose
-      const RADIUS = CELL * 1.7; // overlap neighboring cells so adjacent gradients blend into one continuous shape, not separate dots
+      const RADIUS = CELL * 1.7; // ring spread — overlaps neighboring cells so the mesh stays continuous, not separate isolated circles
+      const RING_RADII = [0.4, 0.7, 1.0]; // fractions of RADIUS — a few concentric bands per cell, like elevation contour intervals
+      const RING_WIDTH = 1.1;
       const OCEAN = [185, 221, 226]; // matches --ocean, per "make rain that same blue"
 
       const out = new OffscreenCanvas(w, h);
       const octx = out.getContext('2d');
+      octx.lineWidth = RING_WIDTH;
       for (let y = 0; y < h; y += CELL) {
         for (let x = 0; x < w; x += CELL) {
           const i = (y * w + x) * 4;
           if (src[i + 3] < 10) continue; // no signal at this sample point
           const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
           const cx = x + CELL / 2, cy = y + CELL / 2;
-          const grad = octx.createRadialGradient(cx, cy, 0, cx, cy, RADIUS);
-          if (isSnow) {
-            grad.addColorStop(0, 'rgba(255,255,255,0.95)');
-            grad.addColorStop(1, 'rgba(255,255,255,0)');
-          } else {
-            grad.addColorStop(0, `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.85)`);
-            grad.addColorStop(1, `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0)`);
+          octx.strokeStyle = isSnow ? 'rgba(255,255,255,0.8)' : `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.75)`;
+          for (const frac of RING_RADII) {
+            octx.beginPath();
+            octx.arc(cx, cy, RADIUS * frac, 0, Math.PI * 2);
+            octx.stroke();
           }
-          octx.fillStyle = grad;
-          octx.beginPath();
-          octx.arc(cx, cy, RADIUS, 0, Math.PI * 2);
-          octx.fill();
         }
       }
       const outBlob = await out.convertToBlob({ type: 'image/png' });
@@ -506,7 +506,7 @@ function addWeatherLayerIfReady() {
       tileSize: 256, maxzoom: 7,
       attribution: 'Weather: <a href="https://rainviewer.com" target="_blank">RainViewer</a>',
     });
-    terrainMapInstance.addLayer({ id: 'weather', type: 'raster', source: 'weather', paint: { 'raster-opacity': 0.45, 'raster-resampling': 'linear' } });
+    terrainMapInstance.addLayer({ id: 'weather', type: 'raster', source: 'weather', paint: { 'raster-opacity': 0.8, 'raster-resampling': 'linear' } });
   };
   if (terrainMapInstance.isStyleLoaded()) addIt(); else terrainMapInstance.once('load', addIt);
 }
@@ -599,7 +599,12 @@ function equivalentD3Zoom(mapLibreZoom, lat) {
 function syncFlatMapToMapLibre() {
   rotationGamma = -terrainMapInstance.getBearing(); // preserve whatever rotation happened in 3D (entry used bearing: -rotationGamma, so this is its inverse)
   const c = terrainMapInstance.getCenter();
-  const k = Math.max(0.25, Math.min(10, equivalentD3Zoom(terrainMapInstance.getZoom(), c.lat)));
+  // capped safely below HANDOFF_K — otherwise exiting could land the flat
+  // map's zoom still above the entry threshold, which its own zoom handler
+  // would see immediately and snap straight back into 3D: a flicker loop
+  // that looks like an unwanted snap and interrupts whatever gesture is in
+  // progress on the canvas underneath
+  const k = Math.max(0.25, Math.min(HANDOFF_K * 0.8, equivalentD3Zoom(terrainMapInstance.getZoom(), c.lat)));
   const base = projection([c.lng, c.lat]);
   if (!base) return;
   const rad = rotationGamma * Math.PI / 180;

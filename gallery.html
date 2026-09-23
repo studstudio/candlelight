@@ -848,19 +848,14 @@ function initTerrainMap() {
         // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
-        // Natural Earth country geometry for Antarctica only; this gives the polar continent
-        // its own white ice surface while the real DEM hillshade remains visible above it.
+        // Natural Earth country geometry for Antarctica only.
         antarcticaGeo: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
         // Stadia Maps / Stamen Toner labels — transparent raster overlay
         // containing place names and road names. Use the raw 256px XYZ PNG
         // endpoint because MapLibre does not interpret the {r} retina
         // placeholder itself. This is intentionally an overlay only; it does
         // not replace the existing terrain, color relief, hillshade, lakes,
-        // or rivers sources.
-        southPolarOuter: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-55.0],[180,-55.0],[180,-85.05112878],[-180,-85.05112878],[-180,-55.0]]] }, properties: {} } },
-        southPolarMid: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-65.0],[180,-65.0],[180,-85.05112878],[-180,-85.05112878],[-180,-65.0]]] }, properties: {} } },
-        southPolarInner: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-72.0],[180,-72.0],[180,-85.05112878],[-180,-85.05112878],[-180,-72.0]]] }, properties: {} } },
-        southPolarCore: { type: 'geojson', data: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[-180,-78.0],[180,-78.0],[180,-85.05112878],[-180,-85.05112878],[-180,-78.0]]] }, properties: {} } },
+        // or rivers sources. properties: {} } }, properties: {} } }, properties: {} } }, properties: {} } },
         stamenTonerLabels: {
           type: 'raster',
           tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
@@ -894,26 +889,6 @@ function initTerrainMap() {
             ],
           },
         },
-        // A soft polar extension fades the southern continent into white before
-        // the blue sky/horizon. It is intentionally made from broad latitude
-        // bands so it continues to the finite Mercator pole rather than ending
-        // at the coastline like a hard mask.
-        {
-          id: 'south-polar-mist-outer', type: 'fill', source: 'southPolarOuter',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.12 },
-        },
-        {
-          id: 'south-polar-mist-mid', type: 'fill', source: 'southPolarMid',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.28 },
-        },
-        {
-          id: 'south-polar-mist-inner', type: 'fill', source: 'southPolarInner',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.52 },
-        },
-        {
-          id: 'south-polar-mist-core', type: 'fill', source: 'southPolarCore',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.78 },
-        },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
@@ -927,12 +902,10 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        // Antarctica uses the same DEM + hillshade as every other landmass.
-        // This restrained cool-white overlay only shifts its land color toward ice;
-        // the real hillshade remains visible underneath for blue/gray relief.
+        // Antarctica is pure white — no beige land palette or polar tint.
         {
           id: 'antarctica-ice', type: 'fill', source: 'antarcticaGeo',
-          paint: { 'fill-color': '#f4f9ff', 'fill-opacity': 0.48, 'fill-antialias': true },
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 1, 'fill-antialias': true },
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },

@@ -426,7 +426,7 @@ function dockMap() {
   // from inside the 'zoom' handler that may have just called this would
   // re-enter that same handler while it's still executing
   setTimeout(() => {
-    d3.select(canvas).transition().duration(450).call(
+    d3.select(canvas).interrupt().transition().duration(450).call(
       zoomBehavior.transform,
       d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K)
     );
@@ -454,6 +454,17 @@ function tapToZoomIn(lon, lat) {
   const tx = rect.width / 2 - targetK * rx, ty = rect.height / 2 - targetK * ry;
   undockMap();
   setTimeout(() => {
+    // reset d3's OWN internal transform tracking to the known-correct
+    // docked baseline first, with no transition — while docked, gestures
+    // like spin were visually locked (we override what gets rendered) but
+    // d3 itself was still silently accumulating its own tracked transform
+    // from those same gesture deltas underneath. Without this reset, the
+    // transition below would interpolate from that drifted, wrong state
+    // instead of from where the map actually looked like it was.
+    d3.select(canvas).interrupt().call(
+      zoomBehavior.transform,
+      d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K)
+    );
     d3.select(canvas).transition().duration(500).call(
       zoomBehavior.transform,
       d3.zoomIdentity.translate(tx, ty).scale(targetK)

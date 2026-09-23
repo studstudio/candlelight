@@ -52,6 +52,21 @@
     transition: opacity 0.3s ease;
   }
   #transitionFade.active { opacity: 1; }
+  /* North/south pole portal: MapLibre's Mercator tile grid is finite vertically,
+     so crossing a pole is hidden behind a brief white, snow-like veil before
+     the camera reappears at the opposite latitude. */
+  #poleFade {
+    position: absolute; inset: 0; z-index: 8; pointer-events: none; opacity: 0;
+    background:
+      radial-gradient(circle at 18% 24%, rgba(255,255,255,.95) 0 2px, transparent 3px),
+      radial-gradient(circle at 72% 18%, rgba(255,255,255,.82) 0 1.5px, transparent 3px),
+      radial-gradient(circle at 42% 68%, rgba(255,255,255,.9) 0 2px, transparent 4px),
+      radial-gradient(circle at 84% 74%, rgba(255,255,255,.78) 0 1.5px, transparent 3px),
+      rgba(255,255,255,.98);
+    background-size: 150px 130px, 190px 160px, 170px 150px, 210px 180px, auto;
+    transition: opacity .22s ease;
+  }
+  #poleFade.active { opacity: 1; }
   #transitionCoords {
     font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
     font-weight: 300; font-size: 13px; letter-spacing: 0.1em;
@@ -90,8 +105,8 @@
   #terrainMap {
     position: absolute; inset: 0; opacity: 0; pointer-events: none;
     transition: opacity 0.6s ease; z-index: 1;
-    /* MapLibre remains genuinely full-screen. The atlas boundary is
-       rendered inside MapLibre as a geographic white mask. */
+    /* MapLibre remains genuinely full-screen. The ocean itself is rendered
+       by the terrain style; this is only the fallback canvas background. */
     background: #18BFFF;
   }
   #terrainMap .maplibregl-canvas {
@@ -124,6 +139,7 @@
   <main>
     <div id="mapInlay"></div>
     <div id="transitionFade"><span id="transitionCoords"></span></div>
+    <div id="poleFade"></div>
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
     <button id="resetBtn">reset view</button>
@@ -761,60 +777,42 @@ function addWeatherLayerIfReady() {
 
 let terrainMapInstance = null;
 
-function makeAtlasMistGeoJSON() {
-  // The atlas remains a real MapLibre geographic mask. Instead of a hard
-  // boundary, build concentric ocean-colored rings that progressively
-  // increase in opacity toward the outside. This lets coastlines/terrain
-  // dissolve naturally into the ocean-colored atmospheric edge.
-  const N = 160;
-  const latFromY = y => (180 / Math.PI) * (2 * Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) - Math.PI / 2);
-  const ring = r => {
-    const pts = [];
-    for (let i = 0; i < N; i++) {
-      const a = (i / N) * Math.PI * 2;
-      const x = 0.5 + r * Math.cos(a);
-      const y = 0.5 + r * Math.sin(a);
-      pts.push([(x - 0.5) * 360, latFromY(y)]);
-    }
-    pts.push(pts[0]);
-    return pts;
-  };
+const POLE_PORTAL_LAT = 82;
+let poleWrapping = false;
+let lastPoleLat = 0;
 
-  // First cover the portion of the single Web Mercator world outside the
-  // atlas. Keep this translucent so the vivid-blue MapLibre sky can mix
-  // through the outer edge instead of producing a white frame.
-  const outerWorld = [[
-    [-180, -85.05112878], [180, -85.05112878],
-    [180, 85.05112878], [-180, 85.05112878],
-    [-180, -85.05112878]
-  ], ring(0.50)];
+function setPoleFade(active) {
+  const el = document.getElementById('poleFade');
+  if (!el) return;
+  el.classList.toggle('active', active);
+}
 
-  const rings = [
-    [0.40, 0.42, 0.06],
-    [0.42, 0.44, 0.10],
-    [0.44, 0.46, 0.17],
-    [0.46, 0.48, 0.27],
-    [0.48, 0.50, 0.40]
-  ];
+function handlePoleWrap() {
+  if (!terrainMapInstance || poleWrapping || !in3D) return;
+  const c = terrainMapInstance.getCenter();
+  const crossedNorth = lastPoleLat <= POLE_PORTAL_LAT && c.lat > POLE_PORTAL_LAT;
+  const crossedSouth = lastPoleLat >= -POLE_PORTAL_LAT && c.lat < -POLE_PORTAL_LAT;
+  lastPoleLat = c.lat;
+  if (!crossedNorth && !crossedSouth) return;
 
-  const features = [{
-    type: 'Feature',
-    properties: { opacity: 0.72 },
-    geometry: { type: 'Polygon', coordinates: outerWorld }
-  }];
-
-  for (const [innerR, outerR, opacity] of rings) {
-    features.push({
-      type: 'Feature',
-      properties: { opacity },
-      geometry: {
-        type: 'Polygon',
-        coordinates: [ring(outerR), ring(innerR)]
-      }
+  poleWrapping = true;
+  const targetLat = crossedNorth ? -POLE_PORTAL_LAT : POLE_PORTAL_LAT;
+  // The 180° longitude shift puts the view on the opposite side of the
+  // sphere-like pole crossing. The white veil hides the discontinuity and
+  // also masks the Mercator/Antarctica cutoff at the finite tile boundary.
+  const targetLng = c.lng + 180;
+  setPoleFade(true);
+  terrainMapInstance.stop();
+  setTimeout(() => {
+    terrainMapInstance.jumpTo({ center: [targetLng, targetLat] });
+    lastPoleLat = targetLat;
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        setPoleFade(false);
+        setTimeout(() => { poleWrapping = false; }, 240);
+      }, 90);
     });
-  }
-
-  return { type: 'FeatureCollection', features };
+  }, 230);
 }
 
 function initTerrainMap() {
@@ -822,17 +820,13 @@ function initTerrainMap() {
   initWeatherProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
-    // One atlas world only. This disables MapLibre's repeated east/west
-    // world copies while leaving the normal flat Web Mercator projection
-    // and all existing camera/terrain mechanics untouched.
-    renderWorldCopies: false,
+    // Restore continuous east/west wrapping. MapLibre natively repeats the
+    // Mercator world horizontally; the north/south portal below handles the
+    // otherwise finite polar edge with a hidden transition.
+    renderWorldCopies: true,
     style: {
       version: 8,
       sources: {
-        atlasWhiteEdge: {
-          type: 'geojson',
-          data: makeAtlasMistGeoJSON()
-        },
         // Mapterhorn — the terrain source MapLibre's own official 3D
         // Terrain example uses. Faster and higher-res (512px) than the AWS
         // Terrarium tiles tried before, which are documented as slow to
@@ -874,8 +868,8 @@ function initTerrainMap() {
           paint: {
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
-              -200, '#8fc3d6',   // below sea level (bathymetry in the DEM) — matches --water
-              0, '#b9dde2',      // sea level — matches the flat map's --ocean exactly
+              -200, '#18BFFF',   // all native ocean/bathymetry pixels use the same vivid ocean blue
+              0, '#18BFFF',      // sea level — same vivid blue as the extended ocean and sky
               5, '#a9d089',      // coast, green starts immediately
               300, '#7fb85c',    // lowland — saturated forest green
               1000, '#96c46e',   // mid elevation, still solidly green
@@ -901,17 +895,6 @@ function initTerrainMap() {
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
-        // The atlas boundary is part of MapLibre rendering, above the map
-        // layers, rather than a CSS frame around the map container.
-        {
-          id: 'atlas-ocean-mist',
-          type: 'fill',
-          source: 'atlasWhiteEdge',
-          paint: {
-            'fill-color': '#18BFFF',
-            'fill-opacity': ['get', 'opacity']
-          }
-        },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.
         {
@@ -942,6 +925,7 @@ function initTerrainMap() {
   });
   terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); });
   terrainMapInstance.on('zoom', autoExitCheck);
+  terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
   return terrainMapInstance;
 }
@@ -994,6 +978,9 @@ async function enter3D(lon, lat) {
   zoomHistory = [{ t: performance.now(), z: zoom }];
   enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
+  lastPoleLat = map3d.getCenter().lat;
+  poleWrapping = false;
+  setPoleFade(false);
   document.getElementById('terrainMap').classList.add('active');
   canvas.classList.add('faded');
   backBtn.classList.add('visible');

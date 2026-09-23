@@ -849,7 +849,7 @@ function initTerrainMap() {
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
         // Natural Earth country geometry for Antarctica only.
-        antarcticaGeo: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+        antarcticaGeo: { type: 'geojson', data: antarctica || { type: 'FeatureCollection', features: [] } },
         // Stadia Maps / Stamen Toner labels — transparent raster overlay
         // containing place names and road names. Use the raw 256px XYZ PNG
         // endpoint because MapLibre does not interpret the {r} retina
@@ -889,33 +889,20 @@ function initTerrainMap() {
             ],
           },
         },
+        // Antarctica's geographic base replaces the warm elevation palette
+        // with pure white. It is deliberately placed before hillshade so the
+        // real DEM relief remains visible on top of the white ice surface.
+        {
+          id: 'antarctica-ice-base', type: 'fill', source: 'antarcticaGeo',
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 1.0, 'fill-antialias': true },
+        },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
-            // lighter/creamier overall (matching our warm beige palette)
-            // while keeping real contrast between shadow and highlight —
-            // a lighter shadow tone still reads as relief as long as it's
-            // clearly darker than the highlight, it just isn't a deep brown
             'hillshade-shadow-color': '#c9ad7a',
             'hillshade-highlight-color': '#fdf6e3',
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
-          },
-        },
-        // Antarctica gets its own geographic ice palette while preserving
-        // the existing terrain/hillshade stack. The white fill replaces the
-        // warm elevation palette only inside the Antarctic polygon; a soft
-        // cool translucent pass lets the real terrain relief remain visible.
-        {
-          id: 'antarctica-ice-base', type: 'fill', source: 'antarcticaGeo',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.96, 'fill-antialias': true },
-        },
-        {
-          id: 'antarctica-ice-shadow', type: 'fill', source: 'antarcticaGeo',
-          paint: {
-            'fill-color': '#dcecf4',
-            'fill-opacity': 0.22,
-            'fill-antialias': true,
           },
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },

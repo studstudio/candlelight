@@ -444,6 +444,76 @@ function initWeatherProtocol() {
       })
       .catch((err) => console.warn('GALLERY: RainViewer weather-maps.json fetch failed —', err.message));
 
+    // standard marching-squares contour extraction: given a scalar field on
+    // a grid, returns the line segments where the field crosses threshold T
+    // — this is what makes the lines trace the field's actual shape rather
+    // than being stamped independently per sample point
+    function marchingSquares(field, gw, gh, spacing, T) {
+      const segs = [];
+      const interp = (v1, v2) => (v1 === v2 ? 0.5 : (T - v1) / (v2 - v1));
+      for (let gy = 0; gy < gh - 1; gy++) {
+        for (let gx = 0; gx < gw - 1; gx++) {
+          const tl = field[gy * gw + gx], tr = field[gy * gw + gx + 1];
+          const br = field[(gy + 1) * gw + gx + 1], bl = field[(gy + 1) * gw + gx];
+          let c = 0;
+          if (tl >= T) c |= 8;
+          if (tr >= T) c |= 4;
+          if (br >= T) c |= 2;
+          if (bl >= T) c |= 1;
+          if (c === 0 || c === 15) continue;
+          const x0 = gx * spacing, y0 = gy * spacing, x1 = x0 + spacing, y1 = y0 + spacing;
+          const topX = x0 + interp(tl, tr) * spacing, topY = y0;
+          const rightX = x1, rightY = y0 + interp(tr, br) * spacing;
+          const bottomX = x0 + interp(bl, br) * spacing, bottomY = y1;
+          const leftX = x0, leftY = y0 + interp(tl, bl) * spacing;
+          const add = (a, b, cc, d) => segs.push([a, b, cc, d]);
+          switch (c) {
+            case 1: add(leftX, leftY, bottomX, bottomY); break;
+            case 2: add(bottomX, bottomY, rightX, rightY); break;
+            case 3: add(leftX, leftY, rightX, rightY); break;
+            case 4: add(topX, topY, rightX, rightY); break;
+            case 5: add(leftX, leftY, topX, topY); add(bottomX, bottomY, rightX, rightY); break;
+            case 6: add(topX, topY, bottomX, bottomY); break;
+            case 7: add(leftX, leftY, topX, topY); break;
+            case 8: add(topX, topY, leftX, leftY); break;
+            case 9: add(topX, topY, bottomX, bottomY); break;
+            case 10: add(topX, topY, rightX, rightY); add(leftX, leftY, bottomX, bottomY); break;
+            case 11: add(topX, topY, rightX, rightY); break;
+            case 12: add(leftX, leftY, rightX, rightY); break;
+            case 13: add(bottomX, bottomY, rightX, rightY); break;
+            case 14: add(leftX, leftY, bottomX, bottomY); break;
+          }
+        }
+      }
+      return segs;
+    }
+
+    // box blur over the coarse presence grid, a couple passes — turns a
+    // binary "snow here / not here" grid into a continuous density field
+    // that peaks toward the middle of a cluster of active cells. That
+    // continuous field is what marching squares needs: multiple threshold
+    // levels on it naturally produce concentric rings shrinking inward,
+    // exactly the look of real elevation/topographic contours.
+    function smoothGrid(grid, gw, gh, radius, passes) {
+      let cur = grid;
+      for (let p = 0; p < passes; p++) {
+        const tmp = new Float32Array(gw * gh);
+        for (let y = 0; y < gh; y++) {
+          for (let x = 0; x < gw; x++) {
+            let sum = 0, n = 0;
+            for (let dy = -radius; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) {
+              const nx = x + dx, ny = y + dy;
+              if (nx < 0 || nx >= gw || ny < 0 || ny >= gh) continue;
+              sum += cur[ny * gw + nx]; n++;
+            }
+            tmp[y * gw + x] = sum / n;
+          }
+        }
+        cur = tmp;
+      }
+      return cur;
+    }
+
     maplibregl.addProtocol('rainviewer', async (params) => {
       const realUrl = params.url.replace('rainviewer://', '');
       const res = await fetch(realUrl);
@@ -452,42 +522,52 @@ function initWeatherProtocol() {
       const bitmap = await createImageBitmap(blob);
       const w = bitmap.width, h = bitmap.height;
 
-      // read the source only to sample it at a coarse grid — not to process
-      // its pixels directly. What actually gets drawn is our own shape:
-      // a few thin concentric rings per active cell, contour-map style.
-      // Overlapping rings from neighboring active cells weave into a
-      // topographic-looking mesh, denser (so visually stronger) wherever
-      // more neighboring cells overlap — an intensity cue without needing
-      // real contour math. Thin lines also cover far less area than a
-      // filled blob, so hillshade shows through the gaps naturally.
       const srcCanvas = new OffscreenCanvas(w, h);
       const sctx = srcCanvas.getContext('2d');
       sctx.drawImage(bitmap, 0, 0);
       const src = sctx.getImageData(0, 0, w, h).data;
 
-      const CELL = 14; // sampling grid spacing, in source pixels — coarser than the raw data on purpose
-      const RADIUS = CELL * 1.7; // ring spread — overlaps neighboring cells so the mesh stays continuous, not separate isolated circles
-      const RING_RADII = [0.4, 0.7, 1.0]; // fractions of RADIUS — a few concentric bands per cell, like elevation contour intervals
-      const RING_WIDTH = 1.1;
-      const OCEAN = [185, 221, 226]; // matches --ocean, per "make rain that same blue"
+      // sample the source at a coarse grid into binary presence, then
+      // smooth into a density field per type — real data, redrawn as our
+      // own contour shapes, not the raw pixels themselves
+      const STEP = 8;
+      const gw = Math.floor(w / STEP) + 1, gh = Math.floor(h / STEP) + 1;
+      const rawSnow = new Float32Array(gw * gh);
+      const rawRain = new Float32Array(gw * gh);
+      for (let gy = 0; gy < gh; gy++) {
+        for (let gx = 0; gx < gw; gx++) {
+          const px = Math.min(w - 1, gx * STEP), py = Math.min(h - 1, gy * STEP);
+          const i = (py * w + px) * 4;
+          if (src[i + 3] < 10) continue;
+          const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
+          if (isSnow) rawSnow[gy * gw + gx] = 1; else rawRain[gy * gw + gx] = 1;
+        }
+      }
+      const snowField = smoothGrid(rawSnow, gw, gh, 2, 2);
+      const rainField = smoothGrid(rawRain, gw, gh, 2, 2);
 
       const out = new OffscreenCanvas(w, h);
       const octx = out.getContext('2d');
-      octx.lineWidth = RING_WIDTH;
-      for (let y = 0; y < h; y += CELL) {
-        for (let x = 0; x < w; x += CELL) {
-          const i = (y * w + x) * 4;
-          if (src[i + 3] < 10) continue; // no signal at this sample point
-          const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
-          const cx = x + CELL / 2, cy = y + CELL / 2;
-          octx.strokeStyle = isSnow ? 'rgba(255,255,255,0.8)' : `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.75)`;
-          for (const frac of RING_RADII) {
-            octx.beginPath();
-            octx.arc(cx, cy, RADIUS * frac, 0, Math.PI * 2);
-            octx.stroke();
-          }
-        }
+      octx.lineWidth = 1.1;
+      octx.lineJoin = 'round';
+      const LEVELS = [0.15, 0.32, 0.5, 0.68, 0.85]; // contour intervals — outer (low) to inner (high) rings
+
+      octx.strokeStyle = 'rgba(255,255,255,0.8)';
+      for (const T of LEVELS) {
+        const segs = marchingSquares(snowField, gw, gh, STEP, T);
+        octx.beginPath();
+        for (const [x1, y1, x2, y2] of segs) { octx.moveTo(x1, y1); octx.lineTo(x2, y2); }
+        octx.stroke();
       }
+      const OCEAN = [185, 221, 226]; // matches --ocean, per "make rain that same blue"
+      octx.strokeStyle = `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.75)`;
+      for (const T of LEVELS) {
+        const segs = marchingSquares(rainField, gw, gh, STEP, T);
+        octx.beginPath();
+        for (const [x1, y1, x2, y2] of segs) { octx.moveTo(x1, y1); octx.lineTo(x2, y2); }
+        octx.stroke();
+      }
+
       const outBlob = await out.convertToBlob({ type: 'image/png' });
       return { data: await outBlob.arrayBuffer() };
     });

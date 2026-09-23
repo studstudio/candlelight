@@ -33,18 +33,18 @@
     overflow: hidden;
   }
   #app { display: flex; flex-direction: column; height: 100%; }
-  header {
-    padding: 14px 18px; border-bottom: 1px solid var(--line);
-    display: flex; align-items: baseline; justify-content: space-between;
-    flex-wrap: wrap; gap: 6px; flex: 0 0 auto; background: var(--bg); z-index: 2;
-  }
-  h1 { font-size: 15px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0; color: var(--ember); font-weight: 700; }
-  #status { font-size: 11px; color: var(--cream-dim); }
-  #status.live::before { content: '● '; color: var(--ember); }
-  #status.error { color: #e88a6c; }
+  #status { display: none; } /* kept in the DOM only so existing status-update code has somewhere to write to */
   main {
     position: relative; flex: 1 1 auto; min-height: 0;
     background: radial-gradient(circle at center, #f1e6cf 0%, #ddcda3 55%, #c3ac81 100%);
+  }
+  #mapInlay {
+    position: absolute; left: 50%; top: 10%; transform: translateX(-50%);
+    width: 62vmin; height: 62vmin; max-width: 92vw; max-height: 55vh;
+    border-radius: 50%; border: 1px solid var(--line);
+    background: radial-gradient(circle at center, rgba(0,0,0,0.03), rgba(0,0,0,0.1));
+    box-shadow: 0 8px 30px rgba(0,0,0,0.15), inset 0 0 0 6px rgba(242,233,216,0.35);
+    pointer-events: none; z-index: 0;
   }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; position: relative; z-index: 2; }
   canvas:active { cursor: grabbing; }
@@ -55,19 +55,19 @@
     max-width: 220px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); z-index: 5;
   }
   #tooltip b { color: var(--ember); }
-  #legend {
-    position: absolute; left: 14px; bottom: 14px; background: var(--panel);
-    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
-    font-size: 11px; color: var(--cream-dim); display: flex; flex-direction: column; gap: 5px;
+  /* the dashboard is a real flex sibling below main, not an overlay inside
+     it — that's what guarantees it can never end up covered by the map
+     canvas or the 3D terrain view, unlike absolute positioning would */
+  #dashboard {
+    flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 10px 16px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    background: var(--land); border-top: 1px solid var(--land-line); z-index: 10;
   }
+  #legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4a3a22; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
-  #count {
-    position: absolute; right: 14px; bottom: 14px; background: var(--panel);
-    border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px;
-    font-size: 11px; color: var(--cream-dim); text-align: right;
-  }
-  #count b { color: var(--cream); font-size: 16px; display: block; }
+  #count { font-size: 11px; color: #4a3a22; text-align: right; }
+  #count b { color: #2a1f10; font-size: 16px; display: block; }
   #resetBtn {
     position: absolute; right: 14px; top: 14px; background: var(--panel);
     border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
@@ -100,27 +100,27 @@
 </head>
 <body>
 <div id="app">
-  <header>
-    <h1>candlelight — gallery</h1>
-    <span id="status">connecting…</span>
-  </header>
+  <span id="status" style="display:none"></span>
   <main>
+    <div id="mapInlay"></div>
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
     <button id="resetBtn">reset view</button>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
+    <div id="empty">
+      <div>no lights shared yet</div>
+      <div style="font-size:11px;opacity:0.7">send one from the app, or seed test data via the Worker</div>
+    </div>
+  </main>
+  <div id="dashboard">
     <div id="legend">
       <div class="row"><span class="dot" style="background:var(--ember)"></span> sent</div>
       <div class="row"><span class="dot" style="background:#1d1610"></span> received</div>
       <div class="row"><span class="dot" style="background:var(--ember-dim);opacity:0.6"></span> in flight</div>
     </div>
     <div id="count"><b id="countNum">0</b>lights shared</div>
-    <div id="empty">
-      <div>no lights shared yet</div>
-      <div style="font-size:11px;opacity:0.7">send one from the app, or seed test data via the Worker</div>
-    </div>
-  </main>
+  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
@@ -167,6 +167,19 @@ const path = d3.geoPath(projection, ctx);
 
 let discCenter = { x: 0, y: 0 }, discRadius = 0; // fixed once per resize(), since the projection itself no longer changes with gamma
 
+// ============================================================
+// DOCK / INLAY SYSTEM: on load (and whenever fully zoomed back out), the
+// map sits locked inside the small circular #mapInlay frame in the top
+// half of the page, and only the two-finger spin gesture works. A clear,
+// deliberate zoom-in gesture pops it out to fill the screen as normal
+// (spin disabled from that point on); zooming back out until the whole
+// disc is on screen again docks it back into the inlay.
+// ============================================================
+let docked = true;
+let DOCK_K = 1, POP_OUT_K = 2, REDOCK_K = 1.05;
+let dockTransform = { x: 0, y: 0 };
+let inlayClipPath = 'none';
+
 let land = null, lakes = null, rivers = null;
 let events = [];
 let dpr = window.devicePixelRatio || 1;
@@ -185,7 +198,21 @@ function resize() {
   discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
   discRadius = (b[1][0] - b[0][0]) / 2;
   bakeWater(); // expensive (canvas blur filter) — only runs here, on load/resize, never per animation frame
-  draw();
+
+  // inlay geometry — read from the actual rendered #mapInlay element rather
+  // than recomputed independently, so the JS math driving the dock
+  // transform can never drift out of sync with what's visually drawn
+  const inlayRect = document.getElementById('mapInlay').getBoundingClientRect();
+  const inlayCenterX = inlayRect.left + inlayRect.width / 2 - rect.left;
+  const inlayCenterY = inlayRect.top + inlayRect.height / 2 - rect.top;
+  const inlayRadiusPx = inlayRect.width / 2;
+  DOCK_K = inlayRadiusPx / discRadius;
+  dockTransform = { x: inlayCenterX - DOCK_K * discCenter.x, y: inlayCenterY - DOCK_K * discCenter.y };
+  inlayClipPath = `circle(${inlayRadiusPx}px at ${inlayCenterX}px ${inlayCenterY}px)`;
+  POP_OUT_K = DOCK_K * 1.35; // a real deliberate zoom-in, not a tap or the spin gesture
+  REDOCK_K = 1.05; // ~k=1 is "whole disc fits the full viewport" — a touch of margin so it doesn't flicker right at the edge
+
+  if (docked) dockMap(); else draw();
 }
 
 // rivers/lakes, pre-rendered WITH their blur applied once, at the same
@@ -333,38 +360,85 @@ function touchAngle(touches) {
 const zoomBehavior = d3.zoom()
   .scaleExtent([0.25, 10])
   .on('zoom', (event) => {
-    transform = event.transform;
     const se = event.sourceEvent;
-    if (se && se.touches && se.touches.length === 2) {
-      const angle = touchAngle(se.touches);
-      const now = performance.now();
-      if (twist) {
-        let delta = angle - twist.prevAngle;
-        if (delta > 180) delta -= 360; // shortest-path across the atan2 wrap point
-        if (delta < -180) delta += 360;
-        const dt = Math.max(now - twist.lastTime, 1);
-        const SPIN_MULT = -2; // spins twice as fast as the raw finger angle, reversed direction
-        const MOMENTUM_MULT = 1.5; // extra boost to how much velocity a flick imparts
-        spinVelocity = (delta / dt) * 16 * SPIN_MULT * MOMENTUM_MULT;
-        rotationGamma += delta * SPIN_MULT;
-      } else {
-        spinVelocity = 0; // grabbing it fresh stops any residual momentum spin
+
+    if (docked) {
+      // spin still works while docked
+      if (se && se.touches && se.touches.length === 2) {
+        const angle = touchAngle(se.touches);
+        const now = performance.now();
+        if (twist) {
+          let delta = angle - twist.prevAngle;
+          if (delta > 180) delta -= 360; // shortest-path across the atan2 wrap point
+          if (delta < -180) delta += 360;
+          const dt = Math.max(now - twist.lastTime, 1);
+          const SPIN_MULT = -2; // spins twice as fast as the raw finger angle, reversed direction
+          const MOMENTUM_MULT = 1.5; // extra boost to how much velocity a flick imparts
+          spinVelocity = (delta / dt) * 16 * SPIN_MULT * MOMENTUM_MULT;
+          rotationGamma += delta * SPIN_MULT;
+        } else {
+          spinVelocity = 0; // grabbing it fresh stops any residual momentum spin
+        }
+        twist = { prevAngle: angle, lastTime: now };
+      } else if (twist) {
+        twist = null; // dropped below 2 touches — momentum takes over in tick()
       }
-      twist = { prevAngle: angle, lastTime: now };
-    } else if (twist) {
-      twist = null; // dropped below 2 touches — momentum takes over in tick()
+      // a real, deliberate zoom-in (not a tap, not the spin gesture) pops
+      // it out — checked against the raw d3 zoom level even though we
+      // otherwise keep the map visually locked in place below
+      if (event.transform.k > POP_OUT_K) undockMap();
     }
-    if (transform.k >= HANDOFF_K && !in3D) {
-      const rect = canvas.getBoundingClientRect();
-      const lonlat = lonLatAtScreenPoint(rect.width / 2, rect.height / 2);
-      if (lonlat) enter3D(lonlat[0], lonlat[1]);
+
+    if (docked) {
+      // still docked after the check above — stay locked in the inlay,
+      // ignoring whatever pan the gesture implied; only the zoom reading
+      // itself matters, for the pop-out check
+      transform = { k: event.transform.k, x: dockTransform.x, y: dockTransform.y };
+    } else {
+      // either already undocked, or just popped out this same event —
+      // full freedom from here, spin fully disabled
+      twist = null;
+      transform = event.transform;
+      if (transform.k >= HANDOFF_K && !in3D) {
+        const rect = canvas.getBoundingClientRect();
+        const lonlat = lonLatAtScreenPoint(rect.width / 2, rect.height / 2);
+        if (lonlat) enter3D(lonlat[0], lonlat[1]);
+      }
+      // zoomed back out until the whole disc is on screen again — dock
+      // back into the inlay (only relevant outside 3D, which has its own
+      // exit path already)
+      if (!in3D && transform.k <= REDOCK_K) dockMap();
     }
     draw();
   });
 d3.select(canvas).call(zoomBehavior);
+
+function dockMap() {
+  docked = true;
+  zoomBehavior.scaleExtent([DOCK_K * 0.9, POP_OUT_K * 1.25]);
+  canvas.style.clipPath = inlayClipPath;
+  // deferred to the next tick — calling the transform setter synchronously
+  // from inside the 'zoom' handler that may have just called this would
+  // re-enter that same handler while it's still executing
+  setTimeout(() => {
+    d3.select(canvas).transition().duration(450).call(
+      zoomBehavior.transform,
+      d3.zoomIdentity.translate(dockTransform.x, dockTransform.y).scale(DOCK_K)
+    );
+  }, 0);
+}
+
+function undockMap() {
+  docked = false;
+  twist = null;
+  spinVelocity = 0;
+  zoomBehavior.scaleExtent([0.25, 10]);
+  canvas.style.clipPath = 'none';
+}
+
 resetBtn.onclick = () => {
-  d3.select(canvas).transition().duration(400).call(zoomBehavior.transform, d3.zoomIdentity);
   rotationGamma = 0; spinVelocity = 0;
+  dockMap();
 };
 
 // ============================================================
@@ -444,83 +518,6 @@ function initWeatherProtocol() {
       })
       .catch((err) => console.warn('GALLERY: RainViewer weather-maps.json fetch failed —', err.message));
 
-    // standard marching-squares contour extraction: given a scalar field on
-    // a grid, returns the line segments where the field crosses threshold T
-    // — this is what makes the lines trace the field's actual shape rather
-    // than being stamped independently per sample point
-    function marchingSquares(field, gw, gh, spacing, T) {
-      const segs = [];
-      const interp = (v1, v2) => (v1 === v2 ? 0.5 : (T - v1) / (v2 - v1));
-      for (let gy = 0; gy < gh - 1; gy++) {
-        for (let gx = 0; gx < gw - 1; gx++) {
-          const tl = field[gy * gw + gx], tr = field[gy * gw + gx + 1];
-          const br = field[(gy + 1) * gw + gx + 1], bl = field[(gy + 1) * gw + gx];
-          let c = 0;
-          if (tl >= T) c |= 8;
-          if (tr >= T) c |= 4;
-          if (br >= T) c |= 2;
-          if (bl >= T) c |= 1;
-          if (c === 0 || c === 15) continue;
-          const x0 = gx * spacing, y0 = gy * spacing, x1 = x0 + spacing, y1 = y0 + spacing;
-          const topX = x0 + interp(tl, tr) * spacing, topY = y0;
-          const rightX = x1, rightY = y0 + interp(tr, br) * spacing;
-          const bottomX = x0 + interp(bl, br) * spacing, bottomY = y1;
-          const leftX = x0, leftY = y0 + interp(tl, bl) * spacing;
-          const add = (a, b, cc, d) => segs.push([a, b, cc, d]);
-          const center = (tl + tr + br + bl) / 4; // resolves the ambiguous saddle cases below
-          switch (c) {
-            case 1: add(leftX, leftY, bottomX, bottomY); break;
-            case 2: add(bottomX, bottomY, rightX, rightY); break;
-            case 3: add(leftX, leftY, rightX, rightY); break;
-            case 4: add(topX, topY, rightX, rightY); break;
-            case 5: // saddle — which pair connects depends on the cell's average vs threshold, or the two diagonal "high" corners get wrongly joined
-              if (center >= T) { add(leftX, leftY, topX, topY); add(rightX, rightY, bottomX, bottomY); }
-              else { add(leftX, leftY, bottomX, bottomY); add(topX, topY, rightX, rightY); }
-              break;
-            case 6: add(topX, topY, bottomX, bottomY); break;
-            case 7: add(leftX, leftY, topX, topY); break;
-            case 8: add(topX, topY, leftX, leftY); break;
-            case 9: add(topX, topY, bottomX, bottomY); break;
-            case 10: // saddle, mirror of case 5
-              if (center >= T) { add(topX, topY, leftX, leftY); add(bottomX, bottomY, rightX, rightY); }
-              else { add(topX, topY, rightX, rightY); add(leftX, leftY, bottomX, bottomY); }
-              break;
-            case 11: add(topX, topY, rightX, rightY); break;
-            case 12: add(leftX, leftY, rightX, rightY); break;
-            case 13: add(bottomX, bottomY, rightX, rightY); break;
-            case 14: add(leftX, leftY, bottomX, bottomY); break;
-          }
-        }
-      }
-      return segs;
-    }
-
-    // box blur over the coarse presence grid, a couple passes — turns a
-    // binary "snow here / not here" grid into a continuous density field
-    // that peaks toward the middle of a cluster of active cells. That
-    // continuous field is what marching squares needs: multiple threshold
-    // levels on it naturally produce concentric rings shrinking inward,
-    // exactly the look of real elevation/topographic contours.
-    function smoothGrid(grid, gw, gh, radius, passes) {
-      let cur = grid;
-      for (let p = 0; p < passes; p++) {
-        const tmp = new Float32Array(gw * gh);
-        for (let y = 0; y < gh; y++) {
-          for (let x = 0; x < gw; x++) {
-            let sum = 0, n = 0;
-            for (let dy = -radius; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) {
-              const nx = x + dx, ny = y + dy;
-              if (nx < 0 || nx >= gw || ny < 0 || ny >= gh) continue;
-              sum += cur[ny * gw + nx]; n++;
-            }
-            tmp[y * gw + x] = sum / n;
-          }
-        }
-        cur = tmp;
-      }
-      return cur;
-    }
-
     maplibregl.addProtocol('rainviewer', async (params) => {
       const realUrl = params.url.replace('rainviewer://', '');
       const res = await fetch(realUrl);
@@ -534,54 +531,35 @@ function initWeatherProtocol() {
       sctx.drawImage(bitmap, 0, 0);
       const src = sctx.getImageData(0, 0, w, h).data;
 
-      // sample the source at a coarse grid into binary presence, then
-      // smooth heavily into a density field per type — real data used only
-      // as a rough guide for where lines flow, not traced literally, per
-      // "worry less about the data, more about nice connecting lines"
-      const STEP = 12; // coarser than before — fewer, larger cells, simpler resulting shapes
-      const gw = Math.floor(w / STEP) + 1, gh = Math.floor(h / STEP) + 1;
-      const rawSnow = new Float32Array(gw * gh);
-      const rawRain = new Float32Array(gw * gh);
-      for (let gy = 0; gy < gh; gy++) {
-        for (let gx = 0; gx < gw; gx++) {
-          const px = Math.min(w - 1, gx * STEP), py = Math.min(h - 1, gy * STEP);
-          const i = (py * w + px) * 4;
-          if (src[i + 3] < 10) continue;
-          const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
-          if (isSnow) rawSnow[gy * gw + gx] = 1; else rawRain[gy * gw + gx] = 1;
-        }
-      }
-      const snowField = smoothGrid(rawSnow, gw, gh, 3, 3); // heavier smoothing than before — softer, more gently curving lines
-      const rainField = smoothGrid(rawRain, gw, gh, 3, 3);
-
-      // render at 2x the source tile's pixel size — MapLibre stretches this
-      // to fill much more screen space once zoomed in, and the extra native
-      // detail here is what keeps the lines crisp instead of visibly
-      // blurred by that upscaling (raster-resampling stays 'linear', so
-      // nearest-neighbor jaggedness isn't traded in for it)
-      const SCALE = 2;
+      // render at a high internal resolution (4x the source tile) so the
+      // dots stay crisp — not blurred, not chunky — even when MapLibre
+      // stretches this tile to fill a lot of screen space at close zoom
+      const SCALE = 4;
       const out = new OffscreenCanvas(w * SCALE, h * SCALE);
       const octx = out.getContext('2d');
       octx.scale(SCALE, SCALE);
-      octx.lineWidth = 0.7; // thinner
-      octx.lineJoin = 'round';
-      octx.lineCap = 'round';
-      const LEVELS = [0.25, 0.55, 0.85]; // fewer, more spread-out contour intervals than before
 
-      octx.strokeStyle = 'rgba(255,255,255,0.8)';
-      for (const T of LEVELS) {
-        const segs = marchingSquares(snowField, gw, gh, STEP, T);
-        octx.beginPath();
-        for (const [x1, y1, x2, y2] of segs) { octx.moveTo(x1, y1); octx.lineTo(x2, y2); }
-        octx.stroke();
-      }
+      const STEP = 3; // fine sampling — every few source pixels, not a coarse grid
+      const JITTER = STEP * 0.45; // small random offset so dots read as organic scatter, not a rigid grid
+      const DOT_R = 0.55; // tiny — source-pixel space
       const OCEAN = [185, 221, 226]; // matches --ocean, per "make rain that same blue"
-      octx.strokeStyle = `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.75)`;
-      for (const T of LEVELS) {
-        const segs = marchingSquares(rainField, gw, gh, STEP, T);
-        octx.beginPath();
-        for (const [x1, y1, x2, y2] of segs) { octx.moveTo(x1, y1); octx.lineTo(x2, y2); }
-        octx.stroke();
+
+      for (let y = 0; y < h; y += STEP) {
+        for (let x = 0; x < w; x += STEP) {
+          const i = (y * w + x) * 4;
+          if (src[i + 3] < 10) continue; // no signal here
+          const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
+          // "not too dense that you can't see through" — only draw a
+          // fraction of eligible points, thinning out an otherwise-solid
+          // area into a scattered, see-through dot pattern
+          if (Math.random() > 0.55) continue;
+          const dx = x + (Math.random() - 0.5) * 2 * JITTER;
+          const dy = y + (Math.random() - 0.5) * 2 * JITTER;
+          octx.fillStyle = isSnow ? 'rgba(255,255,255,0.85)' : `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.8)`;
+          octx.beginPath();
+          octx.arc(dx, dy, DOT_R, 0, Math.PI * 2);
+          octx.fill();
+        }
       }
 
       const outBlob = await out.convertToBlob({ type: 'image/png' });

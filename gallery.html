@@ -92,10 +92,10 @@
     transition: opacity 0.6s ease; z-index: 1;
     /* MapLibre remains genuinely full-screen. The atlas boundary is
        rendered inside MapLibre as a geographic white mask. */
-    background: #ffffff;
+    background: #18BFFF;
   }
   #terrainMap .maplibregl-canvas {
-    background: #ffffff;
+    background: #18BFFF;
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }
@@ -760,6 +760,63 @@ function addWeatherLayerIfReady() {
 }
 
 let terrainMapInstance = null;
+
+function makeAtlasMistGeoJSON() {
+  // The atlas remains a real MapLibre geographic mask. Instead of a hard
+  // boundary, build concentric ocean-colored rings that progressively
+  // increase in opacity toward the outside. This lets coastlines/terrain
+  // dissolve naturally into the ocean-colored atmospheric edge.
+  const N = 160;
+  const latFromY = y => (180 / Math.PI) * (2 * Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) - Math.PI / 2);
+  const ring = r => {
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      const x = 0.5 + r * Math.cos(a);
+      const y = 0.5 + r * Math.sin(a);
+      pts.push([(x - 0.5) * 360, latFromY(y)]);
+    }
+    pts.push(pts[0]);
+    return pts;
+  };
+
+  // First cover the portion of the single Web Mercator world outside the
+  // atlas. Keep this translucent so the vivid-blue MapLibre sky can mix
+  // through the outer edge instead of producing a white frame.
+  const outerWorld = [[
+    [-180, -85.05112878], [180, -85.05112878],
+    [180, 85.05112878], [-180, 85.05112878],
+    [-180, -85.05112878]
+  ], ring(0.50)];
+
+  const rings = [
+    [0.40, 0.42, 0.06],
+    [0.42, 0.44, 0.10],
+    [0.44, 0.46, 0.17],
+    [0.46, 0.48, 0.27],
+    [0.48, 0.50, 0.40]
+  ];
+
+  const features = [{
+    type: 'Feature',
+    properties: { opacity: 0.72 },
+    geometry: { type: 'Polygon', coordinates: outerWorld }
+  }];
+
+  for (const [innerR, outerR, opacity] of rings) {
+    features.push({
+      type: 'Feature',
+      properties: { opacity },
+      geometry: {
+        type: 'Polygon',
+        coordinates: [ring(outerR), ring(innerR)]
+      }
+    });
+  }
+
+  return { type: 'FeatureCollection', features };
+}
+
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   initWeatherProtocol();
@@ -774,13 +831,7 @@ function initTerrainMap() {
       sources: {
         atlasWhiteEdge: {
           type: 'geojson',
-          data: {
-            type: 'Feature',
-            geometry: {
-              type: 'Polygon',
-              coordinates: [[[-180, -85.05112878], [180, -85.05112878], [180, 85.05112878], [-180, 85.05112878], [-180, -85.05112878]], [[180.0, 0.0], [179.783182, -8.797409], [179.133251, -17.370696], [178.051772, -25.522933], [176.54135, -33.104057], [174.605626, -40.019094], [172.24926, -46.225636], [169.477932, -51.724329], [166.298316, -56.546678], [162.718073, -60.743392], [158.745828, -64.37492], [154.39115, -67.504615], [149.66453, -70.194272], [144.577356, -72.501516], [139.141882, -74.478488], [133.371203, -76.171405], [127.279221, -77.620624], [120.880612, -78.861017], [114.190791, -79.922477], [107.225875, -80.830473], [100.002642, -81.606608], [92.538494, -82.269129], [84.851413, -82.833397], [76.959917, -83.312288], [68.883018, -83.716557], [60.640174, -84.055131], [52.251242, -84.335365], [43.736432, -84.563256], [35.116258, -84.743609], [26.411485, -84.880183], [17.643085, -84.975791], [8.832181, -85.032389], [0.0, -85.051129], [-8.832181, -85.032389], [-17.643085, -84.975791], [-26.411485, -84.880183], [-35.116258, -84.743609], [-43.736432, -84.563256], [-52.251242, -84.335365], [-60.640174, -84.055131], [-68.883018, -83.716557], [-76.959917, -83.312288], [-84.851413, -82.833397], [-92.538494, -82.269129], [-100.002642, -81.606608], [-107.225875, -80.830473], [-114.190791, -79.922477], [-120.880612, -78.861017], [-127.279221, -77.620624], [-133.371203, -76.171405], [-139.141882, -74.478488], [-144.577356, -72.501516], [-149.66453, -70.194272], [-154.39115, -67.504615], [-158.745828, -64.37492], [-162.718073, -60.743392], [-166.298316, -56.546678], [-169.477932, -51.724329], [-172.24926, -46.225636], [-174.605626, -40.019094], [-176.54135, -33.104057], [-178.051772, -25.522933], [-179.133251, -17.370696], [-179.783182, -8.797409], [-180.0, -0.0], [-179.783182, 8.797409], [-179.133251, 17.370696], [-178.051772, 25.522933], [-176.54135, 33.104057], [-174.605626, 40.019094], [-172.24926, 46.225636], [-169.477932, 51.724329], [-166.298316, 56.546678], [-162.718073, 60.743392], [-158.745828, 64.37492], [-154.39115, 67.504615], [-149.66453, 70.194272], [-144.577356, 72.501516], [-139.141882, 74.478488], [-133.371203, 76.171405], [-127.279221, 77.620624], [-120.880612, 78.861017], [-114.190791, 79.922477], [-107.225875, 80.830473], [-100.002642, 81.606608], [-92.538494, 82.269129], [-84.851413, 82.833397], [-76.959917, 83.312288], [-68.883018, 83.716557], [-60.640174, 84.055131], [-52.251242, 84.335365], [-43.736432, 84.563256], [-35.116258, 84.743609], [-26.411485, 84.880183], [-17.643085, 84.975791], [-8.832181, 85.032389], [-0.0, 85.051129], [8.832181, 85.032389], [17.643085, 84.975791], [26.411485, 84.880183], [35.116258, 84.743609], [43.736432, 84.563256], [52.251242, 84.335365], [60.640174, 84.055131], [68.883018, 83.716557], [76.959917, 83.312288], [84.851413, 82.833397], [92.538494, 82.269129], [100.002642, 81.606608], [107.225875, 80.830473], [114.190791, 79.922477], [120.880612, 78.861017], [127.279221, 77.620624], [133.371203, 76.171405], [139.141882, 74.478488], [144.577356, 72.501516], [149.66453, 70.194272], [154.39115, 67.504615], [158.745828, 64.37492], [162.718073, 60.743392], [166.298316, 56.546678], [169.477932, 51.724329], [172.24926, 46.225636], [174.605626, 40.019094], [176.54135, 33.104057], [178.051772, 25.522933], [179.133251, 17.370696], [179.783182, 8.797409], [180.0, 0.0]]]
-            }
-          }
+          data: makeAtlasMistGeoJSON()
         },
         // Mapterhorn — the terrain source MapLibre's own official 3D
         // Terrain example uses. Faster and higher-res (512px) than the AWS
@@ -867,7 +918,10 @@ function initTerrainMap() {
           id: 'atlas-white-edge',
           type: 'fill',
           source: 'atlasWhiteEdge',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 1 }
+          paint: {
+            'fill-color': '#b9dde2',
+            'fill-opacity': ['get', 'opacity']
+          }
         },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },

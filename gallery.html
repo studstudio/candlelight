@@ -184,7 +184,46 @@ function resize() {
   const b = path.bounds(sphere);
   discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
   discRadius = (b[1][0] - b[0][0]) / 2;
+  bakeWater(); // expensive (canvas blur filter) — only runs here, on load/resize, never per animation frame
   draw();
+}
+
+// rivers/lakes, pre-rendered WITH their blur applied once, at the same
+// fixed (gamma=0) projected coordinates everything else uses — draw() just
+// blits this each frame via the live pan/zoom/rotate transform, the same
+// cheap pattern used elsewhere, instead of recomputing a canvas blur filter
+// on every single animation frame (which is expensive and was the real
+// cause of the spin feeling laggy)
+let waterCanvas = null;
+function bakeWater() {
+  if (!rivers && !lakes) { waterCanvas = null; return; }
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const octx = off.getContext('2d');
+  const bakePath = d3.geoPath(projection, octx);
+  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
+  if (rivers) {
+    octx.save();
+    octx.filter = 'blur(1px)';
+    octx.beginPath(); bakePath(rivers);
+    octx.strokeStyle = oceanColor;
+    octx.globalAlpha = 0.8;
+    octx.lineWidth = 0.4;
+    octx.stroke();
+    octx.restore();
+  }
+  if (lakes) {
+    octx.save();
+    octx.filter = 'blur(1.5px)';
+    octx.beginPath(); bakePath(lakes);
+    octx.fillStyle = oceanColor;
+    octx.globalAlpha = 0.8;
+    octx.fill();
+    octx.restore();
+  }
+  waterCanvas = off;
 }
 
 async function loadGeo(url, isTopo, objectName) {
@@ -240,24 +279,8 @@ function draw() {
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
     ctx.fill();
   }
-  if (rivers) {
-    ctx.save();
-    ctx.filter = `blur(${lw(1)}px)`;
-    ctx.beginPath(); path(rivers);
-    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--ocean');
-    ctx.globalAlpha = 0.8;
-    ctx.lineWidth = lw(0.4);
-    ctx.stroke();
-    ctx.restore();
-  }
-  if (lakes) {
-    ctx.save();
-    ctx.filter = `blur(${lw(1.5)}px)`;
-    ctx.beginPath(); path(lakes);
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--ocean');
-    ctx.globalAlpha = 0.8;
-    ctx.fill();
-    ctx.restore();
+  if (waterCanvas) {
+    ctx.drawImage(waterCanvas, 0, 0, waterCanvas.width, waterCanvas.height);
   }
 
   drawEvents(lw, pr);
@@ -421,38 +444,6 @@ function initWeatherProtocol() {
       })
       .catch((err) => console.warn('GALLERY: RainViewer weather-maps.json fetch failed —', err.message));
 
-    // separable box blur on an alpha channel, run in 3 passes to approximate
-    // a smooth (near-Gaussian) falloff cheaply — used to turn RainViewer's
-    // blocky per-pixel classification into a soft radial-gradient-style fade
-    function boxBlurAlpha(src, w, h, radius, passes) {
-      let cur = src;
-      for (let pass = 0; pass < passes; pass++) {
-        const tmp = new Float32Array(w * h);
-        const norm = radius * 2 + 1;
-        for (let y = 0; y < h; y++) {
-          let sum = 0;
-          for (let x = -radius; x <= radius; x++) sum += cur[y * w + Math.max(0, Math.min(w - 1, x))];
-          tmp[y * w] = sum / norm;
-          for (let x = 1; x < w; x++) {
-            sum += cur[y * w + Math.min(w - 1, x + radius)] - cur[y * w + Math.max(0, x - radius - 1)];
-            tmp[y * w + x] = sum / norm;
-          }
-        }
-        const out = new Float32Array(w * h);
-        for (let x = 0; x < w; x++) {
-          let sum = 0;
-          for (let y = -radius; y <= radius; y++) sum += tmp[Math.max(0, Math.min(h - 1, y)) * w + x];
-          out[x] = sum / norm;
-          for (let y = 1; y < h; y++) {
-            sum += tmp[Math.min(h - 1, y + radius) * w + x] - tmp[Math.max(0, y - radius - 1) * w + x];
-            out[y * w + x] = sum / norm;
-          }
-        }
-        cur = out;
-      }
-      return cur;
-    }
-
     maplibregl.addProtocol('rainviewer', async (params) => {
       const realUrl = params.url.replace('rainviewer://', '');
       const res = await fetch(realUrl);
@@ -460,40 +451,44 @@ function initWeatherProtocol() {
       const blob = await res.blob();
       const bitmap = await createImageBitmap(blob);
       const w = bitmap.width, h = bitmap.height;
-      const off = new OffscreenCanvas(w, h);
-      const octx = off.getContext('2d');
-      octx.drawImage(bitmap, 0, 0);
-      const id = octx.getImageData(0, 0, w, h);
-      const d = id.data;
-      const snowAlpha = new Float32Array(w * h);
-      const rainAlpha = new Float32Array(w * h);
-      for (let i = 0; i < d.length; i += 4) {
-        const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
-        const p = i / 4;
-        if (a < 10) continue;
-        const isSnow = b > 130 && r < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
-        if (isSnow) snowAlpha[p] = 210; else rainAlpha[p] = 150;
-      }
-      // heavy smoothing — the raw per-pixel classification is blocky at this
-      // tile resolution; a strong multi-pass blur trades a little precision
-      // for a genuinely smooth, radially-fading look, which matters more
-      // here than pixel-accurate boundaries
-      const smoothSnow = boxBlurAlpha(snowAlpha, w, h, 3, 3);
-      const smoothRain = boxBlurAlpha(rainAlpha, w, h, 4, 3);
+
+      // read the source only to sample it at a coarse grid — not to process
+      // its pixels directly. What actually gets drawn is our own shape: a
+      // soft radial gradient per active cell, overlapping its neighbors, so
+      // the result is a genuinely smooth organic blob built from the data's
+      // rough shape rather than a blurred copy of its blocky raw pixels.
+      const srcCanvas = new OffscreenCanvas(w, h);
+      const sctx = srcCanvas.getContext('2d');
+      sctx.drawImage(bitmap, 0, 0);
+      const src = sctx.getImageData(0, 0, w, h).data;
+
+      const CELL = 14; // sampling grid spacing, in source pixels — coarser than the raw data on purpose
+      const RADIUS = CELL * 1.7; // overlap neighboring cells so adjacent gradients blend into one continuous shape, not separate dots
       const OCEAN = [185, 221, 226]; // matches --ocean, per "make rain that same blue"
-      for (let p = 0; p < w * h; p++) {
-        const sA = smoothSnow[p], rA = smoothRain[p];
-        const idx = p * 4;
-        if (sA >= rA && sA > 1) {
-          d[idx] = 255; d[idx + 1] = 255; d[idx + 2] = 255; d[idx + 3] = sA;
-        } else if (rA > 1) {
-          d[idx] = OCEAN[0]; d[idx + 1] = OCEAN[1]; d[idx + 2] = OCEAN[2]; d[idx + 3] = rA;
-        } else {
-          d[idx + 3] = 0;
+
+      const out = new OffscreenCanvas(w, h);
+      const octx = out.getContext('2d');
+      for (let y = 0; y < h; y += CELL) {
+        for (let x = 0; x < w; x += CELL) {
+          const i = (y * w + x) * 4;
+          if (src[i + 3] < 10) continue; // no signal at this sample point
+          const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
+          const cx = x + CELL / 2, cy = y + CELL / 2;
+          const grad = octx.createRadialGradient(cx, cy, 0, cx, cy, RADIUS);
+          if (isSnow) {
+            grad.addColorStop(0, 'rgba(255,255,255,0.85)');
+            grad.addColorStop(1, 'rgba(255,255,255,0)');
+          } else {
+            grad.addColorStop(0, `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0.7)`);
+            grad.addColorStop(1, `rgba(${OCEAN[0]},${OCEAN[1]},${OCEAN[2]},0)`);
+          }
+          octx.fillStyle = grad;
+          octx.beginPath();
+          octx.arc(cx, cy, RADIUS, 0, Math.PI * 2);
+          octx.fill();
         }
       }
-      octx.putImageData(id, 0, 0);
-      const outBlob = await off.convertToBlob({ type: 'image/png' });
+      const outBlob = await out.convertToBlob({ type: 'image/png' });
       return { data: await outBlob.arrayBuffer() };
     });
   } catch (err) {
@@ -553,10 +548,11 @@ function initTerrainMap() {
               'interpolate', ['linear'], ['elevation'],
               -200, '#8fc3d6',   // below sea level (bathymetry in the DEM) — matches --water
               0, '#b9dde2',      // sea level — matches the flat map's --ocean exactly
-              3, '#c9dba0',      // waterline, brief green transition
-              80, '#dcd398',     // greenery accent fading back toward beige
-              350, '#ecd191',    // the actual flat-map --land beige — dominant tone from here up
-              2500, '#f0dba0',   // higher ground, barely lighter than base beige
+              5, '#a9d089',      // coast, real green starts immediately
+              300, '#8fbd68',    // lowland — plentiful, saturated green like a standard hypsometric ramp
+              900, '#a8c478',    // mid elevation, green easing toward olive
+              1800, '#c9b989',   // transition band, olive into beige
+              2800, '#ecd191',   // the actual flat-map --land beige
               4200, '#f5e6c0',   // peaks, lightest tone in the palette
             ],
           },
@@ -564,10 +560,12 @@ function initTerrainMap() {
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
-            'hillshade-shadow-color': '#a8845a',
-            'hillshade-highlight-color': '#f5ecd8',
-            'hillshade-accent-color': '#b08a4a',
-            'hillshade-exaggeration': 0.4,
+            // several light beige tones instead of one flat shadow color —
+            // reads as varied terrain texture rather than a uniform tint
+            'hillshade-shadow-color': '#d9c297',
+            'hillshade-highlight-color': '#faf3e0',
+            'hillshade-accent-color': '#e8d4a0',
+            'hillshade-exaggeration': 0.35,
           },
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#b9dde2' } },
@@ -613,17 +611,18 @@ function syncFlatMapToMapLibre() {
 }
 
 const EXIT_ZOOM = 6.5; // MapLibre zoom that triggers handoff back — roughly US-state scale
-const ENTRY_MARGIN = 2.5; // entry zoom must land at least this far above EXIT_ZOOM, or any tiny fluctuation right after entering (even starting a zoom-IN gesture) could immediately trigger a false exit
-const EXIT_GRACE_MS = 1000; // ignore auto-exit checks for a moment after entry, while the camera/terrain is still settling
+const EXIT_GRACE_MS = 400; // ignore the very first zoom event or two right after entry/jumpTo settling
 let enteredAt = 0;
+let lastMapLibreZoom = null; // tracks direction — exit should only fire while actively zooming OUT, never from a single low reading
 
 async function enter3D(lon, lat) {
   if (in3D) return;
   in3D = true;
-  enteredAt = performance.now();
   await loadMapLibre();
   const map3d = initTerrainMap();
-  const zoom = Math.max(3, equivalentMapLibreZoom(lat), EXIT_ZOOM + ENTRY_MARGIN);
+  const zoom = Math.max(3, equivalentMapLibreZoom(lat)); // matches where you actually were on the flat map — no artificial floor
+  lastMapLibreZoom = zoom;
+  enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   document.getElementById('terrainMap').classList.add('active');
   canvas.classList.add('faded');
@@ -633,8 +632,11 @@ async function enter3D(lon, lat) {
 
 function autoExitCheck() {
   if (!in3D) return;
+  const z = terrainMapInstance.getZoom();
+  const prev = lastMapLibreZoom;
+  lastMapLibreZoom = z;
   if (performance.now() - enteredAt < EXIT_GRACE_MS) return; // still settling from entry — ignore
-  if (terrainMapInstance.getZoom() < EXIT_ZOOM) exit3D();
+  if (prev !== null && z < EXIT_ZOOM && z < prev) exit3D(); // below threshold AND actively decreasing — a real zoom-out, not a blip
 }
 
 function exit3D() {

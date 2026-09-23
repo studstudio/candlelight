@@ -64,13 +64,13 @@
       radial-gradient(circle at 84% 74%, rgba(255,255,255,.78) 0 1.5px, transparent 3px),
       rgba(255,255,255,.98);
     background-size: 150px 130px, 190px 160px, 170px 150px, 210px 180px, auto;
-    transition: opacity .48s ease;
+    transition: opacity .72s ease;
     animation: none;
   }
-  #poleFade.active { opacity: 1; animation: snowDrift 3.6s ease-in-out infinite; }
+  #poleFade.active { opacity: 1; animation: snowDrift 5.8s ease-in-out infinite; }
   @keyframes snowDrift {
     0%,100% { background-position: 0 0, 0 0, 0 0, 0 0, 0 0; }
-    50% { background-position: 18px 10px, -14px 8px, 12px -9px, -16px -6px, 0 0; }
+    50% { background-position: 10px 6px, -8px 5px, 7px -5px, -9px -4px, 0 0; }
   }
   #transitionCoords {
     font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
@@ -848,8 +848,6 @@ function initTerrainMap() {
         // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
-        // Natural Earth country geometry for Antarctica only; this gives the polar continent
-        // its own white ice surface while the real DEM hillshade remains visible above it.
         antarcticaGeo: { type: 'geojson', data: antarctica || { type: 'FeatureCollection', features: [] } },
         // Stadia Maps / Stamen Toner labels — transparent raster overlay
         // containing place names and road names. Use the raw 256px XYZ PNG
@@ -894,35 +892,17 @@ function initTerrainMap() {
             ],
           },
         },
+        // Subtle Antarctica ice tint: the terrain DEM and real hillshade remain visible.
+        // This is intentionally translucent rather than an opaque geographic mask.
         {
-          id: 'antarctica-ice', type: 'fill', source: 'antarcticaGeo',
-          paint: {
-            'fill-color': '#ffffff',
-            'fill-opacity': 0.92,
-          },
+          id: 'antarctica-ice-tint', type: 'fill', source: 'antarcticaGeo',
+          paint: { 'fill-color': '#f7fbff', 'fill-opacity': 0.58, 'fill-antialias': true },
         },
-        // A soft polar extension fades the southern continent into white before
-        // the blue sky/horizon. It is intentionally made from broad latitude
-        // bands so it continues to the finite Mercator pole rather than ending
-        // at the coastline like a hard mask.
-        {
-          id: 'south-polar-mist-outer', type: 'fill', source: 'southPolarOuter',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.12 },
-        },
-        {
-          id: 'south-polar-mist-mid', type: 'fill', source: 'southPolarMid',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.28 },
-        },
-        {
-          id: 'south-polar-mist-inner', type: 'fill', source: 'southPolarInner',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.52 },
-        },
-        {
-          id: 'south-polar-mist-core', type: 'fill', source: 'southPolarCore',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.78 },
-        },
-        {
-          id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
+        // Keep the white transition only at the southern edge; it should not wash over the map.
+        { id: 'south-polar-mist-outer', type: 'fill', source: 'southPolarOuter', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.08 } },
+        { id: 'south-polar-mist-mid', type: 'fill', source: 'southPolarMid', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.18 } },
+        { id: 'south-polar-mist-inner', type: 'fill', source: 'southPolarInner', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.42 } },
+        { id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
             // lighter/creamier overall (matching our warm beige palette)
             // while keeping real contrast between shadow and highlight —

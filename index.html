@@ -288,6 +288,13 @@
   }
   .modal-actions { display: flex; gap: 10px; margin-top: 4px; }
   .modal-actions button { flex: 1; padding: 12px; border-radius: 10px; border: none; font-size: 14px; font-weight: 600; }
+  .privacy-toggle { display: flex; gap: 10px; margin: 18px 0 4px; }
+  .privacy-toggle-btn {
+    flex: 1; padding: 10px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg-elevated); color: var(--cream-dim); font-size: 13px; font-weight: 600;
+  }
+  .privacy-toggle-btn.active { background: var(--ember); color: #1a1108; border-color: var(--ember); }
+  .privacy-hint { font-size: 10px; color: #6b6155; text-align: center; margin: -2px 0 0; }
   .btn-cancel { background: var(--line); color: var(--cream-dim); }
   .btn-save { background: var(--ember); color: #1a1108; }
   .btn-remove { background: transparent; color: var(--fail); font-size: 12px; border: none; margin-top: 10px; padding: 6px; width: 100%; }
@@ -423,6 +430,12 @@
 </div>
 <p class="hold-hint">tap to select · hold to edit</p>
 
+<div class="privacy-toggle" id="privacyToggle">
+  <button type="button" class="privacy-toggle-btn active" id="privacyPrivateBtn">private</button>
+  <button type="button" class="privacy-toggle-btn" id="privacyGalleryBtn">gallery</button>
+</div>
+<p class="privacy-hint" id="privacyHint">only they'll see this</p>
+
 <div class="send-zone">
   <button class="send-btn" id="sendBtn" disabled>
     <svg viewBox="0 0 24 24" fill="none" stroke="#1a1108" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -500,6 +513,10 @@ const contactIdInput = document.getElementById('contactId');
 const modalSave = document.getElementById('modalSave');
 const modalCancel = document.getElementById('modalCancel');
 const modalRemove = document.getElementById('modalRemove');
+const privacyPrivateBtn = document.getElementById('privacyPrivateBtn');
+const privacyGalleryBtn = document.getElementById('privacyGalleryBtn');
+const privacyHint = document.getElementById('privacyHint');
+let shareToGallery = false; // the Private/Gallery toggle's current state — independent of which contact is selected
 
 // ============================================================
 // PANEL HARDWARE CONFIG: matches a 4.2" e-ink module (400x300).
@@ -1011,6 +1028,19 @@ modalRemove.onclick = () => {
 };
 
 function updateSendState() { sendBtn.disabled = !(hasPhoto && selectedContact !== null) || selectedContactQueueFull; }
+
+// ---------- private/gallery toggle ----------
+// Independent of which contact is selected: it decides whether the SAME
+// composed image also gets copied to the public gallery when sent, not
+// which endpoint the send goes to — the lamp send always happens.
+function setShareToGallery(on) {
+  shareToGallery = on;
+  privacyPrivateBtn.classList.toggle('active', !on);
+  privacyGalleryBtn.classList.toggle('active', on);
+  privacyHint.textContent = on ? "this'll also show up in the public gallery" : "only they'll see this";
+}
+privacyPrivateBtn.onclick = () => setShareToGallery(false);
+privacyGalleryBtn.onclick = () => setShareToGallery(true);
 
 async function checkLastSeen(lampId) {
   lastSeen.textContent = 'checking…';
@@ -2131,6 +2161,9 @@ async function buildChunkedPNG() {
   return new Blob([finalBytes], { type:'image/png' });
 }
 
+// the real gallery tag this ships with eventually — 'test-gallery' for now
+const GALLERY_UPLOAD_TAG = 'test-gallery';
+
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
   const contacts = loadContacts();
@@ -2156,8 +2189,25 @@ sendBtn.onclick = async () => {
       }
     }
     if (!res.ok) throw new Error('Upload failed');
-    sendStatus.textContent = `sent to ${target.name}`;
-    sendStatus.classList.add('success');
+
+    // same composed blob, mirrored to the public gallery when the toggle
+    // is on — a failure here shouldn't read as the whole send having
+    // failed, since it already reached the lamp either way
+    let galleryNote = '';
+    if (shareToGallery) {
+      try {
+        const gRes = await fetch(`${WORKER_BASE_URL}/gallery/${GALLERY_UPLOAD_TAG}/upload`, {
+          method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob
+        });
+        if (!gRes.ok) throw new Error('gallery upload failed');
+      } catch (err) {
+        console.warn('gallery mirror upload failed —', err.message);
+        galleryNote = ' (gallery share failed)';
+      }
+    }
+
+    sendStatus.textContent = `sent to ${target.name}${galleryNote}`;
+    sendStatus.classList.add(galleryNote ? 'fail' : 'success');
   } catch (err) {
     sendStatus.textContent = 'could not send — check connection';
     sendStatus.classList.add('fail');
@@ -2171,6 +2221,7 @@ document.addEventListener('gesturechange', (e) => e.preventDefault());
 document.addEventListener('gestureend', (e) => e.preventDefault());
 
 renderContacts();
+setShareToGallery(false);
 liveCanvas.width = targetW; liveCanvas.height = targetH;
 scratchCanvas.width = targetW; scratchCanvas.height = targetH;
 updateIndicators(); // sync the ring indicators to the default state

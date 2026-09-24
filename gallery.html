@@ -125,41 +125,45 @@
     transition: opacity 0.6s ease; z-index: 1;
     /* This shows through anywhere MapLibre genuinely renders nothing at
        all — not just before the first frame, but permanently wherever
-       the terrain source has a real coverage gap (confirmed: Mapterhorn's
-       DEM data has real gaps near Antarctica) or the mesh simply doesn't
-       extend that far. No raster overlay, fog, or terrain-draped layer
-       can ever affect this — those only apply to pixels MapLibre actually
-       draws something on, and this is genuinely empty canvas: no geometry,
-       no camera tracking, nothing we can dynamically light or texture the
-       way real terrain gets rendered. What we CAN do is make the static
-       fallback itself read as soft atmospheric haze rather than a flat
-       paint-bucket fill: overlapping soft-edged color patches instead of
-       one flat tone (a film-grain SVG texture was tried here too, but
-       overlay-blending neutral/unstyled noise systematically desaturates
-       whatever's underneath toward gray — that's why it's gone; the
-       patches alone read as varied pale white/blue without that problem).
+       the terrain source has a real coverage gap or the mesh simply
+       doesn't extend that far (most of that gap is now filled by real
+       mirrored ice texture — see decodeIceTile
+       above — this is only the remaining true edge). No raster overlay,
+       fog, or terrain-draped layer can ever affect this: genuinely empty
+       canvas, no geometry, nothing to dynamically light.
+       An earlier version of this sized the texture as a PERCENTAGE of the
+       whole container (a white cap 0-6%, patches spread across 0-100%) —
+       which looks fine when the void fills most of the screen, but when
+       it's only a thin sliver at the very top edge (the much more common
+       case — you're usually not staring straight down a void, just
+       glimpsing its edge), you only ever see the first few percent of
+       that design: the solid white cap, nothing else, which is exactly
+       the "still just one flat color" bug. Fixed by sizing the texture in
+       real PIXELS with background-repeat instead of container percentage,
+       so it tiles at a consistent visual scale no matter how much (or
+       little) of the screen the void actually occupies.
        This used to be solid #18BFFF (vivid ocean blue) — the actual root
        cause of the original "vivid blue void" complaint this whole
        conversation started from, sitting in plain CSS the whole time.
     */
-    background-color: #f2f7fa;
+    background-color: #eef4f8;
     background-image:
-      linear-gradient(to bottom, #ffffff 0%, #ffffff 6%, rgba(255,255,255,0) 28%),
-      radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
-      radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
-      radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
-      radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
-      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
+      radial-gradient(circle at 30% 30%, rgba(255,255,255,0.95) 0%, transparent 60%),
+      radial-gradient(circle at 70% 65%, rgba(178,203,219,0.55) 0%, transparent 58%),
+      radial-gradient(circle at 20% 80%, rgba(200,219,231,0.5) 0%, transparent 55%),
+      radial-gradient(circle at 85% 20%, rgba(188,209,224,0.5) 0%, transparent 55%);
+    background-size: 160px 160px, 110px 110px, 95px 95px, 130px 130px;
+    background-repeat: repeat;
   }
   #terrainMap .maplibregl-canvas {
-    background-color: #f2f7fa;
+    background-color: #eef4f8;
     background-image:
-      linear-gradient(to bottom, #ffffff 0%, #ffffff 6%, rgba(255,255,255,0) 28%),
-      radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
-      radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
-      radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
-      radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
-      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
+      radial-gradient(circle at 30% 30%, rgba(255,255,255,0.95) 0%, transparent 60%),
+      radial-gradient(circle at 70% 65%, rgba(178,203,219,0.55) 0%, transparent 58%),
+      radial-gradient(circle at 20% 80%, rgba(200,219,231,0.5) 0%, transparent 55%),
+      radial-gradient(circle at 85% 20%, rgba(188,209,224,0.5) 0%, transparent 55%);
+    background-size: 160px 160px, 110px 110px, 95px 95px, 130px 130px;
+    background-repeat: repeat;
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }
@@ -1178,11 +1182,12 @@ function handlePoleWrap() {
 // ============================================================
 let antarcticProtocolInstalled = false;
 
-// Real, successfully-decoded ice tiles, cached so a genuine Mapterhorn gap
-// can borrow a nearby one instead of going blank — see findNearbyAntarcticTile
-// below. Bounded size so long panning sessions don't grow this forever.
+// Real, successfully-decoded ice tiles, cached both so repeat requests are
+// free AND so a genuine Mapterhorn gap can borrow a nearby one. Bounded
+// size so long panning sessions don't grow this forever.
 const antarcticTileCache = new Map(); // "z/x/y" -> ImageData
 const ANTARCTIC_CACHE_MAX = 300;
+const antarcticInFlight = new Map(); // "z/x/y" -> Promise<ImageData|null>, so concurrent probes for the same tile share one fetch instead of duplicating it
 
 function cacheAntarcticTile(z, x, y, imageData) {
   const key = `${z}/${x}/${y}`;
@@ -1190,23 +1195,6 @@ function cacheAntarcticTile(z, x, y, imageData) {
   if (antarcticTileCache.size > ANTARCTIC_CACHE_MAX) {
     antarcticTileCache.delete(antarcticTileCache.keys().next().value); // Map preserves insertion order, so this evicts the oldest
   }
-}
-
-// Same column first (north/south neighbors read as the most visually
-// coherent choice for "ice continuing into the distance"), then same row,
-// expanding outward one ring at a time.
-function findNearbyAntarcticTile(z, x, y, maxRadius) {
-  for (let r = 1; r <= maxRadius; r++) {
-    for (const dy of [-r, r]) {
-      const hit = antarcticTileCache.get(`${z}/${x}/${y + dy}`);
-      if (hit) return hit;
-    }
-    for (const dx of [-r, r]) {
-      const hit = antarcticTileCache.get(`${z}/${x + dx}/${y}`);
-      if (hit) return hit;
-    }
-  }
-  return null;
 }
 
 // A genuine top-bottom mirror, not just a repeat — reads as a reflection
@@ -1221,42 +1209,28 @@ function mirrorImageDataVertically(imgData) {
   return out;
 }
 
-function installAntarcticTerrainProtocol() {
-  if (antarcticProtocolInstalled) return;
-  antarcticProtocolInstalled = true;
+// Fetches ONE Mapterhorn tile and decodes it into ice-shaded ImageData, or
+// null if that tile has no real data. Used both for the tile MapLibre
+// actually asked for AND for probing candidate neighbors when that one is
+// missing — same logic either way, just the z/x/y differ.
+async function decodeIceTile(z, x, y, abortController) {
+  const key = `${z}/${x}/${y}`;
+  const cached = antarcticTileCache.get(key);
+  if (cached) return cached;
+  if (antarcticInFlight.has(key)) return antarcticInFlight.get(key);
 
-  maplibregl.addProtocol('antarctic-relief', async (params, abortController) => {
-    const parts = params.url.replace('antarctic-relief://', '').split('/').map(Number);
-    const z = parts[0], x = parts[1], y = parts[2];
+  const promise = (async () => {
     const size = 512;
     const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
-    const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
-    if (!response.ok) {
-      // Mapterhorn's coverage has real gaps (their own docs note it
-      // started with a European-DEM focus, not full global coverage).
-      // Rather than leaving that as empty space, borrow a nearby ALREADY
-      // real, already-rendered ice tile and mirror it — genuine ice
-      // texture that reads as reflecting/continuing outward, instead of a
-      // flat fallback color or a hard cutoff to nothing.
-      const nearby = findNearbyAntarcticTile(z, x, y, 6);
-      if (nearby) {
-        const mirrored = mirrorImageDataVertically(nearby);
-        const mirrorCanvas = new OffscreenCanvas(size, size);
-        const mirrorCtx = mirrorCanvas.getContext('2d');
-        mirrorCtx.putImageData(mirrored, 0, 0);
-        const mirrorBlob = await mirrorCanvas.convertToBlob({ type: 'image/png' });
-        return { data: await mirrorBlob.arrayBuffer() };
-      }
-      // Nothing nearby cached yet (e.g. the very first tiles requested
-      // this session) — fall back to blank, letting the CSS fallback
-      // background (see #terrainMap above) show through instead.
-      const blankCanvas = new OffscreenCanvas(size, size);
-      blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
-      const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
-      return { data: await blankBlob.arrayBuffer() };
+    let response;
+    try {
+      response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
+    } catch {
+      return null; // aborted or a network failure — treat the same as "no data here"
     }
-    const bitmap = await createImageBitmap(await response.blob());
+    if (!response.ok) return null;
 
+    const bitmap = await createImageBitmap(await response.blob());
     const canvas = document.createElement('canvas');
     canvas.width = size; canvas.height = size;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -1311,9 +1285,65 @@ function installAntarcticTerrainProtocol() {
         out.data[di] = rgb[0]; out.data[di + 1] = rgb[1]; out.data[di + 2] = rgb[2]; out.data[di + 3] = 255;
       }
     }
-    ctx.putImageData(out, 0, 0);
     cacheAntarcticTile(z, x, y, out);
-    return { data: await createImageBitmap(canvas) };
+    return out;
+  })();
+
+  antarcticInFlight.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    antarcticInFlight.delete(key);
+  }
+}
+
+async function imageDataToPngArrayBuffer(imgData) {
+  const canvas = new OffscreenCanvas(imgData.width, imgData.height);
+  canvas.getContext('2d').putImageData(imgData, 0, 0);
+  const blob = await canvas.convertToBlob({ type: 'image/png' });
+  return blob.arrayBuffer();
+}
+
+function installAntarcticTerrainProtocol() {
+  if (antarcticProtocolInstalled) return;
+  antarcticProtocolInstalled = true;
+
+  maplibregl.addProtocol('antarctic-relief', async (params, abortController) => {
+    const parts = params.url.replace('antarctic-relief://', '').split('/').map(Number);
+    const z = parts[0], x = parts[1], y = parts[2];
+
+    const real = await decodeIceTile(z, x, y, abortController);
+    if (real) return { data: await imageDataToPngArrayBuffer(real) };
+
+    // Mapterhorn's coverage has real gaps (their own docs note it started
+    // with a European-DEM focus, not full global coverage). Rather than
+    // leaving that as empty space, ACTIVELY fetch nearby candidate tiles
+    // ourselves — checking the cache alone isn't reliable here, since
+    // MapLibre requests many tiles in parallel and a 404 comes back far
+    // faster than a real tile's full fetch+decode+shade pipeline, so a
+    // neighbor's data usually hasn't finished processing yet even though
+    // it's "on its way". Fetching it ourselves removes that race entirely.
+    // Same column first (north/south neighbors read as the most visually
+    // coherent choice for "ice continuing into the distance"), then same
+    // row, expanding outward one ring at a time.
+    for (let r = 1; r <= 5; r++) {
+      const candidates = [[x, y - r], [x, y + r], [x - r, y], [x + r, y]];
+      for (const [nx, ny] of candidates) {
+        const nearby = await decodeIceTile(z, nx, ny, abortController);
+        if (nearby) {
+          const mirrored = mirrorImageDataVertically(nearby);
+          return { data: await imageDataToPngArrayBuffer(mirrored) };
+        }
+      }
+    }
+
+    // Nothing real within range — truly a void here. Fall back to blank,
+    // letting the CSS fallback background (see #terrainMap above) show
+    // through instead.
+    const blankCanvas = new OffscreenCanvas(512, 512);
+    blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
+    const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
+    return { data: await blankBlob.arrayBuffer() };
   });
 }
 

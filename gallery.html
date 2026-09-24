@@ -837,7 +837,7 @@ function makeAntarcticShaderLayer() {
   const layer = {
     id: 'antarctic-terrain-shader',
     type: 'custom',
-    renderingMode: '3d',
+    renderingMode: '2d',
     program: null,
     gl: null,
     aPos: -1,
@@ -898,6 +898,7 @@ function makeAntarcticShaderLayer() {
           // palette itself; actual 3D relief remains supplied by the DEM
           // geometry and MapLibre's depth buffer.
           fragColor = vec4(ice, 1.0);
+          if (v_lat > -59.0) discard;
         }
       `;
       const compile = (type, src) => {
@@ -1020,7 +1021,8 @@ function makeAntarcticShaderLayer() {
       }
     },
 
-    render({gl, modelViewProjectionMatrix}) {
+    render({gl, defaultProjectionData}) {
+      const modelViewProjectionMatrix = defaultProjectionData.mainMatrix;
       if (!this.program || !this.buffer || !this.vertexCount) return;
       gl.useProgram(this.program);
       gl.uniformMatrix4fv(this.uMatrix, false, modelViewProjectionMatrix);
@@ -1113,7 +1115,7 @@ function initTerrainMap() {
   terrainMapInstance.on('load', () => {
     // The shader is a MapLibre custom 3D layer, not a geographic fill. It
     // samples MapLibre's live DEM and uses lat/lon only inside the shader.
-    terrainMapInstance.addLayer(makeAntarcticShaderLayer(), 'lakes');
+    terrainMapInstance.addLayer(makeAntarcticShaderLayer());
     // It is intentionally inserted immediately before the lakes layer: above
     // color-relief + hillshade, below hydrology and labels. It is not a fill
     // and does not use Antarctic country geometry.

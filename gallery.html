@@ -14,9 +14,11 @@
     --ember-dim: rgba(232, 130, 60, 0.55);
     --cream: #f2e9d8;
     --cream-dim: rgba(242, 233, 216, 0.55);
-    /* bright atlas-style palette for the map surface itself, distinct from
-       the dark app chrome around it — legibility over mood here */
-    --ocean: #b9dde2;
+    /* single vivid water color for the 2D azimuthal (docked + undocked) and
+       the transition fade — halfway between the old pastel inlay tone and
+       the 3D map's vivid ocean blue (#18BFFF), so nothing needs to blend
+       or branch on docked state anymore */
+    --ocean: #69cef1;
     --land: #ecd191;
     --land-line: #b08a4a;
     --water: #8fc3d6;
@@ -324,7 +326,8 @@ function resize() {
   const b = path.bounds(sphere);
   discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
   discRadius = (b[1][0] - b[0][0]) / 2;
-  bakeWater(); // expensive (canvas blur filter) — only runs here, on load/resize, never per animation frame
+  // rivers/lakes now draw live as vectors each frame (see draw()) — no
+  // pre-baked bitmap to build on resize anymore
 
   // inlay geometry — read from the actual rendered #mapInlay element rather
   // than recomputed independently, so the JS math driving the dock
@@ -353,40 +356,6 @@ function resize() {
   }
 }
 
-// rivers/lakes, pre-rendered WITH their blur applied once, at the same
-// fixed (gamma=0) projected coordinates everything else uses — draw() just
-// blits this each frame via the live pan/zoom/rotate transform, the same
-// cheap pattern used elsewhere, instead of recomputing a canvas blur filter
-// on every single animation frame (which is expensive and was the real
-// cause of the spin feeling laggy)
-let waterCanvas = null;
-function bakeWater() {
-  if (!rivers && !lakes) { waterCanvas = null; return; }
-  const rect = canvas.parentElement.getBoundingClientRect();
-  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
-  const off = document.createElement('canvas');
-  off.width = w; off.height = h;
-  const octx = off.getContext('2d');
-  const bakePath = d3.geoPath(projection, octx);
-  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
-  if (rivers) {
-    octx.save();
-    octx.beginPath(); bakePath(rivers);
-    octx.strokeStyle = oceanColor;
-    octx.lineWidth = 0.4;
-    octx.stroke();
-    octx.restore();
-  }
-  if (lakes) {
-    octx.save();
-    octx.beginPath(); bakePath(lakes);
-    octx.fillStyle = oceanColor;
-    octx.fill();
-    octx.restore();
-  }
-  waterCanvas = off;
-}
-
 async function loadGeo(url, isTopo, objectName) {
   try {
     const res = await fetch(url);
@@ -401,15 +370,9 @@ async function loadGeo(url, isTopo, objectName) {
 
 const sphere = { type: 'Sphere' };
 
-// 3D terrain map's ocean blue (color-relief sea-level stop / sky-color) —
-// the azimuthal's own --ocean is the pastel inlay tone; this is only used to
-// compute a blend, never applied directly.
-const VIBRANT_OCEAN = '#18BFFF';
-function lerpHexColor(hexA, hexB, t) {
-  const a = hexA.replace('#', ''), b = hexB.replace('#', '');
-  const ar = parseInt(a.slice(0, 2), 16), ag = parseInt(a.slice(2, 4), 16), ab = parseInt(a.slice(4, 6), 16);
-  const br = parseInt(b.slice(0, 2), 16), bg = parseInt(b.slice(2, 4), 16), bb = parseInt(b.slice(4, 6), 16);
-  return [Math.round(ar + (br - ar) * t), Math.round(ag + (bg - ag) * t), Math.round(ab + (bb - ab) * t)];
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
 }
 
 
@@ -427,8 +390,8 @@ function draw() {
 
   // two-finger spin: a pure rotation around the disc's (fixed) center,
   // layered on top of pan/zoom. Decoupled from the projection itself, so it
-  // applies identically and cheaply to both the live vector paths below AND
-  // the pre-baked terrain bitmap, without needing to re-bake anything.
+  // applies identically and cheaply to everything drawn below without any
+  // extra bookkeeping.
   ctx.translate(discCenter.x, discCenter.y);
   ctx.rotate(rotationGamma * Math.PI / 180);
   ctx.translate(-discCenter.x, -discCenter.y);
@@ -437,16 +400,11 @@ function draw() {
   const pr = (px) => px / transform.k; // same for point radii
 
   // ocean fades to transparent near the disc's outer edge, so it blends
-  // softly into the beige page background instead of a hard circular border.
-  // Docked (small inlay): pastel --ocean as-is. Undocked (tapped into the
-  // zoomed azimuthal): halfway between that pastel tone and the 3D map's
-  // more vibrant ocean blue, so the transition into 3D doesn't jump.
+  // softly into the beige page background instead of a hard circular border
   const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
-  const pastelOcean = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
-  const [or, og, ob] = docked
-    ? lerpHexColor(pastelOcean, pastelOcean, 0)
-    : lerpHexColor(pastelOcean, VIBRANT_OCEAN, 0.5);
-  oceanGrad.addColorStop(0, `rgb(${or}, ${og}, ${ob})`);
+  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
+  const [or, og, ob] = hexToRgb(oceanColor);
+  oceanGrad.addColorStop(0, oceanColor);
   oceanGrad.addColorStop(1, `rgba(${or}, ${og}, ${ob}, 0)`);
   ctx.beginPath(); path(sphere);
   ctx.fillStyle = oceanGrad;
@@ -457,8 +415,18 @@ function draw() {
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
     ctx.fill();
   }
-  if (waterCanvas) {
-    ctx.drawImage(waterCanvas, 0, 0, waterCanvas.width, waterCanvas.height);
+  // rivers/lakes drawn live as vector paths (not pre-baked to a bitmap) so
+  // they stay crisp at any zoom/DPI, same as land/ocean above
+  if (rivers) {
+    ctx.beginPath(); path(rivers);
+    ctx.strokeStyle = oceanColor;
+    ctx.lineWidth = lw(0.4);
+    ctx.stroke();
+  }
+  if (lakes) {
+    ctx.beginPath(); path(lakes);
+    ctx.fillStyle = oceanColor;
+    ctx.fill();
   }
 
   drawEvents(lw, pr);
@@ -905,19 +873,19 @@ function initTerrainMap() {
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
-        // Stamen Terrain's own background layer group (landcover/water,
-        // no lines or labels) — an experiment layered at half opacity over
-        // our existing color-relief + hillshade, not a replacement for them.
-        stamenTerrainBackground: {
+        // Stamen Watercolor's original raster tileset — .jpg, not .png,
+        // and Stadia's own docs recommend capping requests at zoom 16
+        // since the legacy tile set has gaps above that.
+        stamenWatercolor: {
           type: 'raster',
           tiles: [
-            'https://tiles.stadiamaps.com/tiles/stamen_terrain_background/{z}/{x}/{y}.png' +
+            'https://tiles.stadiamaps.com/tiles/stamen_watercolor/{z}/{x}/{y}.jpg' +
               (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
           ],
           tileSize: 256,
           minzoom: 0,
-          maxzoom: 20,
-          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
+          maxzoom: 16,
+          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
       },
       layers: [
@@ -957,16 +925,15 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        // Half-opacity experiment: Stamen Terrain's background raster
-        // (landcover/water shading) laid over our own color-relief +
-        // hillshade. Sits below Antarctica/lakes/rivers/labels so those
-        // stay crisp on top.
+        // 0.30-opacity experiment: Stamen Watercolor's raster wash laid
+        // over our own color-relief + hillshade. Sits below
+        // Antarctica/lakes/rivers/labels so those stay crisp on top.
         {
-          id: 'stamen-terrain-background',
+          id: 'stamen-watercolor',
           type: 'raster',
-          source: 'stamenTerrainBackground',
+          source: 'stamenWatercolor',
           paint: {
-            'raster-opacity': 0.5,
+            'raster-opacity': 0.30,
             'raster-fade-duration': 0
           }
         },
@@ -996,7 +963,8 @@ function initTerrainMap() {
           source: 'stamenTonerLabels',
           paint: {
             'raster-opacity': 1.0,
-            'raster-contrast': -0.6,
+            'raster-contrast': -0.85,
+            'raster-brightness-min': 0.35,
             'raster-fade-duration': 0
           }
         },

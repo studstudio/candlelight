@@ -417,7 +417,7 @@ function draw() {
   }
   // rivers/lakes drawn live as vector paths (not pre-baked to a bitmap) so
   // they stay crisp at any zoom/DPI, same as land/ocean above
-  if (rivers) {
+  if (!docked && rivers) {
     ctx.beginPath(); path(rivers);
     ctx.strokeStyle = oceanColor;
     ctx.lineWidth = lw(0.4);

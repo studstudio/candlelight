@@ -925,8 +925,8 @@ function initTerrainMap() {
     style: {
       version: 8,
       sources: {
-        terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
-        hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json', encoding: 'terrarium', tileSize: 512 },
+        hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json', encoding: 'terrarium', tileSize: 512 },
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
         antarcticRelief: {
@@ -957,6 +957,19 @@ function initTerrainMap() {
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
           },
+        },
+        // IMPORTANT: this layer was accidentally omitted from the previous
+        // build. The source existed, but nothing ever referenced it, so the
+        // generated Antarctic pixels could never reach the map. This is the
+        // actual raster layer that puts the computed ice relief onto the
+        // real MapLibre terrain surface.
+        {
+          id: 'antarctic-relief',
+          type: 'raster',
+          source: 'antarcticRelief',
+          minzoom: 0,
+          maxzoom: 14,
+          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 0 }
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: {'fill-color':'#18BFFF'} },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: {'line-color':'#8fc3d6','line-width':1.2} },

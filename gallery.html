@@ -890,19 +890,18 @@ function initTerrainMap() {
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
-        // Stamen Watercolor's original raster tileset — .jpg, not .png,
-        // and Stadia's own docs recommend capping requests at zoom 16
-        // since the legacy tile set has gaps above that.
-        stamenWatercolor: {
+        // Stamen Toner's line-only layer group (roads, borders — no fill,
+        // no labels), at 0.6 opacity over color-relief + hillshade.
+        stamenTonerLines: {
           type: 'raster',
           tiles: [
-            'https://tiles.stadiamaps.com/tiles/stamen_watercolor/{z}/{x}/{y}.jpg' +
+            'https://tiles.stadiamaps.com/tiles/stamen_toner_lines/{z}/{x}/{y}.png' +
               (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
           ],
           tileSize: 256,
           minzoom: 0,
-          maxzoom: 16,
-          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
+          maxzoom: 20,
+          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
       },
       layers: [
@@ -942,15 +941,15 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        // 0.30-opacity experiment: Stamen Watercolor's raster wash laid
-        // over our own color-relief + hillshade. Sits below
+        // 0.6-opacity experiment: Stamen Toner's line layer (roads,
+        // borders) laid over our own color-relief + hillshade. Sits below
         // Antarctica/lakes/rivers/labels so those stay crisp on top.
         {
-          id: 'stamen-watercolor',
+          id: 'stamen-toner-lines',
           type: 'raster',
-          source: 'stamenWatercolor',
+          source: 'stamenTonerLines',
           paint: {
-            'raster-opacity': 0.30,
+            'raster-opacity': 0.6,
             'raster-fade-duration': 0
           }
         },
@@ -980,8 +979,7 @@ function initTerrainMap() {
           source: 'stamenTonerLabels',
           paint: {
             'raster-opacity': 1.0,
-            'raster-contrast': -0.85,
-            'raster-brightness-min': 0.35,
+            'raster-contrast': -0.6,
             'raster-fade-duration': 0
           }
         },

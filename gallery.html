@@ -14,11 +14,9 @@
     --ember-dim: rgba(232, 130, 60, 0.55);
     --cream: #f2e9d8;
     --cream-dim: rgba(242, 233, 216, 0.55);
-    /* single vivid water color for the 2D azimuthal (docked + undocked) and
-       the transition fade — halfway between the old pastel inlay tone and
-       the 3D map's vivid ocean blue (#18BFFF), so nothing needs to blend
-       or branch on docked state anymore */
-    --ocean: #69cef1;
+    /* bright atlas-style palette for the map surface itself, distinct from
+       the dark app chrome around it — legibility over mood here */
+    --ocean: #b9dde2;
     --land: #ecd191;
     --land-line: #b08a4a;
     --water: #8fc3d6;
@@ -99,27 +97,16 @@
   #legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4a3a22; }
   #location { text-align: center; font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; color: #4a3a22; }
   #locationCity { font-size: 12px; font-weight: 500; letter-spacing: 0.03em; }
-  #locationCoords {
-    font-size: 10px; font-weight: 300; letter-spacing: 0.06em; opacity: 0.75; margin-top: 2px;
-    display: block; color: inherit; text-decoration: none;
-  }
-  #locationCoords:hover, #locationCoords:focus-visible { opacity: 1; text-decoration: underline; }
-  #locationWeather { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
+  #locationCoords { font-size: 10px; font-weight: 300; letter-spacing: 0.06em; opacity: 0.75; margin-top: 2px; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   #count { font-size: 11px; color: #4a3a22; text-align: right; }
   #count b { color: #2a1f10; font-size: 16px; display: block; }
-  #layerToggles {
-    position: absolute; right: 14px; top: 14px; z-index: 3;
-    display: none; flex-direction: column; gap: 8px;
+  #resetBtn {
+    position: absolute; right: 14px; top: 14px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
+    font-size: 11px; color: var(--cream-dim); z-index: 3;
   }
-  #layerToggles.visible { display: flex; }
-  .layerToggle {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 7px 11px; font-size: 11px; color: var(--cream-dim);
-    transition: color 0.15s ease, border-color 0.15s ease;
-  }
-  .layerToggle.active { color: var(--ember); border-color: var(--ember-dim); }
   #terrainMap {
     position: absolute; inset: 0; opacity: 0; pointer-events: none;
     transition: opacity 0.6s ease; z-index: 1;
@@ -160,10 +147,7 @@
     <div id="poleFade"></div>
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
-    <div id="layerToggles">
-      <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
-      <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
-    </div>
+    <button id="resetBtn">reset view</button>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
     <div id="empty">
@@ -179,8 +163,7 @@
     </div>
     <div id="location">
       <div id="locationCity"></div>
-      <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
-      <div id="locationWeather"></div>
+      <div id="locationCoords"></div>
     </div>
     <div id="count"><b id="countNum">0</b>lights shared</div>
   </div>
@@ -202,16 +185,6 @@ async function loadMapLibre() {
 // ---- config ----
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
-// Stadia Maps tiles (used for the Stamen Toner labels overlay below) require
-// auth for anything not served from localhost/127.0.0.1 — this site is
-// served from a workers.dev domain, so unauthenticated requests 401 and the
-// (transparent, so silently) overlay never appears. Get a free key at
-// https://client.stadiamaps.com/signup/ and paste it here, OR skip this
-// entirely and instead add this exact domain under "Authentication
-// Configuration" in the Stadia client dashboard for domain-based auth —
-// either one is sufficient on its own, and if you use domain auth this can
-// stay blank.
-const STADIA_API_KEY = "121d3e47-f89d-4f87-b987-49d42aa7f800";
 const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json";
 const COUNTRIES_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json";
 const LAKES_URL = "https://ne.freemap.online/50m/physical/ne_50m_lakes.json";
@@ -223,10 +196,7 @@ const statusEl = document.getElementById('status');
 const countEl = document.getElementById('countNum');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
-const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
-const toggleLinesBtn = document.getElementById('toggleLinesBtn');
-let tonerLabelsOn = true;
-let terrainLinesOn = true;
+const resetBtn = document.getElementById('resetBtn');
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -303,83 +273,6 @@ function nearestCity(lat, lon) {
   return best;
 }
 const HOME_LAT = 39.83, HOME_LON = -98.58; // matches the flat map's projection center
-
-// ---- regional weather readout (under the coords link) ----
-// Open-Meteo: free, no API key, and current_weather + timezone=auto gives
-// us both the condition/temperature AND the location's own local time in
-// one request — exactly what the display needs, with nothing to sign up
-// for.
-const REGIONAL_ZOOM_THRESHOLD = 6; // MapLibre-zoom-equivalent; below this it's a country/continent-scale view, not a "region" — nothing shows
-const WEATHER_READOUT_MIN_INTERVAL_MS = 4000; // never fetch more than this often, even while continuously panning through many distinct spots
-const WEATHER_READOUT_MIN_MOVE_KM = 25; // don't refetch for small jitter — only once you've actually moved to a new area
-const WEATHER_READOUT_REFRESH_MS = 10 * 60 * 1000; // refetch periodically even while stationary, so it doesn't go stale
-let weatherReadoutLat = null, weatherReadoutLon = null;
-let weatherReadoutFetchedAt = 0;
-let weatherReadoutRequestId = 0;
-
-function weatherCodeDescription(code, isDay) {
-  // WMO weather codes, as used by Open-Meteo — collapsed to simple,
-  // human labels rather than the raw numeric code
-  if (code === 0) return isDay ? 'Sunny' : 'Clear';
-  if (code === 1) return isDay ? 'Mostly Sunny' : 'Mostly Clear';
-  if (code === 2) return 'Partly Cloudy';
-  if (code === 3) return 'Cloudy';
-  if (code === 45 || code === 48) return 'Foggy';
-  if (code === 51 || code === 53 || code === 55) return 'Drizzling';
-  if (code === 56 || code === 57) return 'Freezing Drizzle';
-  if (code === 61 || code === 63 || code === 65) return 'Rainy';
-  if (code === 66 || code === 67) return 'Freezing Rain';
-  if (code === 71 || code === 73 || code === 75 || code === 77) return 'Snowing';
-  if (code === 80 || code === 81 || code === 82) return 'Rainy';
-  if (code === 85 || code === 86) return 'Snowing';
-  if (code === 95 || code === 96 || code === 99) return 'Stormy';
-  return 'Unknown';
-}
-
-function formatOpenMeteoTime(isoLocal) {
-  // isoLocal looks like "2026-09-23T15:00" — already local to the queried
-  // location (timezone=auto), so this parses the HH:MM directly rather
-  // than handing it to `new Date()`, which would reinterpret it in the
-  // BROWSER's own timezone instead of the location's
-  const m = isoLocal.match(/T(\d{2}):(\d{2})/);
-  if (!m) return '';
-  let hour = parseInt(m[1], 10);
-  const minute = m[2];
-  const ampm = hour >= 12 ? 'PM' : 'AM';
-  hour = hour % 12; if (hour === 0) hour = 12;
-  return `${hour}:${minute}${ampm}`;
-}
-
-async function fetchLocationWeather(lat, lon) {
-  const requestId = ++weatherReadoutRequestId;
-  try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(3)}&longitude=${lon.toFixed(3)}&current_weather=true&temperature_unit=fahrenheit&timezone=auto`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(res.status);
-    const data = await res.json();
-    if (requestId !== weatherReadoutRequestId) return; // a newer request has since superseded this one — drop this stale result
-    const cw = data.current_weather;
-    if (!cw) return;
-    const desc = weatherCodeDescription(cw.weathercode, cw.is_day === 1);
-    const temp = Math.round(cw.temperature);
-    const timeStr = formatOpenMeteoTime(cw.time);
-    document.getElementById('locationWeather').textContent = `${desc}, ${temp}°, ${timeStr}`;
-  } catch (err) {
-    console.warn('gallery: location weather fetch failed —', err.message);
-    // leave whatever was last shown rather than clearing it on a transient failure
-  }
-}
-
-function maybeFetchLocationWeather(lat, lon) {
-  const now = performance.now();
-  const movedFar = weatherReadoutLat == null || haversineKm(lat, lon, weatherReadoutLat, weatherReadoutLon) > WEATHER_READOUT_MIN_MOVE_KM;
-  const stale = now - weatherReadoutFetchedAt > WEATHER_READOUT_REFRESH_MS;
-  if (!movedFar && !stale) return; // already have a recent-enough fetch for around here
-  if (now - weatherReadoutFetchedAt < WEATHER_READOUT_MIN_INTERVAL_MS) return; // rate limit
-  weatherReadoutLat = lat; weatherReadoutLon = lon; weatherReadoutFetchedAt = now;
-  fetchLocationWeather(lat, lon);
-}
-
 function updateLocationReadout() {
   let lon, lat;
   if (in3D && terrainMapInstance) {
@@ -396,21 +289,7 @@ function updateLocationReadout() {
   const polarPlace = lat <= -60 ? 'Antarctica' : (lat >= 60 ? 'Arctic' : null);
   const city = polarPlace ? null : nearestCity(lat, lon);
   document.getElementById('locationCity').textContent = polarPlace || (city ? 'near ' + city[0] : '');
-  const coordsEl = document.getElementById('locationCoords');
-  coordsEl.textContent = formatLatLon(lon, lat);
-  coordsEl.href = wikimapUrl(lon, lat);
-
-  // weather only at a "regional" zoom or closer — docked (the fixed home
-  // view) and any wide zoomed-out view show nothing here
-  let effectiveZoom = -Infinity;
-  if (in3D && terrainMapInstance) effectiveZoom = terrainMapInstance.getZoom();
-  else if (!docked) effectiveZoom = equivalentMapLibreZoom(lat);
-  if (effectiveZoom >= REGIONAL_ZOOM_THRESHOLD) {
-    maybeFetchLocationWeather(lat, lon);
-  } else {
-    document.getElementById('locationWeather').textContent = '';
-    weatherReadoutLat = null; weatherReadoutLon = null; // forget last fetch point so zooming back in always fetches fresh
-  }
+  document.getElementById('locationCoords').textContent = formatLatLon(lon, lat);
 }
 
 let events = [];
@@ -429,8 +308,7 @@ function resize() {
   const b = path.bounds(sphere);
   discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
   discRadius = (b[1][0] - b[0][0]) / 2;
-  // rivers/lakes now draw live as vectors each frame (see draw()) — no
-  // pre-baked bitmap to build on resize anymore
+  bakeWater(); // expensive (canvas blur filter) — only runs here, on load/resize, never per animation frame
 
   // inlay geometry — read from the actual rendered #mapInlay element rather
   // than recomputed independently, so the JS math driving the dock
@@ -459,6 +337,44 @@ function resize() {
   }
 }
 
+// rivers/lakes, pre-rendered WITH their blur applied once, at the same
+// fixed (gamma=0) projected coordinates everything else uses — draw() just
+// blits this each frame via the live pan/zoom/rotate transform, the same
+// cheap pattern used elsewhere, instead of recomputing a canvas blur filter
+// on every single animation frame (which is expensive and was the real
+// cause of the spin feeling laggy)
+let waterCanvas = null;
+function bakeWater() {
+  if (!rivers && !lakes) { waterCanvas = null; return; }
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const octx = off.getContext('2d');
+  const bakePath = d3.geoPath(projection, octx);
+  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
+  if (rivers) {
+    octx.save();
+    octx.filter = 'blur(1px)';
+    octx.beginPath(); bakePath(rivers);
+    octx.strokeStyle = oceanColor;
+    octx.globalAlpha = 0.8;
+    octx.lineWidth = 0.4;
+    octx.stroke();
+    octx.restore();
+  }
+  if (lakes) {
+    octx.save();
+    octx.filter = 'blur(1.5px)';
+    octx.beginPath(); bakePath(lakes);
+    octx.fillStyle = oceanColor;
+    octx.globalAlpha = 0.8;
+    octx.fill();
+    octx.restore();
+  }
+  waterCanvas = off;
+}
+
 async function loadGeo(url, isTopo, objectName) {
   try {
     const res = await fetch(url);
@@ -472,11 +388,6 @@ async function loadGeo(url, isTopo, objectName) {
 }
 
 const sphere = { type: 'Sphere' };
-
-function hexToRgb(hex) {
-  const h = hex.replace('#', '');
-  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-}
 
 
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
@@ -493,8 +404,8 @@ function draw() {
 
   // two-finger spin: a pure rotation around the disc's (fixed) center,
   // layered on top of pan/zoom. Decoupled from the projection itself, so it
-  // applies identically and cheaply to everything drawn below without any
-  // extra bookkeeping.
+  // applies identically and cheaply to both the live vector paths below AND
+  // the pre-baked terrain bitmap, without needing to re-bake anything.
   ctx.translate(discCenter.x, discCenter.y);
   ctx.rotate(rotationGamma * Math.PI / 180);
   ctx.translate(-discCenter.x, -discCenter.y);
@@ -506,9 +417,8 @@ function draw() {
   // softly into the beige page background instead of a hard circular border
   const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
   const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
-  const [or, og, ob] = hexToRgb(oceanColor);
   oceanGrad.addColorStop(0, oceanColor);
-  oceanGrad.addColorStop(1, `rgba(${or}, ${og}, ${ob}, 0)`);
+  oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
   ctx.beginPath(); path(sphere);
   ctx.fillStyle = oceanGrad;
   ctx.fill();
@@ -518,18 +428,8 @@ function draw() {
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
     ctx.fill();
   }
-  // rivers/lakes drawn live as vector paths (not pre-baked to a bitmap) so
-  // they stay crisp at any zoom/DPI, same as land/ocean above
-  if (!docked && rivers) {
-    ctx.beginPath(); path(rivers);
-    ctx.strokeStyle = oceanColor;
-    ctx.lineWidth = lw(0.4);
-    ctx.stroke();
-  }
-  if (lakes) {
-    ctx.beginPath(); path(lakes);
-    ctx.fillStyle = oceanColor;
-    ctx.fill();
+  if (waterCanvas) {
+    ctx.drawImage(waterCanvas, 0, 0, waterCanvas.width, waterCanvas.height);
   }
 
   drawEvents(lw, pr);
@@ -623,12 +523,7 @@ const zoomBehavior = d3.zoom()
       // exit path already)
       if (!in3D && !transitioning && transform.k <= REDOCK_K) dockWithFade();
     }
-    // no draw() here — tick()'s rAF loop already redraws every frame
-    // unconditionally. Calling draw() again per raw touch-move event was
-    // redundant, and since a two-finger gesture (especially a fast
-    // direction reversal) can fire many touch events within a single
-    // frame, those extra synchronous draws piled up and backed up the
-    // main thread, which is what caused the jumpiness/freeze-ups.
+    draw();
   });
 d3.select(canvas).call(zoomBehavior);
 
@@ -673,32 +568,6 @@ function formatLatLon(lon, lat) {
   return `${latStr}, ${lonStr}`;
 }
 
-// wikimap.wiki plots locations in Web Mercator (EPSG:3857) meters, not
-// plain lat/lon degrees — and, per their own URL format, the "lat" query
-// param actually holds the mercator X (derived from longitude) while "lon"
-// holds the mercator Y (derived from latitude). Confirmed against their own
-// example link for Lima city center.
-const EARTH_RADIUS_M = 6378137;
-function toWebMercator(lat, lon) {
-  const x = lon * (Math.PI / 180) * EARTH_RADIUS_M;
-  const y = EARTH_RADIUS_M * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
-  return [x, y];
-}
-function wikimapUrl(lon, lat) {
-  const wrappedLon = ((lon + 540) % 360) - 180; // normalize in case 3D world-copy wrap pushed lon outside -180..180
-  const clampedLat = Math.max(-85.05, Math.min(85.05, lat)); // Web Mercator's own latitude limit
-  const [mercX, mercY] = toWebMercator(clampedLat, wrappedLon);
-  const params = new URLSearchParams({
-    base: 'map',
-    lat: mercX.toFixed(4),
-    lon: mercY.toFixed(4),
-    showAll: 'true',
-    wiki: 'enwiki',
-    zoom: '14',
-  });
-  return `https://wikimap.wiki/?${params.toString()}`;
-}
-
 function undockWithFade(lon, lat) {
   document.getElementById('transitionCoords').textContent = formatLatLon(lon, lat);
   playFadeTransition(() => {
@@ -731,35 +600,11 @@ function dockWithFade() {
   }, 900, 1100); // slow, calm — settling back into the inlay, not snapping
 }
 
-function dockMap() { dockWithFade(); } // initial-load call sites — same mechanism
+function dockMap() { dockWithFade(); } // resetBtn / initial-load call sites — same mechanism
 
-// Applies the current on/off state to the actual MapLibre layers. Guarded
-// with getLayer() + try/catch since it can run before the 3D map (or its
-// style) exists yet — in that case the booleans above are just remembered
-// and read when the layers are first created in initTerrainMap().
-function applyLayerToggles() {
-  if (!terrainMapInstance) return;
-  try {
-    if (terrainMapInstance.getLayer('stamen-toner-labels')) {
-      terrainMapInstance.setLayoutProperty('stamen-toner-labels', 'visibility', tonerLabelsOn ? 'visible' : 'none');
-    }
-    if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
-      terrainMapInstance.setLayoutProperty('stamen-terrain-lines', 'visibility', terrainLinesOn ? 'visible' : 'none');
-    }
-  } catch (err) {
-    console.warn('gallery: layer toggle failed', err);
-  }
-}
-
-toggleLabelsBtn.onclick = () => {
-  tonerLabelsOn = !tonerLabelsOn;
-  toggleLabelsBtn.classList.toggle('active', tonerLabelsOn);
-  applyLayerToggles();
-};
-toggleLinesBtn.onclick = () => {
-  terrainLinesOn = !terrainLinesOn;
-  toggleLinesBtn.classList.toggle('active', terrainLinesOn);
-  applyLayerToggles();
+resetBtn.onclick = () => {
+  rotationGamma = 0; spinVelocity = 0;
+  dockMap();
 };
 
 // ============================================================
@@ -800,87 +645,108 @@ function equivalentMapLibreZoom(lat) {
 
 // ============================================================
 // WEATHER: RainViewer's free public radar API, with snow and rain given
-// distinct client-side styling — soft white for snow, faint --ocean blue
-// for rain — since RainViewer's own tiles just render both as one
-// continuous color ramp. There's no MapLibre style-spec paint property
-// that can do this kind of per-pixel conditional recoloring on a plain
-// raster layer (that needs actual pixel access), so this registers a
-// custom maplibregl.addProtocol handler that intercepts each tile,
-// recolors + softly blurs it on an OffscreenCanvas, and hands the result
-// back as a normal raster tile.
-//
-// This used to convert classified pixels into thousands of GeoJSON point
-// features (one 'circle' per sample) instead. That looked fine zoomed out
-// (dense clusters happened to read as organic texture) but fell apart
-// zoomed in — the source data is capped at zoom 7, so points sampled from
-// it don't get any denser as you zoom past that, they just look sparse —
-// and manually recomputing + refetching + rebuilding that whole point set
-// on every 'moveend' is real synchronous work that visibly popped in
-// tile-by-tile ("loading in blocks"). A raster tile sidesteps both: past
-// the source's own maxzoom (7, RainViewer's free-tier cap) MapLibre just
-// bilinear-upscales the last real tile instead of running out of dots, so
-// combined with the blur baked into each tile below it reads as a
-// continuous soft cloud wash at any zoom instead of thinning out — and
-// MapLibre's own tile loader handles viewport culling, caching, and a
-// built-in cross-fade between tiles natively (raster-fade-duration below),
-// instead of our own bounds math + Promise.all + full-GeoJSON-replace.
+// distinct client-side styling — soft fuzzy white for snow, faint blue for
+// rain — since RainViewer's own tiles just render both as one continuous
+// color ramp. There's no MapLibre style-spec paint property that can do
+// this kind of per-pixel conditional recoloring on a plain raster layer
+// (that needs actual pixel access), so this uses maplibregl.addProtocol to
+// intercept each tile, recolor it on a canvas, and hand the result back —
+// still fully client-side, no backend involved, just the real mechanism
+// for this rather than a style-property that doesn't exist.
 //
 // Real, verified API: https://api.rainviewer.com/public/weather-maps.json
 // gives {host, radar:{past:[...]}}; tiles are
 // {host}{path}/256/{z}/{x}/{y}/{color}/{smooth}_{snow}.png — color=2 is
 // RainViewer's "Universal Blue" scheme, and snow=1 renders snow in a
 // visually distinct blue/purple range from the green-yellow-red rain ramp.
-// The exact RGB split between "snow blue" and "rain" below is a
-// reasonable starting heuristic, not a value from an official RainViewer
-// color table (I couldn't find one to verify against) — likely worth
-// eyeballing against a real snowy tile.
+// Free tier caps at zoom 7 — but critically, that's a data-resolution
+// limit, not a rendering one: we convert each classified sample pixel to
+// its real lon/lat and hand the whole set to MapLibre as GeoJSON, rendered
+// through a native 'circle' layer. That's the actual fix for the blur
+// complaint — a raster tile gets stretched and blurred like any image when
+// magnified, but vector circles are redrawn fresh every frame at whatever
+// resolution the screen needs, so they stay crisp at any zoom regardless
+// of the source data's fixed z7 resolution. The exact RGB split between
+// "snow blue" and "rain" below is a reasonable starting heuristic, not a
+// value from an official RainViewer color table (I couldn't find one to
+// verify against) — likely worth eyeballing against a real snowy tile.
 // ============================================================
 let weatherTileUrl = null;
 let weatherReady = false;
 const WEATHER_Z = 7; // RainViewer's free-tier max
-const WEATHER_PROTOCOL = 'weatherprecip';
 
-async function weatherProtocolHandler(params) {
-  // params.url looks like "weatherprecip://{z}/{x}/{y}" with the
-  // placeholders already resolved by MapLibre's own tile URL templating
-  const [z, x, y] = params.url.replace(`${WEATHER_PROTOCOL}://`, '').split('/');
-  const url = weatherTileUrl.replace('{z}', z).replace('{x}', x).replace('{y}', y);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`weather tile ${res.status}`);
-  const bitmap = await createImageBitmap(await res.blob());
-  const w = bitmap.width, h = bitmap.height;
+function lonLatToTile(lon, lat, z) {
+  const n = Math.pow(2, z);
+  const x = Math.floor((lon + 180) / 360 * n);
+  const latRad = lat * Math.PI / 180;
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+  return [x, y];
+}
+function tilePixelToLonLat(tx, ty, z, px, py, tileSize) {
+  const n = Math.pow(2, z);
+  const fx = tx + px / tileSize, fy = ty + py / tileSize;
+  const lon = fx / n * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * fy / n))) * 180 / Math.PI;
+  return [lon, lat];
+}
 
-  // pass 1: classify + recolor every pixel in place
-  const recolor = new OffscreenCanvas(w, h);
-  const rctx = recolor.getContext('2d');
-  rctx.drawImage(bitmap, 0, 0);
-  const img = rctx.getImageData(0, 0, w, h);
-  const data = img.data;
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i + 3] < 10) { data[i + 3] = 0; continue; } // no signal here
-    const isSnow = data[i + 2] > 130 && data[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
-    if (isSnow) { data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; }
-    else { data[i] = 0x69; data[i + 1] = 0xce; data[i + 2] = 0xf1; } // matches --ocean
-    data[i + 3] = Math.min(255, data[i + 3] * 0.85); // slightly translucent
+async function fetchWeatherTilePoints(tx, ty) {
+  const url = weatherTileUrl.replace('{z}', WEATHER_Z).replace('{x}', tx).replace('{y}', ty);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const blob = await res.blob();
+    const bitmap = await createImageBitmap(blob);
+    const w = bitmap.width, h = bitmap.height;
+    const off = new OffscreenCanvas(w, h);
+    const octx = off.getContext('2d');
+    octx.drawImage(bitmap, 0, 0);
+    const src = octx.getImageData(0, 0, w, h).data;
+
+    const STEP = 5; // fine sampling — every few source pixels, not a coarse grid
+    const points = [];
+    for (let py = 0; py < h; py += STEP) {
+      for (let px = 0; px < w; px += STEP) {
+        const i = (py * w + px) * 4;
+        if (src[i + 3] < 10) continue; // no signal here
+        // "not too dense that you can't see through" — only keep a
+        // fraction of eligible points, thinning an otherwise-solid area
+        // into a scattered, see-through pattern
+        if (Math.random() > 0.55) continue;
+        const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
+        const jx = px + (Math.random() - 0.5) * STEP, jy = py + (Math.random() - 0.5) * STEP; // small jitter so points read as organic scatter, not a rigid grid
+        const [lon, lat] = tilePixelToLonLat(tx, ty, WEATHER_Z, jx, jy, w);
+        points.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { kind: isSnow ? 'snow' : 'rain' } });
+      }
+    }
+    return points;
+  } catch (err) {
+    console.warn('GALLERY: weather tile fetch failed for', tx, ty, '—', err.message);
+    return [];
   }
-  rctx.putImageData(img, 0, 0);
+}
 
-  // pass 2: soft blur so edges read as an organic cloud wash rather than
-  // a hard raster boundary — this is what keeps it looking good even when
-  // MapLibre upscales this same tile well past its native zoom 7
-  const out = new OffscreenCanvas(w, h);
-  const octx = out.getContext('2d');
-  octx.filter = 'blur(3px)';
-  octx.drawImage(recolor, 0, 0);
-
-  const outBlob = await out.convertToBlob({ type: 'image/png' });
-  return { data: await outBlob.arrayBuffer() };
+async function refreshWeatherPoints() {
+  if (!weatherTileUrl || !terrainMapInstance) return;
+  const src = terrainMapInstance.getSource('weatherPoints');
+  if (!src) return;
+  const bounds = terrainMapInstance.getBounds();
+  const n = Math.pow(2, WEATHER_Z);
+  const [xMin, yMax] = lonLatToTile(bounds.getWest(), bounds.getSouth(), WEATHER_Z);
+  const [xMax, yMin] = lonLatToTile(bounds.getEast(), bounds.getNorth(), WEATHER_Z);
+  const tiles = [];
+  for (let x = Math.max(0, xMin); x <= Math.min(n - 1, xMax); x++) {
+    for (let y = Math.max(0, yMin); y <= Math.min(n - 1, yMax); y++) tiles.push([x, y]);
+  }
+  if (tiles.length === 0 || tiles.length > 16) return; // zoomed too far out for this to mean anything — leave whatever was last shown
+  const results = await Promise.all(tiles.map(([x, y]) => fetchWeatherTilePoints(x, y)));
+  const features = results.flat();
+  src.setData({ type: 'FeatureCollection', features });
 }
 
 function initWeatherProtocol() {
   if (weatherReady) return;
   weatherReady = true;
-  maplibregl.addProtocol(WEATHER_PROTOCOL, weatherProtocolHandler);
   fetch('https://api.rainviewer.com/public/weather-maps.json')
     .then((res) => res.json())
     .then((data) => {
@@ -895,27 +761,23 @@ function initWeatherProtocol() {
 
 function addWeatherLayerIfReady() {
   if (!terrainMapInstance || !weatherTileUrl) return;
-  if (terrainMapInstance.getSource('weatherPrecip')) return; // already added, tiles refresh on their own as MapLibre pans/zooms
+  if (terrainMapInstance.getSource('weatherPoints')) { refreshWeatherPoints(); return; }
   const addIt = () => {
-    terrainMapInstance.addSource('weatherPrecip', {
-      type: 'raster',
-      tiles: [`${WEATHER_PROTOCOL}://{z}/{x}/{y}`],
-      tileSize: 256,
-      minzoom: 0,
-      maxzoom: WEATHER_Z,
+    terrainMapInstance.addSource('weatherPoints', {
+      type: 'geojson', data: { type: 'FeatureCollection', features: [] },
       attribution: 'Weather: <a href="https://rainviewer.com" target="_blank">RainViewer</a>',
     });
     terrainMapInstance.addLayer({
-      id: 'weatherPrecip', type: 'raster', source: 'weatherPrecip',
+      id: 'weatherPoints', type: 'circle', source: 'weatherPoints',
       paint: {
-        // full opacity at/below the source's own native resolution (zoom
-        // 7), fading to fully transparent by zoom 14 — reads as flying
-        // up through and past the cloud layer as you approach the ground,
-        // rather than a flat wash that never goes away
-        'raster-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.85, 11, 0.35, 14, 0],
-        'raster-fade-duration': 300, // cross-fades new tiles in smoothly instead of popping in block-by-block
+        'circle-radius': 2,
+        'circle-color': ['case', ['==', ['get', 'kind'], 'snow'], '#ffffff', '#b9dde2'],
+        'circle-opacity': 0.85,
+        'circle-blur': 0.1,
       },
     });
+    terrainMapInstance.on('moveend', refreshWeatherPoints);
+    refreshWeatherPoints();
   };
   if (terrainMapInstance.isStyleLoaded()) addIt(); else terrainMapInstance.once('load', addIt);
 }
@@ -960,164 +822,301 @@ function handlePoleWrap() {
   }, 420);
 }
 
+// ============================================================
+// ANTARCTIC TERRAIN SHADER
+//
+// This is deliberately NOT a GeoJSON/fill/mask.  The shader renders a
+// second copy of the actual MapLibre terrain mesh only where the geographic
+// latitude is Antarctic, using elevations sampled from MapLibre's live DEM.
+// The fragment shader chooses the ice palette from elevation, while the
+// vertex shader puts every sample back at its real DEM height.  Thus the
+// white/cool relief follows the same terrain geometry instead of sitting on
+// top as a flat geographic overlay.
+// ============================================================
+function makeAntarcticShaderLayer() {
+  const layer = {
+    id: 'antarctic-terrain-shader',
+    type: 'custom',
+    renderingMode: '3d',
+    program: null,
+    gl: null,
+    aPos: -1,
+    aElev: -1,
+    aLat: -1,
+    uMatrix: null,
+    buffer: null,
+    vertexCount: 0,
+    lastBuildKey: '',
+    building: false,
+    rebuildQueued: false,
+
+    onAdd(map, gl) {
+      this.gl = gl;
+      const vertexSource = `#version 300 es
+        uniform mat4 u_matrix;
+        in vec3 a_pos;
+        in float a_elev;
+        in float a_lat;
+        out float v_elev;
+        out float v_lat;
+        void main() {
+          v_elev = a_elev;
+          v_lat = a_lat;
+          gl_Position = u_matrix * vec4(a_pos, 1.0);
+        }
+      `;
+      const fragmentSource = `#version 300 es
+        precision highp float;
+        in float v_elev;
+        in float v_lat;
+        out vec4 fragColor;
+
+        vec3 mix3(vec3 a, vec3 b, float t) {
+          return mix(a, b, clamp(t, 0.0, 1.0));
+        }
+
+        // Antarctic equivalent of the existing elevation color-relief.
+        // The breakpoints deliberately mirror the global terrain bands,
+        // but use snow/ice/cool shadow tones instead of green/tan.
+        vec3 icePalette(float e) {
+          if (e <= 0.0) return vec3(0.0941, 0.7490, 1.0);
+          if (e < 250.0) return mix3(vec3(0.93,0.97,0.98), vec3(0.82,0.90,0.94), e/250.0);
+          if (e < 1000.0) return mix3(vec3(0.82,0.90,0.94), vec3(0.91,0.94,0.96), (e-250.0)/750.0);
+          if (e < 1700.0) return mix3(vec3(0.91,0.94,0.96), vec3(0.97,0.98,0.99), (e-1000.0)/700.0);
+          if (e < 2400.0) return mix3(vec3(0.97,0.98,0.99), vec3(0.86,0.92,0.96), (e-1700.0)/700.0);
+          if (e < 3100.0) return mix3(vec3(0.86,0.92,0.96), vec3(0.97,0.98,1.0), (e-2400.0)/700.0);
+          return mix3(vec3(0.97,0.98,1.0), vec3(1.0), clamp((e-3100.0)/1100.0,0.0,1.0));
+        }
+
+        void main() {
+          // Geographic condition lives in the shader, not in a polygon.
+          // Fade the condition only at the ice-sheet edge so the custom
+          // surface never creates a hard white geographic border.
+          float antarctic = step(v_lat, -60.0);
+          vec3 ice = icePalette(v_elev);
+          // Very restrained cool shadowing is baked into the elevation
+          // palette itself; actual 3D relief remains supplied by the DEM
+          // geometry and MapLibre's depth buffer.
+          fragColor = vec4(ice, 1.0);
+          if (v_lat > -59.0) discard;
+        }
+      `;
+      const compile = (type, src) => {
+        const sh = gl.createShader(type);
+        gl.shaderSource(sh, src);
+        gl.compileShader(sh);
+        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+          console.error('Antarctic shader compile error:', gl.getShaderInfoLog(sh));
+          gl.deleteShader(sh);
+          return null;
+        }
+        return sh;
+      };
+      const vs = compile(gl.VERTEX_SHADER, vertexSource);
+      const fs = compile(gl.FRAGMENT_SHADER, fragmentSource);
+      if (!vs || !fs) return;
+      this.program = gl.createProgram();
+      gl.attachShader(this.program, vs);
+      gl.attachShader(this.program, fs);
+      gl.linkProgram(this.program);
+      if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
+        console.error('Antarctic shader link error:', gl.getProgramInfoLog(this.program));
+        return;
+      }
+      gl.deleteShader(vs); gl.deleteShader(fs);
+      this.aPos = gl.getAttribLocation(this.program, 'a_pos');
+      this.aElev = gl.getAttribLocation(this.program, 'a_elev');
+      this.aLat = gl.getAttribLocation(this.program, 'a_lat');
+      this.uMatrix = gl.getUniformLocation(this.program, 'u_matrix');
+      this.buffer = gl.createBuffer();
+
+      const rebuild = () => this.queueRebuild(map);
+      map.on('idle', rebuild);
+      map.on('moveend', rebuild);
+      map.on('zoomend', rebuild);
+      map.on('resize', rebuild);
+      this.queueRebuild(map);
+      map.once('idle', () => this.queueRebuild(map));
+      setTimeout(() => this.queueRebuild(map), 1200);
+    },
+
+    queueRebuild(map) {
+      if (this.building) { this.rebuildQueued = true; return; }
+      const c = map.getCenter();
+      const z = map.getZoom();
+      // Only rebuild when the view is meaningfully different. The DEM itself
+      // is still MapLibre's terrain source; queryTerrainElevation samples it.
+      const key = `${c.lng.toFixed(2)}|${c.lat.toFixed(2)}|${z.toFixed(1)}`;
+      if (key === this.lastBuildKey) return;
+      this.lastBuildKey = key;
+      this.buildMesh(map).catch(err => console.warn('Antarctic shader mesh:', err));
+    },
+
+    async buildMesh(map) {
+      if (this.building) { this.rebuildQueued = true; return; }
+      this.building = true;
+      try {
+        const b = map.getBounds();
+        const south = Math.max(-89.5, b.getSouth() - 8);
+        const north = Math.min(-57.0, b.getNorth() + 8);
+        if (south >= north) {
+          this.vertexCount = 0;
+          return;
+        }
+        let west = b.getWest() - 8, east = b.getEast() + 8;
+        // When the view crosses the antimeridian, normalize into a continuous
+        // interval so the mesh follows the visible world copy.
+        if (east - west > 360) { west = -180; east = 180; }
+        const step = Math.max(0.45, Math.min(0.9, 14 / Math.pow(2, Math.max(0, map.getZoom()-1))));
+        const cols = Math.ceil((east - west) / step) + 1;
+        const rows = Math.ceil((north - south) / step) + 1;
+        if (cols * rows > 24000) return;
+        const verts = [];
+        const heights = new Float32Array(cols * rows);
+        const lats = new Float32Array(cols * rows);
+
+        // queryTerrainElevation reads the same raster-dem source that powers
+        // MapLibre's actual 3D terrain. A small pause yields to tile decoding
+        // on iPhone before the synchronous sampling pass.
+        await new Promise(r => requestAnimationFrame(r));
+        let idx = 0;
+        for (let r = 0; r < rows; r++) {
+          const lat = Math.min(north, south + r * step);
+          for (let c = 0; c < cols; c++, idx++) {
+            const lon = west + c * step;
+            const e = map.queryTerrainElevation({lng: lon, lat}, {exaggerated: false});
+            heights[idx] = Number.isFinite(e) ? e : 0;
+            lats[idx] = lat;
+          }
+        }
+
+        // Build indexed-free triangle vertices. MapLibre's MercatorCoordinate
+        // uses the same world coordinate system as its terrain renderer.
+        for (let r = 0; r < rows - 1; r++) {
+          for (let c = 0; c < cols - 1; c++) {
+            const i00 = r * cols + c, i10 = i00 + 1, i01 = i00 + cols, i11 = i01 + 1;
+            const push = i => {
+              const lon = west + (i % cols) * step;
+              const lat = lats[i];
+              const elev = heights[i];
+              const mc = maplibregl.MercatorCoordinate.fromLngLat({lng:lon,lat}, elev);
+              const a = mc.toArray();
+              verts.push(a[0], a[1], a[2], elev, lat);
+            };
+            push(i00); push(i10); push(i11);
+            push(i00); push(i11); push(i01);
+          }
+        }
+        const gl = this.gl;
+        if (gl && this.buffer) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+          gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+          gl.bindBuffer(gl.ARRAY_BUFFER, null);
+          this.vertexCount = verts.length / 5;
+          map.triggerRepaint();
+        }
+      } finally {
+        this.building = false;
+        if (this.rebuildQueued) { this.rebuildQueued = false; setTimeout(() => this.queueRebuild(map), 80); }
+      }
+    },
+
+    render(gl, args) {
+      const modelViewProjectionMatrix = args.modelViewProjectionMatrix;
+      if (!this.program || !this.buffer || !this.vertexCount) return;
+      gl.useProgram(this.program);
+      gl.uniformMatrix4fv(this.uMatrix, false, modelViewProjectionMatrix);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+      const stride = 5 * 4;
+      gl.enableVertexAttribArray(this.aPos);
+      gl.vertexAttribPointer(this.aPos, 3, gl.FLOAT, false, stride, 0);
+      gl.enableVertexAttribArray(this.aElev);
+      gl.vertexAttribPointer(this.aElev, 1, gl.FLOAT, false, stride, 12);
+      gl.enableVertexAttribArray(this.aLat);
+      gl.vertexAttribPointer(this.aLat, 1, gl.FLOAT, false, stride, 16);
+      // This is a true 3D custom layer: use MapLibre's shared terrain depth
+      // buffer so the Antarctic surface follows the actual DEM rather than
+      // being drawn as a screen-space overlay.
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(false);
+      gl.disable(gl.CULL_FACE);
+      gl.disable(gl.BLEND);
+      gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount);
+      gl.disableVertexAttribArray(this.aPos);
+      gl.disableVertexAttribArray(this.aElev);
+      gl.disableVertexAttribArray(this.aLat);
+      gl.depthMask(true);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      gl.useProgram(null);
+    },
+
+    onRemove(map, gl) {
+      if (this.buffer) gl.deleteBuffer(this.buffer);
+      if (this.program) gl.deleteProgram(this.program);
+      this.buffer = null; this.program = null; this.vertexCount = 0; this.gl = null;
+    }
+  };
+  return layer;
+}
+
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   initWeatherProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
-    // Restore continuous east/west wrapping. MapLibre natively repeats the
-    // Mercator world horizontally; the north/south portal below handles the
-    // otherwise finite polar edge with a hidden transition.
     renderWorldCopies: true,
     style: {
       version: 8,
       sources: {
-        // Mapterhorn — the terrain source MapLibre's own official 3D
-        // Terrain example uses. Faster and higher-res (512px) than the AWS
-        // Terrarium tiles tried before, which are documented as slow to
-        // fetch directly from a browser. Two separate source entries
-        // pointing at the same TileJSON, matching the official example's
-        // own pattern for improved render quality (terrain mesh + hillshade
-        // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
-        // lakes/rivers reuse the exact same GeoJSON already fetched for the
-        // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
-        // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
-        // Natural Earth country geometry for Antarctica only.
-        antarcticaGeo: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
-        // Stadia Maps / Stamen Toner labels — transparent raster overlay
-        // containing place names and road names. Use the raw 256px XYZ PNG
-        // endpoint because MapLibre does not interpret the {r} retina
-        // placeholder itself. This is intentionally an overlay only; it does
-        // not replace the existing terrain, color relief, hillshade, lakes,
-        // or rivers sources.
         stamenTonerLabels: {
           type: 'raster',
-          tiles: [
-            'https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png' +
-              (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
-          ],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 20,
-          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
-        },
-        // Stamen Terrain's line-only layer group (roads, borders — no fill,
-        // no labels), at 0.6 opacity over color-relief + hillshade.
-        stamenTerrainLines: {
-          type: 'raster',
-          tiles: [
-            'https://tiles.stadiamaps.com/tiles/stamen_terrain_lines/{z}/{x}/{y}.png' +
-              (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
-          ],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 20,
-          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
+          tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
+          tileSize: 256, minzoom: 0, maxzoom: 20,
+          attribution: '© <a href="https://stadiamaps.com/attribution/" target="_blank">Stadia Maps</a> © <a href="https://stamen.com/" target="_blank">Stamen Design</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
         },
       },
       layers: [
-        // color-relief: colors the terrain BY ELEVATION straight from the
-        // DEM. The color stops aren't monotonic — green genuinely
-        // reappears at a higher band (alpine forest/meadow), not just a
-        // single strip near sea level fading permanently to tan — since
-        // MapLibre only requires the elevation stops themselves to
-        // increase, not the colors.
         {
           id: 'color-relief', type: 'color-relief', source: 'terrainSource',
-          paint: {
-            'color-relief-color': [
-              'interpolate', ['linear'], ['elevation'],
-              -200, '#18BFFF',   // all native ocean/bathymetry pixels use the same vivid ocean blue
-              0, '#18BFFF',      // sea level — same vivid blue as the extended ocean and sky
-              5, '#a9d089',      // coast, green starts immediately
-              300, '#7fb85c',    // lowland — saturated forest green
-              1000, '#96c46e',   // mid elevation, still solidly green
-              1700, '#c2b57e',   // transition band, green easing toward tan
-              2400, '#8fae5c',   // green reappears — alpine forest/meadow band
-              3100, '#d9c68f',   // higher slopes, tan
-              4200, '#f5ecd4',   // peaks, lightest tone in the palette
-            ],
-          },
+          paint: {'color-relief-color': ['interpolate',['linear'],['elevation'],
+            -200,'#18BFFF', 0,'#18BFFF', 5,'#a9d089', 300,'#7fb85c', 1000,'#96c46e',
+            1700,'#c2b57e', 2400,'#8fae5c', 3100,'#d9c68f', 4200,'#f5ecd4']}
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
-            // lighter/creamier overall (matching our warm beige palette)
-            // while keeping real contrast between shadow and highlight —
-            // a lighter shadow tone still reads as relief as long as it's
-            // clearly darker than the highlight, it just isn't a deep brown
             'hillshade-shadow-color': '#c9ad7a',
             'hillshade-highlight-color': '#fdf6e3',
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
           },
         },
-        // 0.6-opacity experiment: Stamen Terrain's line layer (roads,
-        // borders) laid over our own color-relief + hillshade. Sits below
-        // Antarctica/lakes/rivers/labels so those stay crisp on top.
+        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: {'fill-color':'#18BFFF'} },
+        { id: 'rivers', type: 'line', source: 'riversGeo', paint: {'line-color':'#8fc3d6','line-width':1.2} },
         {
-          id: 'stamen-terrain-lines',
-          type: 'raster',
-          source: 'stamenTerrainLines',
-          layout: { visibility: terrainLinesOn ? 'visible' : 'none' },
-          paint: {
-            'raster-opacity': 0.6,
-            'raster-fade-duration': 0
-          }
-        },
-        // Antarctica gets its own geographic ice palette while preserving
-        // the existing terrain/hillshade stack. The white fill replaces the
-        // warm elevation palette only inside the Antarctic polygon; a soft
-        // cool translucent pass lets the real terrain relief remain visible.
-        {
-          id: 'antarctica-ice-base', type: 'fill', source: 'antarcticaGeo',
-          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.96, 'fill-antialias': true },
-        },
-        {
-          id: 'antarctica-ice-shadow', type: 'fill', source: 'antarcticaGeo',
-          paint: {
-            'fill-color': '#dcecf4',
-            'fill-opacity': 0.22,
-            'fill-antialias': true,
-          },
-        },
-        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
-        { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
-        // Keep labels last so the transparent Toner label artwork stays
-        // readable above the terrain, hillshade, lakes, and rivers.
-        {
-          id: 'stamen-toner-labels',
-          type: 'raster',
-          source: 'stamenTonerLabels',
-          layout: { visibility: tonerLabelsOn ? 'visible' : 'none' },
-          paint: {
-            'raster-opacity': 1.0,
-            'raster-contrast': -0.6,
-            'raster-fade-duration': 0
-          }
+          id: 'stamen-toner-labels', type: 'raster', source: 'stamenTonerLabels',
+          paint: {'raster-opacity':1.0,'raster-fade-duration':0}
         },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
-      // Keep the 3D camera's exposed sky/horizon vividly blue instead of
-      // inheriting the app's dark chrome. The horizon blend is kept moderate
-      // so the blue remains visible when the camera is pitched steeply.
-      sky: {
-        'sky-color': '#18BFFF',
-        'sky-horizon-blend': 0.28,
-        'horizon-color': '#72D8FF',
-        'horizon-fog-blend': 0.18
-      },
+      sky: {'sky-color':'#18BFFF','sky-horizon-blend':0.28,'horizon-color':'#72D8FF','horizon-fog-blend':0.18},
     },
-    attributionControl: { compact: true },
-    maxPitch: 75,
-    dragRotate: true,
-    touchPitch: true,
+    attributionControl: { compact: true }, maxPitch:75, dragRotate:true, touchPitch:true,
   });
-  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); applyLayerToggles(); });
+  terrainMapInstance.on('load', () => {
+    // The shader is a MapLibre custom 3D layer, not a geographic fill. It
+    // samples MapLibre's live DEM and uses lat/lon only inside the shader.
+    terrainMapInstance.addLayer(makeAntarcticShaderLayer(), 'lakes');
+    // It is intentionally inserted immediately before the lakes layer: above
+    // color-relief + hillshade, below hydrology and labels. It is not a fill
+    // and does not use Antarctic country geometry.
+    addWeatherLayerIfReady();
+  });
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
@@ -1178,7 +1177,6 @@ async function enter3D(lon, lat) {
   document.getElementById('terrainMap').classList.add('active');
   canvas.classList.add('faded');
   backBtn.classList.add('visible');
-  document.getElementById('layerToggles').classList.add('visible');
   setTimeout(() => map3d.resize(), 50); // container was display:none-adjacent (opacity 0); MapLibre needs a resize once it's actually laid out
 }
 
@@ -1200,7 +1198,6 @@ function exit3D() {
   document.getElementById('terrainMap').classList.remove('active');
   canvas.classList.remove('faded');
   backBtn.classList.remove('visible');
-  document.getElementById('layerToggles').classList.remove('visible');
   draw();
 }
 const backBtn = document.getElementById('backBtn');
@@ -1302,9 +1299,6 @@ function tick() {
   // base map or dashboard.
   loadGeo(COUNTRIES_URL, true, 'countries').then(countriesData => {
     antarctica = countriesData?.features?.find(f => String(f.id).padStart(3, '0') === '010' || f.properties?.name === 'Antarctica') || null;
-    if (terrainMapInstance && terrainMapInstance.getSource('antarcticaGeo')) {
-      terrainMapInstance.getSource('antarcticaGeo').setData(antarctica || { type:'FeatureCollection', features:[] });
-    }
   }).catch(err => console.warn('gallery: Antarctica geometry unavailable', err));
   await poll();
   setInterval(poll, POLL_MS);

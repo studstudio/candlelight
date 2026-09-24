@@ -198,6 +198,7 @@
     <div id="layerToggles">
       <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
       <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
+      <button id="toggleBathymetryBtn" class="layerToggle active">bathymetry</button>
     </div>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
@@ -259,8 +260,10 @@ const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
 const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
 const toggleLinesBtn = document.getElementById('toggleLinesBtn');
+const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
 let tonerLabelsOn = true;
 let terrainLinesOn = true;
+let bathymetryOn = true;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -912,6 +915,11 @@ function applyLayerToggles() {
     if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
       terrainMapInstance.setLayoutProperty('stamen-terrain-lines', 'visibility', terrainLinesOn ? 'visible' : 'none');
     }
+    for (const id of ['bathymetry-color-relief', 'bathymetry-hillshade', 'bathymetry-contours']) {
+      if (terrainMapInstance.getLayer(id)) {
+        terrainMapInstance.setLayoutProperty(id, 'visibility', bathymetryOn ? 'visible' : 'none');
+      }
+    }
   } catch (err) {
     console.warn('gallery: layer toggle failed', err);
   }
@@ -925,6 +933,11 @@ toggleLabelsBtn.onclick = () => {
 toggleLinesBtn.onclick = () => {
   terrainLinesOn = !terrainLinesOn;
   toggleLinesBtn.classList.toggle('active', terrainLinesOn);
+  applyLayerToggles();
+};
+toggleBathymetryBtn.onclick = () => {
+  bathymetryOn = !bathymetryOn;
+  toggleBathymetryBtn.classList.toggle('active', bathymetryOn);
   applyLayerToggles();
 };
 
@@ -1372,6 +1385,19 @@ function initTerrainMap() {
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        // Seascape (openwatersio/seascape): global open bathymetry, same
+        // Terrarium encoding as our land DEM, published as ready TileJSON —
+        // unlike the Antarctic ice shading, this needs no custom protocol
+        // at all: color-relief/hillshade are native MapLibre layer types
+        // that sample any raster-dem source directly, exactly like our
+        // existing land terrainSource/hillshadeSource above.
+        bathymetryDem: {
+          type: 'raster-dem',
+          url: 'https://tiles.openwaters.io/seascape/raster.json',
+          encoding: 'terrarium', // required — MapLibre defaults to Mapbox's own encoding otherwise
+          tileSize: 512,
+        },
+        bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
         // lakes/rivers reuse the exact same GeoJSON already fetched for the
         // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
         // fed to MapLibre as plain in-memory GeoJSON
@@ -1457,6 +1483,63 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
+        // Depth-varying ocean tint from real bathymetry, replacing the
+        // flat single ocean-blue above for actual underwater elevation.
+        // The interpolate's last stop sits at 0 (sea level) and is fully
+        // transparent — MapLibre clamps values beyond a stop's range to
+        // that boundary stop, so every positive (land) elevation also
+        // clamps to the same transparent value, meaning land is
+        // automatically left untouched with no separate branch needed.
+        {
+          id: 'bathymetry-color-relief',
+          type: 'color-relief',
+          source: 'bathymetryDem',
+          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
+          paint: {
+            'color-relief-color': [
+              'interpolate', ['linear'], ['elevation'],
+              -6000, '#061a33',  // abyssal
+              -4000, '#0d2b4d',
+              -2000, '#154a72',
+              -1000, '#1c6690',
+              -500, '#2483ac',
+              -200, '#3aa0c4',
+              -50, '#63bcd6',
+              -5, '#94d6e2',     // very shallow, near-shore
+              0, 'rgba(6,26,51,0)', // sea level — fully transparent (color value itself doesn't matter at alpha 0, just needs to be valid)
+            ],
+          },
+        },
+        {
+          id: 'bathymetry-hillshade',
+          type: 'hillshade',
+          source: 'bathymetryDem',
+          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
+          paint: {
+            // cooler tones than the land hillshade above, fitting an
+            // underwater surface rather than a warm beige landscape
+            'hillshade-shadow-color': '#0a2d4a',
+            'hillshade-highlight-color': '#bfe8f2',
+            'hillshade-accent-color': '#1c5a82',
+            'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight
+          },
+        },
+        // Bathymetric contour lines (isobaths) from Seascape's vector
+        // tiles — a subtle white line over the depth-tinted ocean, in the
+        // spirit of a real nautical chart without trying to reproduce one
+        // exactly (no depth labels, safety-depth shading, or soundings —
+        // straightforward to add later if wanted).
+        {
+          id: 'bathymetry-contours',
+          type: 'line',
+          source: 'bathymetryVector',
+          'source-layer': 'contours',
+          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
+          paint: {
+            'line-color': 'rgba(255,255,255,0.35)',
+            'line-width': 0.6,
+          },
+        },
         // 0.6-opacity experiment: Stamen Terrain's line layer (roads,
         // borders) laid over our own color-relief + hillshade. Sits below
         // Antarctica/lakes/rivers/labels so those stay crisp on top.
@@ -1519,6 +1602,7 @@ function initTerrainMap() {
     maxPitch: 75,
     dragRotate: true,
     touchPitch: true,
+    minZoom: ZOOM_FLOOR_BASE, // real baseline floor from the start — updateZoomFloor() tightens this dynamically once 'move' events start firing
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
@@ -1527,6 +1611,7 @@ function initTerrainMap() {
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
+  terrainMapInstance.on('move', updateZoomFloor);
   return terrainMapInstance;
 }
 
@@ -1569,6 +1654,48 @@ const MIN_EXIT_DELTA = 0.35; // must have genuinely dropped by this much over th
 let enteredAt = 0;
 let zoomHistory = []; // rolling [{t, z}, ...] samples, trimmed to TREND_WINDOW_MS
 
+// ============================================================
+// HARD ZOOM FLOOR — this is the actual safety guarantee, not the trend
+// check above. autoExitCheck() only looks at RATE of change within a
+// rolling window (must drop >=0.35 within 500ms) — a real gap, since many
+// small, deliberately slow pinches (each under that delta) never trip it,
+// letting the camera drift arbitrarily far out with no exit ever
+// triggering. minZoom is a genuine MapLibre-enforced constraint: it clamps
+// every zoom interaction, gesture pattern or speed, so that loophole can't
+// be exploited regardless of how the trend check behaves.
+//
+// Layered on top: the floor tightens the closer the camera gets to either
+// pole. The Mercator void only ever becomes visible once you're BOTH
+// zoomed out far AND near a pole — so instead of trying to cosmetically
+// hide or blend it (the entire rest of this file's struggle with mist,
+// fog, and DEM mirroring), just never let the camera reach a position
+// where both conditions are true at once. Simpler and actually reliable.
+// ============================================================
+const ZOOM_FLOOR_BASE = 3.0; // baseline floor everywhere else — matches the lowest zoom enter3D() itself ever uses
+const ZOOM_FLOOR_TIGHTEN_START_LAT = 65; // degrees — floor starts rising here
+const ZOOM_FLOOR_MAX_AT_POLE = 7.0; // right at POLE_PORTAL_LAT, well above EXIT_ZOOM — you can barely zoom out at all that close to a pole
+let lastAppliedZoomFloor = null;
+
+function computeZoomFloor(lat) {
+  const absLat = Math.abs(lat);
+  if (absLat <= ZOOM_FLOOR_TIGHTEN_START_LAT) return ZOOM_FLOOR_BASE;
+  const t = Math.min(1, (absLat - ZOOM_FLOOR_TIGHTEN_START_LAT) / (POLE_PORTAL_LAT - ZOOM_FLOOR_TIGHTEN_START_LAT));
+  const eased = t * t; // quadratic — gentle at first, aggressive right near the pole
+  return ZOOM_FLOOR_BASE + eased * (ZOOM_FLOOR_MAX_AT_POLE - ZOOM_FLOOR_BASE);
+}
+
+// Called on every 'move' — latitude changes from panning alone, not just
+// zooming, so the floor has to be able to tighten (and snap the camera in,
+// which setMinZoom does automatically if the current zoom is now below it)
+// purely from moving toward a pole, independent of any zoom gesture.
+function updateZoomFloor() {
+  if (!terrainMapInstance) return;
+  const floor = Math.round(computeZoomFloor(terrainMapInstance.getCenter().lat) * 100) / 100;
+  if (floor === lastAppliedZoomFloor) return; // skip redundant setMinZoom calls on tiny movements
+  lastAppliedZoomFloor = floor;
+  terrainMapInstance.setMinZoom(floor);
+}
+
 async function enter3D(lon, lat) {
   if (in3D) return;
   in3D = true;
@@ -1579,6 +1706,7 @@ async function enter3D(lon, lat) {
   enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   lastPoleLat = map3d.getCenter().lat;
+  updateZoomFloor(); // set immediately in case entry itself is already near a pole, rather than waiting for the first 'move' event
   poleWrapping = false;
   setPoleFade(false);
   document.getElementById('terrainMap').classList.add('active');

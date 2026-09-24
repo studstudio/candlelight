@@ -108,11 +108,16 @@
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   #count { font-size: 11px; color: #4a3a22; text-align: right; }
   #count b { color: #2a1f10; font-size: 16px; display: block; }
-  #resetBtn {
-    position: absolute; right: 14px; top: 14px; background: var(--panel);
-    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
-    font-size: 11px; color: var(--cream-dim); z-index: 3;
+  #layerToggles {
+    position: absolute; right: 14px; top: 14px; z-index: 3;
+    display: flex; flex-direction: column; gap: 8px;
   }
+  .layerToggle {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 11px; font-size: 11px; color: var(--cream-dim);
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .layerToggle.active { color: var(--ember); border-color: var(--ember-dim); }
   #terrainMap {
     position: absolute; inset: 0; opacity: 0; pointer-events: none;
     transition: opacity 0.6s ease; z-index: 1;
@@ -153,7 +158,10 @@
     <div id="poleFade"></div>
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
-    <button id="resetBtn">reset view</button>
+    <div id="layerToggles">
+      <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
+      <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
+    </div>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
     <div id="empty">
@@ -212,7 +220,10 @@ const statusEl = document.getElementById('status');
 const countEl = document.getElementById('countNum');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
-const resetBtn = document.getElementById('resetBtn');
+const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
+const toggleLinesBtn = document.getElementById('toggleLinesBtn');
+let tonerLabelsOn = true;
+let terrainLinesOn = true;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -628,11 +639,35 @@ function dockWithFade() {
   }, 900, 1100); // slow, calm — settling back into the inlay, not snapping
 }
 
-function dockMap() { dockWithFade(); } // resetBtn / initial-load call sites — same mechanism
+function dockMap() { dockWithFade(); } // initial-load call sites — same mechanism
 
-resetBtn.onclick = () => {
-  rotationGamma = 0; spinVelocity = 0;
-  dockMap();
+// Applies the current on/off state to the actual MapLibre layers. Guarded
+// with getLayer() + try/catch since it can run before the 3D map (or its
+// style) exists yet — in that case the booleans above are just remembered
+// and read when the layers are first created in initTerrainMap().
+function applyLayerToggles() {
+  if (!terrainMapInstance) return;
+  try {
+    if (terrainMapInstance.getLayer('stamen-toner-labels')) {
+      terrainMapInstance.setLayoutProperty('stamen-toner-labels', 'visibility', tonerLabelsOn ? 'visible' : 'none');
+    }
+    if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
+      terrainMapInstance.setLayoutProperty('stamen-terrain-lines', 'visibility', terrainLinesOn ? 'visible' : 'none');
+    }
+  } catch (err) {
+    console.warn('gallery: layer toggle failed', err);
+  }
+}
+
+toggleLabelsBtn.onclick = () => {
+  tonerLabelsOn = !tonerLabelsOn;
+  toggleLabelsBtn.classList.toggle('active', tonerLabelsOn);
+  applyLayerToggles();
+};
+toggleLinesBtn.onclick = () => {
+  terrainLinesOn = !terrainLinesOn;
+  toggleLinesBtn.classList.toggle('active', terrainLinesOn);
+  applyLayerToggles();
 };
 
 // ============================================================
@@ -731,20 +766,23 @@ async function fetchWeatherTilePoints(tx, ty) {
     octx.drawImage(bitmap, 0, 0);
     const src = octx.getImageData(0, 0, w, h).data;
 
-    const STEP = 5; // fine sampling — every few source pixels, not a coarse grid
+    const STEP = 3; // much finer sampling — was 5, now every few source pixels
     const points = [];
     for (let py = 0; py < h; py += STEP) {
       for (let px = 0; px < w; px += STEP) {
         const i = (py * w + px) * 4;
         if (src[i + 3] < 10) continue; // no signal here
-        // "not too dense that you can't see through" — only keep a
-        // fraction of eligible points, thinning an otherwise-solid area
-        // into a scattered, see-through pattern
-        if (Math.random() > 0.55) continue;
+        // still thin slightly so dense storms don't become a solid wash,
+        // but keep far more than before now that each point is tiny
+        if (Math.random() > 0.7) continue;
         const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
         const jx = px + (Math.random() - 0.5) * STEP, jy = py + (Math.random() - 0.5) * STEP; // small jitter so points read as organic scatter, not a rigid grid
         const [lon, lat] = tilePixelToLonLat(tx, ty, WEATHER_Z, jx, jy, w);
-        points.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { kind: isSnow ? 'snow' : 'rain' } });
+        points.push({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [lon, lat] },
+          properties: { kind: isSnow ? 'snow' : 'rain', sizeRand: Math.random() }, // sizeRand drives a slight per-point size variance — reads as sparkle/glint rather than a uniform dot grid
+        });
       }
     }
     return points;
@@ -798,10 +836,13 @@ function addWeatherLayerIfReady() {
     terrainMapInstance.addLayer({
       id: 'weatherPoints', type: 'circle', source: 'weatherPoints',
       paint: {
-        'circle-radius': 2,
+        // tiny, with a touch of per-point size variance (sizeRand, set
+        // per feature above) so it reads as scattered sparkle/glint
+        // rather than a uniform grid of dots
+        'circle-radius': ['interpolate', ['linear'], ['get', 'sizeRand'], 0, 0.5, 1, 1.1],
         'circle-color': ['case', ['==', ['get', 'kind'], 'snow'], '#ffffff', '#b9dde2'],
-        'circle-opacity': 0.85,
-        'circle-blur': 0.1,
+        'circle-opacity': 0.9,
+        'circle-blur': 0.05,
       },
     });
     terrainMapInstance.on('moveend', refreshWeatherPoints);
@@ -953,6 +994,7 @@ function initTerrainMap() {
           id: 'stamen-terrain-lines',
           type: 'raster',
           source: 'stamenTerrainLines',
+          layout: { visibility: terrainLinesOn ? 'visible' : 'none' },
           paint: {
             'raster-opacity': 0.6,
             'raster-fade-duration': 0
@@ -982,6 +1024,7 @@ function initTerrainMap() {
           id: 'stamen-toner-labels',
           type: 'raster',
           source: 'stamenTonerLabels',
+          layout: { visibility: tonerLabelsOn ? 'visible' : 'none' },
           paint: {
             'raster-opacity': 1.0,
             'raster-contrast': -0.6,
@@ -1005,7 +1048,7 @@ function initTerrainMap() {
     dragRotate: true,
     touchPitch: true,
   });
-  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); });
+  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); applyLayerToggles(); });
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);

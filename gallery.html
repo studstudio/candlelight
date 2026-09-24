@@ -1252,7 +1252,8 @@ function installAntarcticTerrainProtocol() {
 const MIST_PROTOCOL = 'polar-mist';
 const MIST_START_LAT = 75; // degrees — mist begins fading in here
 const MIST_EDGE_LAT = 85.05; // matches MapLibre's actual Mercator limit
-const MIST_MAX_OPACITY = 0.97; // how thick it gets right at the true edge — deliberately not quite 100%, a fully opaque flat wall would look worse than the cutoff it's hiding
+const MIST_RAMP_DEGREES = 3; // how far past MIST_START_LAT it takes to reach full thickness — NOT the same as the distance to the true edge; it should be solid well before you get anywhere close to it
+const MIST_MAX_OPACITY = 1.0; // it needs to fully obscure the ocean blue underneath, not just mostly
 const MIST_COLOR = [235, 242, 247]; // soft icy white — a hint of blue so it doesn't read as flat paper-white against the terrain
 
 function tileLatAtRow(y, n, rowFraction) {
@@ -1263,9 +1264,9 @@ function tileLatAtRow(y, n, rowFraction) {
 }
 
 function mistOpacityForLat(lat) {
-  const t = (Math.abs(lat) - MIST_START_LAT) / (MIST_EDGE_LAT - MIST_START_LAT);
+  const t = (Math.abs(lat) - MIST_START_LAT) / MIST_RAMP_DEGREES;
   const clamped = Math.max(0, Math.min(1, t));
-  return clamped * clamped * MIST_MAX_OPACITY; // eased — stays subtle for a while, then thickens quickly right near the edge, rather than a linear ramp the whole way
+  return clamped * clamped * MIST_MAX_OPACITY; // eased ramp over MIST_RAMP_DEGREES, then holds at MIST_MAX_OPACITY for the rest of the way to MIST_EDGE_LAT
 }
 
 function installPolarMistProtocol() {

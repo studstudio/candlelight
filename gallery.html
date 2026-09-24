@@ -14,9 +14,11 @@
     --ember-dim: rgba(232, 130, 60, 0.55);
     --cream: #f2e9d8;
     --cream-dim: rgba(242, 233, 216, 0.55);
-    /* bright atlas-style palette for the map surface itself, distinct from
-       the dark app chrome around it — legibility over mood here */
-    --ocean: #b9dde2;
+    /* single vivid water color for the 2D azimuthal (docked + undocked) and
+       the transition fade — halfway between the old pastel inlay tone and
+       the 3D map's vivid ocean blue (#18BFFF), so nothing needs to blend
+       or branch on docked state anymore */
+    --ocean: #69cef1;
     --land: #ecd191;
     --land-line: #b08a4a;
     --water: #8fc3d6;
@@ -97,16 +99,27 @@
   #legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4a3a22; }
   #location { text-align: center; font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; color: #4a3a22; }
   #locationCity { font-size: 12px; font-weight: 500; letter-spacing: 0.03em; }
-  #locationCoords { font-size: 10px; font-weight: 300; letter-spacing: 0.06em; opacity: 0.75; margin-top: 2px; }
+  #locationCoords {
+    font-size: 10px; font-weight: 300; letter-spacing: 0.06em; opacity: 0.75; margin-top: 2px;
+    display: block; color: inherit; text-decoration: none;
+  }
+  #locationCoords:hover, #locationCoords:focus-visible { opacity: 1; text-decoration: underline; }
+  #locationWeather { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   #count { font-size: 11px; color: #4a3a22; text-align: right; }
   #count b { color: #2a1f10; font-size: 16px; display: block; }
-  #resetBtn {
-    position: absolute; right: 14px; top: 14px; background: var(--panel);
-    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
-    font-size: 11px; color: var(--cream-dim); z-index: 3;
+  #layerToggles {
+    position: absolute; right: 14px; top: 14px; z-index: 3;
+    display: none; flex-direction: column; gap: 8px;
   }
+  #layerToggles.visible { display: flex; }
+  .layerToggle {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 11px; font-size: 11px; color: var(--cream-dim);
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .layerToggle.active { color: var(--ember); border-color: var(--ember-dim); }
   #terrainMap {
     position: absolute; inset: 0; opacity: 0; pointer-events: none;
     transition: opacity 0.6s ease; z-index: 1;
@@ -147,7 +160,10 @@
     <div id="poleFade"></div>
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
-    <button id="resetBtn">reset view</button>
+    <div id="layerToggles">
+      <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
+      <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
+    </div>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
     <div id="empty">
@@ -163,7 +179,8 @@
     </div>
     <div id="location">
       <div id="locationCity"></div>
-      <div id="locationCoords"></div>
+      <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
+      <div id="locationWeather"></div>
     </div>
     <div id="count"><b id="countNum">0</b>lights shared</div>
   </div>
@@ -185,8 +202,17 @@ async function loadMapLibre() {
 // ---- config ----
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
+// Stadia Maps tiles (used for the Stamen Toner labels overlay below) require
+// auth for anything not served from localhost/127.0.0.1 — this site is
+// served from a workers.dev domain, so unauthenticated requests 401 and the
+// (transparent, so silently) overlay never appears. Get a free key at
+// https://client.stadiamaps.com/signup/ and paste it here, OR skip this
+// entirely and instead add this exact domain under "Authentication
+// Configuration" in the Stadia client dashboard for domain-based auth —
+// either one is sufficient on its own, and if you use domain auth this can
+// stay blank.
+const STADIA_API_KEY = "121d3e47-f89d-4f87-b987-49d42aa7f800";
 const LAND_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json";
-const COUNTRIES_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json";
 const LAKES_URL = "https://ne.freemap.online/50m/physical/ne_50m_lakes.json";
 const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_centerlines.json";
 
@@ -196,7 +222,10 @@ const statusEl = document.getElementById('status');
 const countEl = document.getElementById('countNum');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
-const resetBtn = document.getElementById('resetBtn');
+const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
+const toggleLinesBtn = document.getElementById('toggleLinesBtn');
+let tonerLabelsOn = true;
+let terrainLinesOn = true;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -228,7 +257,7 @@ let DOCK_K = 1, POP_OUT_K = 2, REDOCK_K = 0.65;
 let dockTransform = { x: 0, y: 0 };
 let inlayClipPath = 'none';
 
-let land = null, lakes = null, rivers = null, antarctica = null;
+let land = null, lakes = null, rivers = null;
 
 // ============================================================
 // LOCATION READOUT: nearest major city + lat/long, shown on the dashboard,
@@ -236,27 +265,119 @@ let land = null, lakes = null, rivers = null, antarctica = null;
 // undocked, or the 3D camera's center when in 3D).
 // ============================================================
 const MAJOR_CITIES = [
-  ['New York', 40.71, -74.01], ['Los Angeles', 34.05, -118.24], ['Chicago', 41.88, -87.63],
-  ['Houston', 29.76, -95.37], ['Phoenix', 33.45, -112.07], ['Philadelphia', 39.95, -75.16],
-  ['San Antonio', 29.42, -98.49], ['San Diego', 32.72, -117.16], ['Dallas', 32.78, -96.80],
-  ['Austin', 30.27, -97.74], ['San Francisco', 37.77, -122.42], ['Seattle', 47.61, -122.33],
-  ['Denver', 39.74, -104.99], ['Boston', 42.36, -71.06], ['Miami', 25.76, -80.19],
-  ['Atlanta', 33.75, -84.39], ['Washington DC', 38.91, -77.04], ['Las Vegas', 36.17, -115.14],
-  ['Portland', 45.52, -122.68], ['Detroit', 42.33, -83.05], ['Minneapolis', 44.98, -93.27],
-  ['New Orleans', 29.95, -90.07], ['Kansas City', 39.10, -94.58], ['Nashville', 36.16, -86.78],
-  ['Salt Lake City', 40.76, -111.89], ['Toronto', 43.65, -79.38], ['Vancouver', 49.28, -123.12],
-  ['Montreal', 45.50, -73.57], ['Mexico City', 19.43, -99.13], ['London', 51.51, -0.13],
-  ['Paris', 48.85, 2.35], ['Berlin', 52.52, 13.40], ['Madrid', 40.42, -3.70],
-  ['Rome', 41.90, 12.50], ['Amsterdam', 52.37, 4.90], ['Moscow', 55.76, 37.62],
-  ['Istanbul', 41.01, 28.98], ['Cairo', 30.04, 31.24], ['Lagos', 6.52, 3.38],
-  ['Nairobi', -1.29, 36.82], ['Johannesburg', -26.20, 28.05], ['Antarctica', -82.00, 0.00], ['Dubai', 25.20, 55.27],
-  ['Mumbai', 19.08, 72.88], ['Delhi', 28.70, 77.10], ['Bangkok', 13.76, 100.50],
-  ['Singapore', 1.35, 103.82], ['Jakarta', -6.21, 106.85], ['Manila', 14.60, 120.98],
-  ['Beijing', 39.90, 116.41], ['Shanghai', 31.23, 121.47], ['Hong Kong', 22.32, 114.17],
-  ['Tokyo', 35.68, 139.65], ['Seoul', 37.57, 126.98], ['Sydney', -33.87, 151.21],
-  ['Melbourne', -37.81, 144.96], ['Auckland', -36.85, 174.76], ['São Paulo', -23.55, -46.63],
-  ['Rio de Janeiro', -22.91, -43.17], ['Buenos Aires', -34.60, -58.38], ['Lima', -12.05, -77.04],
-  ['Bogotá', 4.71, -74.07], ['Santiago', -33.45, -70.67],
+  // US Northeast
+  ['New York', 40.71, -74.01], ['Philadelphia', 39.95, -75.16], ['Boston', 42.36, -71.06],
+  ['Washington DC', 38.91, -77.04], ['Baltimore', 39.29, -76.61], ['Pittsburgh', 40.44, -79.99],
+  ['Buffalo', 42.89, -78.88], ['Providence', 41.82, -71.41], ['Hartford', 41.76, -72.69],
+  ['Albany', 42.65, -73.75], ['Rochester', 43.16, -77.61],
+  // US South
+  ['Houston', 29.76, -95.37], ['San Antonio', 29.42, -98.49], ['Dallas', 32.78, -96.80],
+  ['Austin', 30.27, -97.74], ['Miami', 25.76, -80.19], ['Atlanta', 33.75, -84.39],
+  ['New Orleans', 29.95, -90.07], ['Nashville', 36.16, -86.78], ['Charlotte', 35.23, -80.84],
+  ['Memphis', 35.15, -90.05], ['Louisville', 38.25, -85.76], ['Jacksonville', 30.33, -81.66],
+  ['Tampa', 27.95, -82.46], ['Orlando', 28.54, -81.38], ['Raleigh', 35.78, -78.64],
+  ['Richmond', 37.54, -77.44], ['Charleston', 32.78, -79.93], ['Columbia', 34.00, -81.03],
+  ['Birmingham', 33.52, -86.80], ['Jackson', 32.30, -90.18], ['Little Rock', 34.75, -92.29],
+  ['Baton Rouge', 30.45, -91.15], ['Shreveport', 32.53, -93.75], ['Mobile', 30.69, -88.04],
+  ['Savannah', 32.08, -81.09], ['Knoxville', 35.96, -83.92], ['Chattanooga', 35.05, -85.31],
+  ['Lexington', 38.04, -84.50], ['El Paso', 31.76, -106.49], ['Corpus Christi', 27.80, -97.40],
+  ['Lubbock', 33.58, -101.86], ['Oklahoma City', 35.47, -97.52], ['Tulsa', 36.15, -95.99],
+  // US Midwest
+  ['Chicago', 41.88, -87.63], ['Detroit', 42.33, -83.05], ['Minneapolis', 44.98, -93.27],
+  ['Kansas City', 39.10, -94.58], ['St. Louis', 38.63, -90.20], ['Columbus', 39.96, -83.00],
+  ['Indianapolis', 39.77, -86.16], ['Cleveland', 41.50, -81.69], ['Cincinnati', 39.10, -84.51],
+  ['Milwaukee', 43.04, -87.91], ['Omaha', 41.26, -95.93], ['Des Moines', 41.59, -93.62],
+  ['Wichita', 37.69, -97.34], ['Fargo', 46.88, -96.79], ['Sioux Falls', 43.55, -96.73],
+  ['Rapid City', 44.08, -103.23], ['Cheyenne', 41.14, -104.82],
+  // US West
+  ['Los Angeles', 34.05, -118.24], ['Phoenix', 33.45, -112.07], ['San Diego', 32.72, -117.16],
+  ['San Francisco', 37.77, -122.42], ['Seattle', 47.61, -122.33], ['Denver', 39.74, -104.99],
+  ['Las Vegas', 36.17, -115.14], ['Portland', 45.52, -122.68], ['Salt Lake City', 40.76, -111.89],
+  ['Sacramento', 38.58, -121.49], ['Fresno', 36.75, -119.77], ['Bakersfield', 35.37, -119.02],
+  ['Tucson', 32.22, -110.93], ['Albuquerque', 35.08, -106.65], ['Boise', 43.62, -116.20],
+  ['Reno', 39.53, -119.81], ['Spokane', 47.66, -117.43], ['Billings', 45.78, -108.50],
+  ['Anchorage', 61.22, -149.90], ['Honolulu', 21.31, -157.86],
+  // Canada
+  ['Toronto', 43.65, -79.38], ['Vancouver', 49.28, -123.12], ['Montreal', 45.50, -73.57],
+  ['Calgary', 51.05, -114.07], ['Edmonton', 53.55, -113.49], ['Ottawa', 45.42, -75.70],
+  ['Winnipeg', 49.90, -97.14], ['Quebec City', 46.81, -71.21], ['Halifax', 44.65, -63.57],
+  ['Saskatoon', 52.13, -106.67], ['Victoria', 48.43, -123.37], ['Whitehorse', 60.72, -135.05],
+  ['Yellowknife', 62.45, -114.37],
+  // Mexico, Central America, Caribbean
+  ['Mexico City', 19.43, -99.13], ['Guadalajara', 20.66, -103.35], ['Monterrey', 25.69, -100.32],
+  ['Tijuana', 32.51, -117.02], ['Cancún', 21.16, -86.85], ['Guatemala City', 14.63, -90.51],
+  ['San José', 9.93, -84.08], ['Panama City', 8.98, -79.52], ['Havana', 23.14, -82.36],
+  ['San Salvador', 13.69, -89.19], ['Tegucigalpa', 14.07, -87.19], ['Managua', 12.14, -86.25],
+  ['Kingston', 17.97, -76.79], ['Santo Domingo', 18.49, -69.94], ['San Juan', 18.47, -66.11],
+  ['Port-au-Prince', 18.59, -72.31], ['Nassau', 25.06, -77.35],
+  // South America
+  ['São Paulo', -23.55, -46.63], ['Rio de Janeiro', -22.91, -43.17], ['Buenos Aires', -34.60, -58.38],
+  ['Lima', -12.05, -77.04], ['Bogotá', 4.71, -74.07], ['Santiago', -33.45, -70.67],
+  ['Caracas', 10.48, -66.90], ['Quito', -0.18, -78.47], ['La Paz', -16.50, -68.15],
+  ['Asunción', -25.28, -57.63], ['Montevideo', -34.90, -56.16], ['Medellín', 6.24, -75.58],
+  ['Salvador', -12.97, -38.51], ['Brasília', -15.79, -47.88], ['Belo Horizonte', -19.92, -43.94],
+  ['Recife', -8.05, -34.90], ['Fortaleza', -3.73, -38.53], ['Manaus', -3.12, -60.02],
+  ['Curitiba', -25.43, -49.27], ['Porto Alegre', -30.03, -51.23], ['Córdoba', -31.42, -64.18],
+  ['Guayaquil', -2.19, -79.89],
+  // Western & Northern Europe
+  ['London', 51.51, -0.13], ['Paris', 48.85, 2.35], ['Berlin', 52.52, 13.40],
+  ['Madrid', 40.42, -3.70], ['Rome', 41.90, 12.50], ['Amsterdam', 52.37, 4.90],
+  ['Vienna', 48.21, 16.37], ['Zurich', 47.38, 8.54], ['Geneva', 46.20, 6.14],
+  ['Brussels', 50.85, 4.35], ['Copenhagen', 55.68, 12.57], ['Stockholm', 59.33, 18.07],
+  ['Oslo', 59.91, 10.75], ['Helsinki', 60.17, 24.94], ['Reykjavik', 64.15, -21.94],
+  ['Dublin', 53.35, -6.26], ['Edinburgh', 55.95, -3.19], ['Manchester', 53.48, -2.24],
+  ['Barcelona', 41.39, 2.17], ['Milan', 45.46, 9.19], ['Naples', 40.85, 14.27],
+  ['Munich', 48.14, 11.58], ['Hamburg', 53.55, 9.99], ['Frankfurt', 50.11, 8.68],
+  ['Cologne', 50.94, 6.96], ['Lisbon', 38.72, -9.14],
+  // Eastern Europe & Russia
+  ['Moscow', 55.76, 37.62], ['St. Petersburg', 59.93, 30.34], ['Novosibirsk', 55.03, 82.92],
+  ['Yekaterinburg', 56.84, 60.61], ['Vladivostok', 43.12, 131.89], ['Kyiv', 50.45, 30.52],
+  ['Minsk', 53.90, 27.57], ['Warsaw', 52.23, 21.01], ['Krakow', 50.06, 19.94],
+  ['Prague', 50.08, 14.44], ['Budapest', 47.50, 19.04], ['Bucharest', 44.43, 26.10],
+  ['Sofia', 42.70, 23.32], ['Athens', 37.98, 23.73], ['Belgrade', 44.79, 20.45],
+  ['Zagreb', 45.81, 15.98], ['Ljubljana', 46.06, 14.51], ['Bratislava', 48.15, 17.11],
+  ['Riga', 56.95, 24.11], ['Vilnius', 54.69, 25.28], ['Tallinn', 59.44, 24.75],
+  // Middle East
+  ['Istanbul', 41.01, 28.98], ['Dubai', 25.20, 55.27], ['Abu Dhabi', 24.45, 54.38],
+  ['Riyadh', 24.71, 46.68], ['Jeddah', 21.54, 39.17], ['Doha', 25.29, 51.53],
+  ['Kuwait City', 29.38, 47.99], ['Muscat', 23.59, 58.41], ['Manama', 26.23, 50.59],
+  ['Amman', 31.95, 35.93], ['Beirut', 33.89, 35.50], ['Baghdad', 33.31, 44.36],
+  ['Tehran', 35.69, 51.39], ['Tel Aviv', 32.08, 34.78], ['Jerusalem', 31.77, 35.21],
+  // Africa
+  ['Cairo', 30.04, 31.24], ['Lagos', 6.52, 3.38], ['Nairobi', -1.29, 36.82],
+  ['Johannesburg', -26.20, 28.05], ['Cape Town', -33.92, 18.42], ['Durban', -29.86, 31.02],
+  ['Casablanca', 33.57, -7.59], ['Algiers', 36.75, 3.06], ['Tunis', 36.81, 10.18],
+  ['Tripoli', 32.89, 13.19], ['Khartoum', 15.50, 32.56], ['Addis Ababa', 9.03, 38.74],
+  ['Dar es Salaam', -6.79, 39.21], ['Kampala', 0.35, 32.58], ['Kigali', -1.94, 30.06],
+  ['Accra', 5.60, -0.19], ['Abidjan', 5.35, -4.03], ['Dakar', 14.72, -17.47],
+  ['Kinshasa', -4.44, 15.27], ['Luanda', -8.84, 13.23], ['Lusaka', -15.39, 28.32],
+  ['Harare', -17.83, 31.05], ['Maputo', -25.97, 32.57], ['Gaborone', -24.65, 25.91],
+  ['Windhoek', -22.56, 17.08],
+  // South & Central Asia
+  ['Mumbai', 19.08, 72.88], ['Delhi', 28.70, 77.10], ['Bangalore', 12.97, 77.59],
+  ['Chennai', 13.08, 80.27], ['Kolkata', 22.57, 88.36], ['Hyderabad', 17.39, 78.49],
+  ['Karachi', 24.86, 67.01], ['Lahore', 31.55, 74.34], ['Islamabad', 33.68, 73.05],
+  ['Dhaka', 23.81, 90.41], ['Kathmandu', 27.72, 85.32], ['Colombo', 6.93, 79.85],
+  ['Kabul', 34.56, 69.21], ['Almaty', 43.24, 76.95], ['Tashkent', 41.30, 69.24],
+  ['Baku', 40.41, 49.87], ['Tbilisi', 41.72, 44.79], ['Yerevan', 40.18, 44.51],
+  ['Ulaanbaatar', 47.89, 106.91],
+  // East & Southeast Asia
+  ['Bangkok', 13.76, 100.50], ['Singapore', 1.35, 103.82], ['Jakarta', -6.21, 106.85],
+  ['Manila', 14.60, 120.98], ['Beijing', 39.90, 116.41], ['Shanghai', 31.23, 121.47],
+  ['Guangzhou', 23.13, 113.26], ['Shenzhen', 22.54, 114.06], ['Chengdu', 30.57, 104.07],
+  ["Xi'an", 34.27, 108.95], ['Wuhan', 30.59, 114.31], ['Chongqing', 29.56, 106.55],
+  ['Hong Kong', 22.32, 114.17], ['Taipei', 25.03, 121.57], ['Ho Chi Minh City', 10.82, 106.63],
+  ['Hanoi', 21.03, 105.85], ['Kuala Lumpur', 3.14, 101.69], ['Phnom Penh', 11.56, 104.92],
+  ['Vientiane', 17.97, 102.60], ['Yangon', 16.87, 96.20], ['Pyongyang', 39.02, 125.75],
+  ['Tokyo', 35.68, 139.65], ['Osaka', 34.69, 135.50], ['Nagoya', 35.18, 136.91],
+  ['Sapporo', 43.06, 141.35], ['Seoul', 37.57, 126.98], ['Busan', 35.18, 129.08],
+  // Oceania
+  ['Sydney', -33.87, 151.21], ['Melbourne', -37.81, 144.96], ['Perth', -31.95, 115.86],
+  ['Brisbane', -27.47, 153.03], ['Adelaide', -34.93, 138.60], ['Auckland', -36.85, 174.76],
+  ['Wellington', -41.29, 174.78], ['Christchurch', -43.53, 172.64], ['Suva', -18.14, 178.44],
+  ['Port Moresby', -9.48, 147.15],
+  // Polar
+  ['Antarctica', -82.00, 0.00],
 ];
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371, d2r = Math.PI / 180;
@@ -273,6 +394,83 @@ function nearestCity(lat, lon) {
   return best;
 }
 const HOME_LAT = 39.83, HOME_LON = -98.58; // matches the flat map's projection center
+
+// ---- regional weather readout (under the coords link) ----
+// Open-Meteo: free, no API key, and current_weather + timezone=auto gives
+// us both the condition/temperature AND the location's own local time in
+// one request — exactly what the display needs, with nothing to sign up
+// for.
+const REGIONAL_ZOOM_THRESHOLD = 6; // MapLibre-zoom-equivalent; below this it's a country/continent-scale view, not a "region" — nothing shows
+const WEATHER_READOUT_MIN_INTERVAL_MS = 3000; // never fetch more than this often, even while continuously panning through many distinct spots — this, not the distance below, is what actually bounds request volume
+const WEATHER_READOUT_MIN_MOVE_KM = 8; // refetch on smaller moves for more locationally precise readings; safe to tighten since the interval above already caps how often that can happen
+const WEATHER_READOUT_REFRESH_MS = 10 * 60 * 1000; // refetch periodically even while stationary, so it doesn't go stale
+let weatherReadoutLat = null, weatherReadoutLon = null;
+let weatherReadoutFetchedAt = 0;
+let weatherReadoutRequestId = 0;
+
+function weatherCodeDescription(code, isDay) {
+  // WMO weather codes, as used by Open-Meteo — collapsed to simple,
+  // human labels rather than the raw numeric code
+  if (code === 0) return isDay ? 'Sunny' : 'Clear';
+  if (code === 1) return isDay ? 'Mostly Sunny' : 'Mostly Clear';
+  if (code === 2) return 'Partly Cloudy';
+  if (code === 3) return 'Cloudy';
+  if (code === 45 || code === 48) return 'Foggy';
+  if (code === 51 || code === 53 || code === 55) return 'Drizzling';
+  if (code === 56 || code === 57) return 'Freezing Drizzle';
+  if (code === 61 || code === 63 || code === 65) return 'Rainy';
+  if (code === 66 || code === 67) return 'Freezing Rain';
+  if (code === 71 || code === 73 || code === 75 || code === 77) return 'Snowing';
+  if (code === 80 || code === 81 || code === 82) return 'Rainy';
+  if (code === 85 || code === 86) return 'Snowing';
+  if (code === 95 || code === 96 || code === 99) return 'Stormy';
+  return 'Unknown';
+}
+
+function formatOpenMeteoTime(isoLocal) {
+  // isoLocal looks like "2026-09-23T15:00" — already local to the queried
+  // location (timezone=auto), so this parses the HH:MM directly rather
+  // than handing it to `new Date()`, which would reinterpret it in the
+  // BROWSER's own timezone instead of the location's
+  const m = isoLocal.match(/T(\d{2}):(\d{2})/);
+  if (!m) return '';
+  let hour = parseInt(m[1], 10);
+  const minute = m[2];
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  hour = hour % 12; if (hour === 0) hour = 12;
+  return `${hour}:${minute}${ampm}`;
+}
+
+async function fetchLocationWeather(lat, lon) {
+  const requestId = ++weatherReadoutRequestId;
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(3)}&longitude=${lon.toFixed(3)}&current_weather=true&temperature_unit=fahrenheit&timezone=auto`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    if (requestId !== weatherReadoutRequestId) return; // a newer request has since superseded this one — drop this stale result
+    const cw = data.current_weather;
+    if (!cw) return;
+    const desc = weatherCodeDescription(cw.weathercode, cw.is_day === 1);
+    const temp = Math.round(cw.temperature);
+    const timeStr = formatOpenMeteoTime(cw.time);
+    document.getElementById('locationWeather').textContent = `${desc}, ${temp}°, ${timeStr}`;
+  } catch (err) {
+    console.warn('gallery: location weather fetch failed —', err.message);
+    // leave whatever was last shown rather than clearing it on a transient failure
+  }
+}
+
+function maybeFetchLocationWeather(lat, lon) {
+  const now = performance.now();
+  const movedFar = weatherReadoutLat == null || haversineKm(lat, lon, weatherReadoutLat, weatherReadoutLon) > WEATHER_READOUT_MIN_MOVE_KM;
+  const stale = now - weatherReadoutFetchedAt > WEATHER_READOUT_REFRESH_MS;
+  if (!movedFar && !stale) return; // already have a recent-enough fetch for around here
+  if (now - weatherReadoutFetchedAt < WEATHER_READOUT_MIN_INTERVAL_MS) return; // rate limit
+  weatherReadoutLat = lat; weatherReadoutLon = lon; weatherReadoutFetchedAt = now;
+  fetchLocationWeather(lat, lon);
+}
+
 function updateLocationReadout() {
   let lon, lat;
   if (in3D && terrainMapInstance) {
@@ -289,7 +487,21 @@ function updateLocationReadout() {
   const polarPlace = lat <= -60 ? 'Antarctica' : (lat >= 60 ? 'Arctic' : null);
   const city = polarPlace ? null : nearestCity(lat, lon);
   document.getElementById('locationCity').textContent = polarPlace || (city ? 'near ' + city[0] : '');
-  document.getElementById('locationCoords').textContent = formatLatLon(lon, lat);
+  const coordsEl = document.getElementById('locationCoords');
+  coordsEl.textContent = formatLatLon(lon, lat);
+  coordsEl.href = wikimapUrl(lon, lat);
+
+  // weather only at a "regional" zoom or closer — docked (the fixed home
+  // view) and any wide zoomed-out view show nothing here
+  let effectiveZoom = -Infinity;
+  if (in3D && terrainMapInstance) effectiveZoom = terrainMapInstance.getZoom();
+  else if (!docked) effectiveZoom = equivalentMapLibreZoom(lat);
+  if (effectiveZoom >= REGIONAL_ZOOM_THRESHOLD) {
+    maybeFetchLocationWeather(lat, lon);
+  } else {
+    document.getElementById('locationWeather').textContent = '';
+    weatherReadoutLat = null; weatherReadoutLon = null; // forget last fetch point so zooming back in always fetches fresh
+  }
 }
 
 let events = [];
@@ -308,7 +520,8 @@ function resize() {
   const b = path.bounds(sphere);
   discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
   discRadius = (b[1][0] - b[0][0]) / 2;
-  bakeWater(); // expensive (canvas blur filter) — only runs here, on load/resize, never per animation frame
+  // rivers/lakes now draw live as vectors each frame (see draw()) — no
+  // pre-baked bitmap to build on resize anymore
 
   // inlay geometry — read from the actual rendered #mapInlay element rather
   // than recomputed independently, so the JS math driving the dock
@@ -337,44 +550,6 @@ function resize() {
   }
 }
 
-// rivers/lakes, pre-rendered WITH their blur applied once, at the same
-// fixed (gamma=0) projected coordinates everything else uses — draw() just
-// blits this each frame via the live pan/zoom/rotate transform, the same
-// cheap pattern used elsewhere, instead of recomputing a canvas blur filter
-// on every single animation frame (which is expensive and was the real
-// cause of the spin feeling laggy)
-let waterCanvas = null;
-function bakeWater() {
-  if (!rivers && !lakes) { waterCanvas = null; return; }
-  const rect = canvas.parentElement.getBoundingClientRect();
-  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
-  const off = document.createElement('canvas');
-  off.width = w; off.height = h;
-  const octx = off.getContext('2d');
-  const bakePath = d3.geoPath(projection, octx);
-  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
-  if (rivers) {
-    octx.save();
-    octx.filter = 'blur(1px)';
-    octx.beginPath(); bakePath(rivers);
-    octx.strokeStyle = oceanColor;
-    octx.globalAlpha = 0.8;
-    octx.lineWidth = 0.4;
-    octx.stroke();
-    octx.restore();
-  }
-  if (lakes) {
-    octx.save();
-    octx.filter = 'blur(1.5px)';
-    octx.beginPath(); bakePath(lakes);
-    octx.fillStyle = oceanColor;
-    octx.globalAlpha = 0.8;
-    octx.fill();
-    octx.restore();
-  }
-  waterCanvas = off;
-}
-
 async function loadGeo(url, isTopo, objectName) {
   try {
     const res = await fetch(url);
@@ -388,6 +563,11 @@ async function loadGeo(url, isTopo, objectName) {
 }
 
 const sphere = { type: 'Sphere' };
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
 
 
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
@@ -404,8 +584,8 @@ function draw() {
 
   // two-finger spin: a pure rotation around the disc's (fixed) center,
   // layered on top of pan/zoom. Decoupled from the projection itself, so it
-  // applies identically and cheaply to both the live vector paths below AND
-  // the pre-baked terrain bitmap, without needing to re-bake anything.
+  // applies identically and cheaply to everything drawn below without any
+  // extra bookkeeping.
   ctx.translate(discCenter.x, discCenter.y);
   ctx.rotate(rotationGamma * Math.PI / 180);
   ctx.translate(-discCenter.x, -discCenter.y);
@@ -417,8 +597,9 @@ function draw() {
   // softly into the beige page background instead of a hard circular border
   const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
   const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
+  const [or, og, ob] = hexToRgb(oceanColor);
   oceanGrad.addColorStop(0, oceanColor);
-  oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
+  oceanGrad.addColorStop(1, `rgba(${or}, ${og}, ${ob}, 0)`);
   ctx.beginPath(); path(sphere);
   ctx.fillStyle = oceanGrad;
   ctx.fill();
@@ -428,8 +609,18 @@ function draw() {
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--land');
     ctx.fill();
   }
-  if (waterCanvas) {
-    ctx.drawImage(waterCanvas, 0, 0, waterCanvas.width, waterCanvas.height);
+  // rivers/lakes drawn live as vector paths (not pre-baked to a bitmap) so
+  // they stay crisp at any zoom/DPI, same as land/ocean above
+  if (!docked && rivers) {
+    ctx.beginPath(); path(rivers);
+    ctx.strokeStyle = oceanColor;
+    ctx.lineWidth = lw(0.4);
+    ctx.stroke();
+  }
+  if (lakes) {
+    ctx.beginPath(); path(lakes);
+    ctx.fillStyle = oceanColor;
+    ctx.fill();
   }
 
   drawEvents(lw, pr);
@@ -523,7 +714,12 @@ const zoomBehavior = d3.zoom()
       // exit path already)
       if (!in3D && !transitioning && transform.k <= REDOCK_K) dockWithFade();
     }
-    draw();
+    // no draw() here — tick()'s rAF loop already redraws every frame
+    // unconditionally. Calling draw() again per raw touch-move event was
+    // redundant, and since a two-finger gesture (especially a fast
+    // direction reversal) can fire many touch events within a single
+    // frame, those extra synchronous draws piled up and backed up the
+    // main thread, which is what caused the jumpiness/freeze-ups.
   });
 d3.select(canvas).call(zoomBehavior);
 
@@ -568,6 +764,32 @@ function formatLatLon(lon, lat) {
   return `${latStr}, ${lonStr}`;
 }
 
+// wikimap.wiki plots locations in Web Mercator (EPSG:3857) meters, not
+// plain lat/lon degrees — and, per their own URL format, the "lat" query
+// param actually holds the mercator X (derived from longitude) while "lon"
+// holds the mercator Y (derived from latitude). Confirmed against their own
+// example link for Lima city center.
+const EARTH_RADIUS_M = 6378137;
+function toWebMercator(lat, lon) {
+  const x = lon * (Math.PI / 180) * EARTH_RADIUS_M;
+  const y = EARTH_RADIUS_M * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
+  return [x, y];
+}
+function wikimapUrl(lon, lat) {
+  const wrappedLon = ((lon + 540) % 360) - 180; // normalize in case 3D world-copy wrap pushed lon outside -180..180
+  const clampedLat = Math.max(-85.05, Math.min(85.05, lat)); // Web Mercator's own latitude limit
+  const [mercX, mercY] = toWebMercator(clampedLat, wrappedLon);
+  const params = new URLSearchParams({
+    base: 'map',
+    lat: mercX.toFixed(4),
+    lon: mercY.toFixed(4),
+    showAll: 'true',
+    wiki: 'enwiki',
+    zoom: '14',
+  });
+  return `https://wikimap.wiki/?${params.toString()}`;
+}
+
 function undockWithFade(lon, lat) {
   document.getElementById('transitionCoords').textContent = formatLatLon(lon, lat);
   playFadeTransition(() => {
@@ -600,11 +822,35 @@ function dockWithFade() {
   }, 900, 1100); // slow, calm — settling back into the inlay, not snapping
 }
 
-function dockMap() { dockWithFade(); } // resetBtn / initial-load call sites — same mechanism
+function dockMap() { dockWithFade(); } // initial-load call sites — same mechanism
 
-resetBtn.onclick = () => {
-  rotationGamma = 0; spinVelocity = 0;
-  dockMap();
+// Applies the current on/off state to the actual MapLibre layers. Guarded
+// with getLayer() + try/catch since it can run before the 3D map (or its
+// style) exists yet — in that case the booleans above are just remembered
+// and read when the layers are first created in initTerrainMap().
+function applyLayerToggles() {
+  if (!terrainMapInstance) return;
+  try {
+    if (terrainMapInstance.getLayer('stamen-toner-labels')) {
+      terrainMapInstance.setLayoutProperty('stamen-toner-labels', 'visibility', tonerLabelsOn ? 'visible' : 'none');
+    }
+    if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
+      terrainMapInstance.setLayoutProperty('stamen-terrain-lines', 'visibility', terrainLinesOn ? 'visible' : 'none');
+    }
+  } catch (err) {
+    console.warn('gallery: layer toggle failed', err);
+  }
+}
+
+toggleLabelsBtn.onclick = () => {
+  tonerLabelsOn = !tonerLabelsOn;
+  toggleLabelsBtn.classList.toggle('active', tonerLabelsOn);
+  applyLayerToggles();
+};
+toggleLinesBtn.onclick = () => {
+  terrainLinesOn = !terrainLinesOn;
+  toggleLinesBtn.classList.toggle('active', terrainLinesOn);
+  applyLayerToggles();
 };
 
 // ============================================================
@@ -645,108 +891,128 @@ function equivalentMapLibreZoom(lat) {
 
 // ============================================================
 // WEATHER: RainViewer's free public radar API, with snow and rain given
-// distinct client-side styling — soft fuzzy white for snow, faint blue for
-// rain — since RainViewer's own tiles just render both as one continuous
-// color ramp. There's no MapLibre style-spec paint property that can do
-// this kind of per-pixel conditional recoloring on a plain raster layer
-// (that needs actual pixel access), so this uses maplibregl.addProtocol to
-// intercept each tile, recolor it on a canvas, and hand the result back —
-// still fully client-side, no backend involved, just the real mechanism
-// for this rather than a style-property that doesn't exist.
+// distinct client-side styling — soft white for snow, faint --ocean blue
+// for rain — since RainViewer's own tiles just render both as one
+// continuous color ramp. There's no MapLibre style-spec paint property
+// that can do this kind of per-pixel conditional recoloring on a plain
+// raster layer (that needs actual pixel access), so this registers a
+// custom maplibregl.addProtocol handler that intercepts each tile,
+// recolors + softly blurs it on an OffscreenCanvas, and hands the result
+// back as a normal raster tile.
+//
+// This used to convert classified pixels into thousands of GeoJSON point
+// features (one 'circle' per sample) instead. That looked fine zoomed out
+// (dense clusters happened to read as organic texture) but fell apart
+// zoomed in — the source data is capped at zoom 7, so points sampled from
+// it don't get any denser as you zoom past that, they just look sparse —
+// and manually recomputing + refetching + rebuilding that whole point set
+// on every 'moveend' is real synchronous work that visibly popped in
+// tile-by-tile ("loading in blocks"). A raster tile sidesteps both: past
+// the source's own maxzoom (7, RainViewer's free-tier cap) MapLibre just
+// bilinear-upscales the last real tile instead of running out of dots, so
+// combined with the blur baked into each tile below it reads as a
+// continuous soft cloud wash at any zoom instead of thinning out — and
+// MapLibre's own tile loader handles viewport culling, caching, and a
+// built-in cross-fade between tiles natively (raster-fade-duration below),
+// instead of our own bounds math + Promise.all + full-GeoJSON-replace.
 //
 // Real, verified API: https://api.rainviewer.com/public/weather-maps.json
 // gives {host, radar:{past:[...]}}; tiles are
 // {host}{path}/256/{z}/{x}/{y}/{color}/{smooth}_{snow}.png — color=2 is
-// RainViewer's "Universal Blue" scheme, and snow=1 renders snow in a
-// visually distinct blue/purple range from the green-yellow-red rain ramp.
-// Free tier caps at zoom 7 — but critically, that's a data-resolution
-// limit, not a rendering one: we convert each classified sample pixel to
-// its real lon/lat and hand the whole set to MapLibre as GeoJSON, rendered
-// through a native 'circle' layer. That's the actual fix for the blur
-// complaint — a raster tile gets stretched and blurred like any image when
-// magnified, but vector circles are redrawn fresh every frame at whatever
-// resolution the screen needs, so they stay crisp at any zoom regardless
-// of the source data's fixed z7 resolution. The exact RGB split between
-// "snow blue" and "rain" below is a reasonable starting heuristic, not a
-// value from an official RainViewer color table (I couldn't find one to
-// verify against) — likely worth eyeballing against a real snowy tile.
+// RainViewer's "Universal Blue" scheme, and snow=1 renders snow pixels
+// using a distinct sub-palette from rain pixels (RainViewer classifies
+// this server-side from the underlying radar data, not something we
+// compute). Snow vs rain classification below is now built directly from
+// RainViewer's own published Universal Blue color table
+// (rainviewer.com/api/color-schemes.html — CSV linked there), not a
+// guessed RGB threshold: light rain is a similar cyan/blue to snow in
+// this palette (they only cleanly separate at higher intensity, where
+// rain shifts to yellow/orange/red and snow stays blue), so a simple
+// "blue high, red low" threshold — the previous approach — reliably
+// mistook ordinary light rain for snow. This instead does per-pixel
+// nearest-color matching against the real rain and snow palettes
+// (dBZ 0–40 from the color table, RGB only). Doing that per-pixel with a
+// direct distance search would be far too slow for a 256px tile, so it's
+// baked ONCE into a small quantized lookup table (5 bits/channel, 32768
+// entries — the nested loop below runs a single time at startup, not per
+// tile) and every pixel then costs one array lookup instead of ~80
+// distance calculations.
 // ============================================================
 let weatherTileUrl = null;
 let weatherReady = false;
 const WEATHER_Z = 7; // RainViewer's free-tier max
+const WEATHER_PROTOCOL = 'weatherprecip';
 
-function lonLatToTile(lon, lat, z) {
-  const n = Math.pow(2, z);
-  const x = Math.floor((lon + 180) / 360 * n);
-  const latRad = lat * Math.PI / 180;
-  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
-  return [x, y];
-}
-function tilePixelToLonLat(tx, ty, z, px, py, tileSize) {
-  const n = Math.pow(2, z);
-  const fx = tx + px / tileSize, fy = ty + py / tileSize;
-  const lon = fx / n * 360 - 180;
-  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * fy / n))) * 180 / Math.PI;
-  return [lon, lat];
-}
+// RainViewer's Universal Blue color table, RGB only, dBZ 0–40 (higher
+// dBZ is extreme-intensity territory and doesn't affect classification
+// in any realistic case)
+const RAIN_PALETTE_RGB = [[130,123,105],[133,125,106],[136,128,108],[139,130,109],[142,133,111],[146,136,113],[158,147,117],[170,158,121],[182,169,126],[194,180,130],[206,192,135],[210,196,139],[214,200,143],[218,204,147],[222,208,151],[136,221,238],[108,209,235],[81,197,232],[54,186,229],[27,174,226],[0,163,224],[0,154,213],[0,145,202],[0,136,191],[0,127,180],[0,119,170],[0,112,163],[0,105,156],[0,98,149],[0,91,142],[0,85,136],[0,81,128],[0,78,120],[0,74,112],[0,71,104],[255,238,0],[255,224,0],[255,210,0],[255,197,0],[255,183,0],[255,170,0]];
+const SNOW_PALETTE_RGB = [[199,255,255],[198,255,255],[197,255,255],[196,255,255],[195,255,255],[195,255,255],[194,255,255],[193,255,255],[192,255,255],[191,255,255],[191,255,255],[184,248,255],[178,242,255],[171,235,255],[165,229,255],[159,223,255],[152,216,255],[146,210,255],[139,203,255],[133,197,255],[127,191,255],[120,184,255],[114,178,255],[107,171,255],[101,165,255],[95,159,255],[91,155,255],[88,152,255],[85,149,255],[82,146,255],[79,143,255],[75,139,255],[72,136,255],[69,133,255],[66,130,255],[63,127,255],[59,123,255],[56,120,255],[53,117,255],[50,114,255],[47,111,255]];
 
-async function fetchWeatherTilePoints(tx, ty) {
-  const url = weatherTileUrl.replace('{z}', WEATHER_Z).replace('{x}', tx).replace('{y}', ty);
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return [];
-    const blob = await res.blob();
-    const bitmap = await createImageBitmap(blob);
-    const w = bitmap.width, h = bitmap.height;
-    const off = new OffscreenCanvas(w, h);
-    const octx = off.getContext('2d');
-    octx.drawImage(bitmap, 0, 0);
-    const src = octx.getImageData(0, 0, w, h).data;
-
-    const STEP = 5; // fine sampling — every few source pixels, not a coarse grid
-    const points = [];
-    for (let py = 0; py < h; py += STEP) {
-      for (let px = 0; px < w; px += STEP) {
-        const i = (py * w + px) * 4;
-        if (src[i + 3] < 10) continue; // no signal here
-        // "not too dense that you can't see through" — only keep a
-        // fraction of eligible points, thinning an otherwise-solid area
-        // into a scattered, see-through pattern
-        if (Math.random() > 0.55) continue;
-        const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
-        const jx = px + (Math.random() - 0.5) * STEP, jy = py + (Math.random() - 0.5) * STEP; // small jitter so points read as organic scatter, not a rigid grid
-        const [lon, lat] = tilePixelToLonLat(tx, ty, WEATHER_Z, jx, jy, w);
-        points.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { kind: isSnow ? 'snow' : 'rain' } });
+let snowClassifyLUT = null;
+function buildSnowClassifyLUT() {
+  const BITS = 5, LEVELS = 1 << BITS; // 32 levels/channel, 32768 entries total
+  const lut = new Uint8Array(LEVELS * LEVELS * LEVELS);
+  for (let ri = 0; ri < LEVELS; ri++) {
+    for (let gi = 0; gi < LEVELS; gi++) {
+      for (let bi = 0; bi < LEVELS; bi++) {
+        const r = ri << (8 - BITS), g = gi << (8 - BITS), b = bi << (8 - BITS);
+        let bestRain = Infinity, bestSnow = Infinity;
+        for (const [pr, pg, pb] of RAIN_PALETTE_RGB) { const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2; if (d < bestRain) bestRain = d; }
+        for (const [pr, pg, pb] of SNOW_PALETTE_RGB) { const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2; if (d < bestSnow) bestSnow = d; }
+        lut[(ri << (2 * BITS)) | (gi << BITS) | bi] = bestSnow < bestRain ? 1 : 0;
       }
     }
-    return points;
-  } catch (err) {
-    console.warn('GALLERY: weather tile fetch failed for', tx, ty, '—', err.message);
-    return [];
   }
+  return lut;
+}
+function isSnowPixel(r, g, b) {
+  if (!snowClassifyLUT) snowClassifyLUT = buildSnowClassifyLUT(); // built once, lazily, off the critical path until the first tile actually needs it
+  const BITS = 5;
+  return snowClassifyLUT[((r >> (8 - BITS)) << (2 * BITS)) | ((g >> (8 - BITS)) << BITS) | (b >> (8 - BITS))] === 1;
 }
 
-async function refreshWeatherPoints() {
-  if (!weatherTileUrl || !terrainMapInstance) return;
-  const src = terrainMapInstance.getSource('weatherPoints');
-  if (!src) return;
-  const bounds = terrainMapInstance.getBounds();
-  const n = Math.pow(2, WEATHER_Z);
-  const [xMin, yMax] = lonLatToTile(bounds.getWest(), bounds.getSouth(), WEATHER_Z);
-  const [xMax, yMin] = lonLatToTile(bounds.getEast(), bounds.getNorth(), WEATHER_Z);
-  const tiles = [];
-  for (let x = Math.max(0, xMin); x <= Math.min(n - 1, xMax); x++) {
-    for (let y = Math.max(0, yMin); y <= Math.min(n - 1, yMax); y++) tiles.push([x, y]);
+async function weatherProtocolHandler(params) {
+  // params.url looks like "weatherprecip://{z}/{x}/{y}" with the
+  // placeholders already resolved by MapLibre's own tile URL templating
+  const [z, x, y] = params.url.replace(`${WEATHER_PROTOCOL}://`, '').split('/');
+  const url = weatherTileUrl.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`weather tile ${res.status}`);
+  const bitmap = await createImageBitmap(await res.blob());
+  const w = bitmap.width, h = bitmap.height;
+
+  // pass 1: classify + recolor every pixel in place
+  const recolor = new OffscreenCanvas(w, h);
+  const rctx = recolor.getContext('2d');
+  rctx.drawImage(bitmap, 0, 0);
+  const img = rctx.getImageData(0, 0, w, h);
+  const data = img.data;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 10) { data[i + 3] = 0; continue; } // no signal here
+    const isSnow = isSnowPixel(data[i], data[i + 1], data[i + 2]);
+    if (isSnow) { data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; }
+    else { data[i] = 0x69; data[i + 1] = 0xce; data[i + 2] = 0xf1; } // matches --ocean
+    data[i + 3] = Math.min(255, data[i + 3] * 0.85); // slightly translucent
   }
-  if (tiles.length === 0 || tiles.length > 16) return; // zoomed too far out for this to mean anything — leave whatever was last shown
-  const results = await Promise.all(tiles.map(([x, y]) => fetchWeatherTilePoints(x, y)));
-  const features = results.flat();
-  src.setData({ type: 'FeatureCollection', features });
+  rctx.putImageData(img, 0, 0);
+
+  // pass 2: soft blur so edges read as an organic cloud wash rather than
+  // a hard raster boundary — this is what keeps it looking good even when
+  // MapLibre upscales this same tile well past its native zoom 7
+  const out = new OffscreenCanvas(w, h);
+  const octx = out.getContext('2d');
+  octx.filter = 'blur(3px)';
+  octx.drawImage(recolor, 0, 0);
+
+  const outBlob = await out.convertToBlob({ type: 'image/png' });
+  return { data: await outBlob.arrayBuffer() };
 }
 
 function initWeatherProtocol() {
   if (weatherReady) return;
   weatherReady = true;
+  maplibregl.addProtocol(WEATHER_PROTOCOL, weatherProtocolHandler);
   fetch('https://api.rainviewer.com/public/weather-maps.json')
     .then((res) => res.json())
     .then((data) => {
@@ -761,23 +1027,27 @@ function initWeatherProtocol() {
 
 function addWeatherLayerIfReady() {
   if (!terrainMapInstance || !weatherTileUrl) return;
-  if (terrainMapInstance.getSource('weatherPoints')) { refreshWeatherPoints(); return; }
+  if (terrainMapInstance.getSource('weatherPrecip')) return; // already added, tiles refresh on their own as MapLibre pans/zooms
   const addIt = () => {
-    terrainMapInstance.addSource('weatherPoints', {
-      type: 'geojson', data: { type: 'FeatureCollection', features: [] },
+    terrainMapInstance.addSource('weatherPrecip', {
+      type: 'raster',
+      tiles: [`${WEATHER_PROTOCOL}://{z}/{x}/{y}`],
+      tileSize: 256,
+      minzoom: 0,
+      maxzoom: WEATHER_Z,
       attribution: 'Weather: <a href="https://rainviewer.com" target="_blank">RainViewer</a>',
     });
     terrainMapInstance.addLayer({
-      id: 'weatherPoints', type: 'circle', source: 'weatherPoints',
+      id: 'weatherPrecip', type: 'raster', source: 'weatherPrecip',
       paint: {
-        'circle-radius': 2,
-        'circle-color': ['case', ['==', ['get', 'kind'], 'snow'], '#ffffff', '#b9dde2'],
-        'circle-opacity': 0.85,
-        'circle-blur': 0.1,
+        // full opacity at/below the source's own native resolution (zoom
+        // 7), fading to fully transparent by zoom 8 — reads as flying
+        // up through and past the cloud layer right as you approach it,
+        // rather than lingering as a wash for many more zoom levels
+        'raster-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.85, 8, 0],
+        'raster-fade-duration': 300, // cross-fades new tiles in smoothly instead of popping in block-by-block
       },
     });
-    terrainMapInstance.on('moveend', refreshWeatherPoints);
-    refreshWeatherPoints();
   };
   if (terrainMapInstance.isStyleLoaded()) addIt(); else terrainMapInstance.once('load', addIt);
 }
@@ -825,12 +1095,15 @@ function handlePoleWrap() {
 // ============================================================
 // ANTARCTIC TERRAIN COLOR PROTOCOL
 //
-// This is the important change: do NOT draw a second terrain mesh.
-// Instead, use the exact Mapterhorn DEM tiles that MapLibre already uses,
-// decode them client-side, and generate an ordinary raster tile whose pixels
-// are colored from BOTH elevation and geographic latitude. MapLibre then
-// drapes that raster tile over its real 3D terrain geometry. There is no
-// GeoJSON, polygon, mask, floating mesh, or white overlay.
+// Replaces the old approach (a Natural Earth Antarctica polygon drawn as a
+// GeoJSON fill layer on top of the terrain). Instead this decodes the
+// exact same Mapterhorn DEM tiles MapLibre already uses for terrain,
+// client-side, and generates an ordinary raster tile whose pixels are
+// colored from BOTH elevation and geographic latitude. MapLibre then
+// drapes that raster tile over the real 3D terrain geometry — no GeoJSON,
+// polygon, mask, floating mesh, or flat white overlay, and the ice
+// shading includes real hillshading computed from the DEM's own local
+// slope, not a faked gradient.
 // ============================================================
 let antarcticProtocolInstalled = false;
 
@@ -843,75 +1116,66 @@ function installAntarcticTerrainProtocol() {
     const z = parts[0], x = parts[1], y = parts[2];
     const size = 512;
     const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
-    const response = await fetch(sourceUrl, {signal: abortController && abortController.signal});
+    const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
     if (!response.ok) throw new Error(`Mapterhorn DEM ${response.status}`);
     const bitmap = await createImageBitmap(await response.blob());
 
     const canvas = document.createElement('canvas');
     canvas.width = size; canvas.height = size;
-    const ctx = canvas.getContext('2d', {willReadFrequently:true});
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(bitmap, 0, 0, size, size);
     if (bitmap.close) bitmap.close();
     const src = ctx.getImageData(0, 0, size, size).data;
     const out = ctx.createImageData(size, size);
 
-    const decode = (i) => (src[i] * 256 + src[i+1] + src[i+2] / 256) - 32768;
+    const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768; // Terrarium encoding
     const n = Math.pow(2, z);
-    const lonForPixel = (px) => ((x + px / size) / n) * 360 - 180;
     const latForPixel = (py) => {
       const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
       return 180 / Math.PI * Math.atan(Math.sinh(q));
     };
 
     // Same global elevation bands as the existing color-relief, but the
-    // Antarctic land palette is cool/white. Ocean remains transparent so the
-    // existing vivid-blue native DEM color-relief remains visible.
-    const normalPalette = (e) => {
-      if (e <= 0) return [24,191,255];
-      const stops = [[5,[169,208,137]],[300,[127,184,92]],[1000,[150,196,110]],
-        [1700,[194,181,126]],[2400,[143,174,92]],[3100,[217,198,143]],[4200,[245,236,212]]];
-      let a = [0,[169,208,137]];
-      for (const b of stops) { if (e <= b[0]) { const t=(e-a[0])/(b[0]-a[0]); return a[1].map((v,k)=>Math.round(v+(b[1][k]-v)*t)); } a=b; }
-      return stops[stops.length-1][1];
-    };
+    // Antarctic land palette is cool/white. Ocean remains transparent so
+    // the existing vivid-blue native DEM color-relief remains visible.
     const icePalette = (e) => {
-      if (e < 100) return [222,236,242];
-      if (e < 500) { const t=(e-100)/400; return [Math.round(222+25*t),Math.round(236+17*t),Math.round(242+13*t)]; }
-      if (e < 1500) { const t=(e-500)/1000; return [247,253,255]; }
-      if (e < 2500) { const t=(e-1500)/1000; return [Math.round(247-18*t),Math.round(253-15*t),Math.round(255-5*t)]; }
-      return [245,250,255];
+      if (e < 100) return [222, 236, 242];
+      if (e < 500) { const t = (e - 100) / 400; return [Math.round(222 + 25 * t), Math.round(236 + 17 * t), Math.round(242 + 13 * t)]; }
+      if (e < 1500) return [247, 253, 255];
+      if (e < 2500) { const t = (e - 1500) / 1000; return [Math.round(247 - 18 * t), Math.round(253 - 15 * t), Math.round(255 - 5 * t)]; }
+      return [245, 250, 255];
     };
 
-    for (let py=0; py<size; py++) {
+    for (let py = 0; py < size; py++) {
       const lat = latForPixel(py);
-      for (let px=0; px<size; px++) {
-        const si = (py*size+px)*4;
+      for (let px = 0; px < size; px++) {
+        const si = (py * size + px) * 4;
         const e = decode(si);
         const di = si;
 
-        // Geographic condition is computed per DEM pixel. Elevation keeps
+        // Geographic condition computed per DEM pixel. Elevation keeps
         // ocean blue: only actual positive land/ice is recolored.
         const isAntarctic = lat <= -60.0 && e > 0.0;
         if (!isAntarctic) {
-          out.data[di]=0; out.data[di+1]=0; out.data[di+2]=0; out.data[di+3]=0;
+          out.data[di] = 0; out.data[di + 1] = 0; out.data[di + 2] = 0; out.data[di + 3] = 0;
           continue;
         }
 
         let rgb = icePalette(e);
-        // Real hillshade from the same DEM, using adjacent pixels. This is
-        // not a fake gradient: it is calculated from the DEM slope.
-        const px0=Math.max(0,px-1), px1=Math.min(size-1,px+1);
-        const py0=Math.max(0,py-1), py1=Math.min(size-1,py+1);
-        const ex0=decode((py*size+px0)*4), ex1=decode((py*size+px1)*4);
-        const ey0=decode((py0*size+px)*4), ey1=decode((py1*size+px)*4);
-        const dx=(ex1-ex0)*0.5, dy=(ey1-ey0)*0.5;
-        const shade=Math.max(0.68, Math.min(1.12, 0.94 - dx*0.012 + dy*0.012));
-        rgb=rgb.map(v=>Math.max(0,Math.min(255,Math.round(v*shade))));
-        out.data[di]=rgb[0]; out.data[di+1]=rgb[1]; out.data[di+2]=rgb[2]; out.data[di+3]=255;
+        // Real hillshade from the same DEM, using adjacent pixels — not a
+        // fake gradient, calculated from the DEM's own slope.
+        const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
+        const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
+        const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
+        const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
+        const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
+        const shade = Math.max(0.68, Math.min(1.12, 0.94 - dx * 0.012 + dy * 0.012));
+        rgb = rgb.map(v => Math.max(0, Math.min(255, Math.round(v * shade))));
+        out.data[di] = rgb[0]; out.data[di + 1] = rgb[1]; out.data[di + 2] = rgb[2]; out.data[di + 3] = 255;
       }
     }
-    ctx.putImageData(out,0,0);
-    return {data: await createImageBitmap(canvas)};
+    ctx.putImageData(out, 0, 0);
+    return { data: await createImageBitmap(canvas) };
   });
 }
 
@@ -921,48 +1185,122 @@ function initTerrainMap() {
   initWeatherProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
+    // Restore continuous east/west wrapping. MapLibre natively repeats the
+    // Mercator world horizontally; the north/south portal below handles the
+    // otherwise finite polar edge with a hidden transition.
     renderWorldCopies: true,
     style: {
       version: 8,
       sources: {
-        terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json', encoding: 'terrarium', tileSize: 512 },
-        hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json', encoding: 'terrarium', tileSize: 512 },
+        // Mapterhorn — the terrain source MapLibre's own official 3D
+        // Terrain example uses. Faster and higher-res (512px) than the AWS
+        // Terrarium tiles tried before, which are documented as slow to
+        // fetch directly from a browser. Two separate source entries
+        // pointing at the same TileJSON, matching the official example's
+        // own pattern for improved render quality (terrain mesh + hillshade
+        // drawn from independent caches instead of sharing one).
+        terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        // lakes/rivers reuse the exact same GeoJSON already fetched for the
+        // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
+        // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
+        // Real DEM-derived Antarctic ice shading — see
+        // installAntarcticTerrainProtocol() above. Same Mapterhorn tiles
+        // as terrainSource/hillshadeSource, recolored+hillshaded
+        // client-side and served back as an ordinary raster tile.
         antarcticRelief: {
           type: 'raster',
           tiles: ['antarctic-relief://{z}/{x}/{y}'],
-          tileSize: 512, minzoom: 0, maxzoom: 14,
+          tileSize: 512,
+          minzoom: 0,
+          maxzoom: 14,
           attribution: 'Elevation: <a href="https://mapterhorn.com/" target="_blank">Mapterhorn</a>'
         },
+        // Stadia Maps / Stamen Toner labels — transparent raster overlay
+        // containing place names and road names. Use the raw 256px XYZ PNG
+        // endpoint because MapLibre does not interpret the {r} retina
+        // placeholder itself. This is intentionally an overlay only; it does
+        // not replace the existing terrain, color relief, hillshade, lakes,
+        // or rivers sources.
         stamenTonerLabels: {
           type: 'raster',
-          tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
-          tileSize: 256, minzoom: 0, maxzoom: 20,
-          attribution: '© <a href="https://stadiamaps.com/attribution/" target="_blank">Stadia Maps</a> © <a href="https://stamen.com/" target="_blank">Stamen Design</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
+          tiles: [
+            'https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png' +
+              (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
+          ],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 20,
+          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
+        },
+        // Stamen Terrain's line-only layer group (roads, borders — no fill,
+        // no labels), at 0.6 opacity over color-relief + hillshade.
+        stamenTerrainLines: {
+          type: 'raster',
+          tiles: [
+            'https://tiles.stadiamaps.com/tiles/stamen_terrain_lines/{z}/{x}/{y}.png' +
+              (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
+          ],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 20,
+          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
       },
       layers: [
+        // color-relief: colors the terrain BY ELEVATION straight from the
+        // DEM. The color stops aren't monotonic — green genuinely
+        // reappears at a higher band (alpine forest/meadow), not just a
+        // single strip near sea level fading permanently to tan — since
+        // MapLibre only requires the elevation stops themselves to
+        // increase, not the colors.
         {
           id: 'color-relief', type: 'color-relief', source: 'terrainSource',
-          paint: {'color-relief-color': ['interpolate',['linear'],['elevation'],
-            -200,'#18BFFF', 0,'#18BFFF', 5,'#a9d089', 300,'#7fb85c', 1000,'#96c46e',
-            1700,'#c2b57e', 2400,'#8fae5c', 3100,'#d9c68f', 4200,'#f5ecd4']}
+          paint: {
+            'color-relief-color': [
+              'interpolate', ['linear'], ['elevation'],
+              -200, '#18BFFF',   // all native ocean/bathymetry pixels use the same vivid ocean blue
+              0, '#18BFFF',      // sea level — same vivid blue as the extended ocean and sky
+              5, '#a9d089',      // coast, green starts immediately
+              300, '#7fb85c',    // lowland — saturated forest green
+              1000, '#96c46e',   // mid elevation, still solidly green
+              1700, '#c2b57e',   // transition band, green easing toward tan
+              2400, '#8fae5c',   // green reappears — alpine forest/meadow band
+              3100, '#d9c68f',   // higher slopes, tan
+              4200, '#f5ecd4',   // peaks, lightest tone in the palette
+            ],
+          },
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
+            // lighter/creamier overall (matching our warm beige palette)
+            // while keeping real contrast between shadow and highlight —
+            // a lighter shadow tone still reads as relief as long as it's
+            // clearly darker than the highlight, it just isn't a deep brown
             'hillshade-shadow-color': '#c9ad7a',
             'hillshade-highlight-color': '#fdf6e3',
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
           },
         },
-        // IMPORTANT: this layer was accidentally omitted from the previous
-        // build. The source existed, but nothing ever referenced it, so the
-        // generated Antarctic pixels could never reach the map. This is the
-        // actual raster layer that puts the computed ice relief onto the
-        // real MapLibre terrain surface.
+        // 0.6-opacity experiment: Stamen Terrain's line layer (roads,
+        // borders) laid over our own color-relief + hillshade. Sits below
+        // Antarctica/lakes/rivers/labels so those stay crisp on top.
+        {
+          id: 'stamen-terrain-lines',
+          type: 'raster',
+          source: 'stamenTerrainLines',
+          layout: { visibility: terrainLinesOn ? 'visible' : 'none' },
+          paint: {
+            'raster-opacity': 0.6,
+            'raster-fade-duration': 0
+          }
+        },
+        // Real DEM-derived ice shading, draped directly onto the terrain
+        // surface — see installAntarcticTerrainProtocol() above.
         {
           id: 'antarctic-relief',
           type: 'raster',
@@ -971,19 +1309,39 @@ function initTerrainMap() {
           maxzoom: 14,
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 0 }
         },
-        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: {'fill-color':'#18BFFF'} },
-        { id: 'rivers', type: 'line', source: 'riversGeo', paint: {'line-color':'#8fc3d6','line-width':1.2} },
+        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
+        { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
+        // Keep labels last so the transparent Toner label artwork stays
+        // readable above the terrain, hillshade, lakes, and rivers.
         {
-          id: 'stamen-toner-labels', type: 'raster', source: 'stamenTonerLabels',
-          paint: {'raster-opacity':1.0,'raster-fade-duration':0}
+          id: 'stamen-toner-labels',
+          type: 'raster',
+          source: 'stamenTonerLabels',
+          layout: { visibility: tonerLabelsOn ? 'visible' : 'none' },
+          paint: {
+            'raster-opacity': 1.0,
+            'raster-contrast': -0.6,
+            'raster-fade-duration': 0
+          }
         },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
-      sky: {'sky-color':'#18BFFF','sky-horizon-blend':0.28,'horizon-color':'#72D8FF','horizon-fog-blend':0.18},
+      // Keep the 3D camera's exposed sky/horizon vividly blue instead of
+      // inheriting the app's dark chrome. The horizon blend is kept moderate
+      // so the blue remains visible when the camera is pitched steeply.
+      sky: {
+        'sky-color': '#18BFFF',
+        'sky-horizon-blend': 0.28,
+        'horizon-color': '#72D8FF',
+        'horizon-fog-blend': 0.18
+      },
     },
-    attributionControl: { compact: true }, maxPitch:75, dragRotate:true, touchPitch:true,
+    attributionControl: { compact: true },
+    maxPitch: 75,
+    dragRotate: true,
+    touchPitch: true,
   });
-  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); });
+  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); applyLayerToggles(); });
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
@@ -1044,6 +1402,7 @@ async function enter3D(lon, lat) {
   document.getElementById('terrainMap').classList.add('active');
   canvas.classList.add('faded');
   backBtn.classList.add('visible');
+  document.getElementById('layerToggles').classList.add('visible');
   setTimeout(() => map3d.resize(), 50); // container was display:none-adjacent (opacity 0); MapLibre needs a resize once it's actually laid out
 }
 
@@ -1065,6 +1424,7 @@ function exit3D() {
   document.getElementById('terrainMap').classList.remove('active');
   canvas.classList.remove('faded');
   backBtn.classList.remove('visible');
+  document.getElementById('layerToggles').classList.remove('visible');
   draw();
 }
 const backBtn = document.getElementById('backBtn');
@@ -1158,15 +1518,7 @@ function tick() {
     loadGeo(RIVERS_URL, false),
   ]);
   land = landData; lakes = lakeData; rivers = riverData;
-  // Start the base azimuthal immediately. Antarctica is an enhancement for
-  // the 3D view and must never delay or break the first inlay render.
   resize();
-  // Fetch the country geometry in the background and inject only Antarctica
-  // once MapLibre has a live GeoJSON source. A failure here cannot affect the
-  // base map or dashboard.
-  loadGeo(COUNTRIES_URL, true, 'countries').then(countriesData => {
-    antarctica = countriesData?.features?.find(f => String(f.id).padStart(3, '0') === '010' || f.properties?.name === 'Antarctica') || null;
-  }).catch(err => console.warn('gallery: Antarctica geometry unavailable', err));
   await poll();
   setInterval(poll, POLL_MS);
   tick();

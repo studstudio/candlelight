@@ -1220,36 +1220,36 @@ function installAntarcticTerrainProtocol() {
 }
 
 // ============================================================
-// POLAR GALLERY BAND: replaces the flat ocean-blue "void" toward the
-// north/south edges of the Mercator terrain with a scrolling strip of
-// images pulled from the Worker's rolling public gallery (R2, under
-// gallery-images/{tag}/..., served by the /gallery/{tag}/images routes).
+// POLAR GALLERY CARDS: replaces the flat ocean-blue "void" toward the
+// north/south edges of the Mercator terrain with real standing photo
+// cards — not a texture draped on the terrain surface (which can only
+// ever be flat), but actual 3D geometry: thin extruded boxes, front face
+// textured with a gallery image, positioned perpendicular to the ground
+// via a MapLibre custom WebGL layer rendered with Three.js sharing
+// MapLibre's own GL context (the standard way to mix arbitrary 3D
+// content into a MapLibre scene — see installGalleryCardsLayer below).
 //
-// The images are already dithered — nothing to do there — but some are
-// the same custom-chunked PNGs the lamp composer tool produces for its
-// B/W e-ink animations: a normal, fully valid PNG (so it's never broken
-// as a file) with extra ancillary chunks appended before IEND — 'epRa'
-// (an animation header: dims, bits/pixel, frame count, interval) followed
-// by one 'epRb' chunk per frame, each a raw packed bitmap. Browsers
-// silently skip chunk types they don't recognize, so just drawImage()-ing
-// a chunked file would only ever show ONE frame (whatever the composer's
-// live canvas looked like at export time) — the actual animation frames
-// are invisible to a normal renderer. This decodes that structure
-// directly instead, walking the PNG's chunks by hand.
+// Images come from the Worker's rolling public gallery (R2, under
+// gallery-images/{tag}/..., served by the /gallery/{tag}/images routes).
+// They're already dithered — nothing to do there — but some are the same
+// custom-chunked PNGs the lamp composer tool produces for its B/W e-ink
+// animations: a normal, fully valid PNG (so it's never broken as a file)
+// with extra ancillary chunks appended before IEND — 'epRa' (an animation
+// header: dims, bits/pixel, frame count, interval) followed by one 'epRb'
+// chunk per frame, each a raw packed bitmap. Browsers silently skip chunk
+// types they don't recognize, so just drawImage()-ing a chunked file
+// would only ever show ONE frame (whatever the composer's live canvas
+// looked like at export time) — the actual animation frames are invisible
+// to a normal renderer. This decodes that structure directly instead,
+// walking the PNG's chunks by hand.
 // ============================================================
 const GALLERY_TAG = 'test-gallery';
-const GALLERY_PROTOCOL = 'gallery-band';
-// 4° of buffer before POLE_PORTAL_LAT (82, above) — the band is meant to
-// replace the void you'd otherwise see as you approach a pole, and by the
-// time you'd actually cross into the pole-portal's own fade/jump, this has
-// already taken over what was blue.
-const GALLERY_BAND_LAT = 78;
 const GALLERY_REFRESH_MS = 6 * 60 * 1000; // repoll the Worker for newly-uploaded images
-const GALLERY_STEP_MS = 900; // how often the scroll position (and any animation frames) advance
+const GALLERY_STEP_MS = 900; // how often card textures advance — both the scroll (which image a slot shows) and any animation frames
 
 let galleryItems = []; // [{ frames: ImageBitmap[], intervalMs, width, height }]
-let galleryProtocolInstalled = false;
 let galleryScrollStep = 0;
+let galleryRefreshTimer = null;
 
 function u32beRead(bytes, offset) {
   return ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
@@ -1339,90 +1339,150 @@ async function refreshGalleryItems() {
   }
 }
 
-function tileYToLat(y, n) {
-  const q = Math.PI - 2 * Math.PI * y / n;
-  return 180 / Math.PI * Math.atan(Math.sinh(q));
+// ---- Three.js, loaded lazily (same reasoning as maplibregl above — no
+// need to pay for it until someone actually reaches the 3D view) ----
+let THREE = null;
+async function loadThree() {
+  if (THREE) return THREE;
+  THREE = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
+  return THREE;
 }
 
-function installGalleryProtocol() {
-  if (galleryProtocolInstalled) return;
-  galleryProtocolInstalled = true;
-  maplibregl.addProtocol(GALLERY_PROTOCOL, async (params) => {
-    // trailing segments beyond z/x/y (a scroll-step cache-buster, see
-    // stepGalleryBand below) are intentionally ignored here
-    const [z, x, y] = params.url.replace(`${GALLERY_PROTOCOL}://`, '').split('/').map(Number);
-    const size = 256;
+const CARD_LAT = 82; // degrees — matches POLE_PORTAL_LAT above: deep enough in the void that the pole-portal's own fade/jump takes over shortly after
+const CARD_COUNT_PER_POLE = 24; // evenly spaced around the full ring of longitude
+const CARD_WIDTH_M = 15000; // real-world meters — the actual on-screen size dial; tune this directly if it still reads too big/small
+const CARD_ASPECT = 0.75; // height / width, overwritten per-card once each image's real dimensions are known
+const CARD_THICKNESS_RATIO = 0.06; // fraction of width — genuine depth, not a paper-thin plane
+const CARD_BASE_ALT_M = 100; // sits just above sea level rather than clipping into the water
 
-    // The source's own `bounds` only controls which tiles MapLibre
-    // BOTHERS requesting — it does NOT mean every requested tile is
-    // fully inside that box. At low zoom a single tile can be enormous
-    // (a whole hemisphere at z0) and still merely OVERLAP the band, so
-    // MapLibre requests it anyway — and without this check, a full
-    // image would get stretched across that whole oversized tile,
-    // leaking miles beyond the poles into ordinary terrain. So: compute
-    // this tile's actual latitude span and only draw an image if the
-    // ENTIRE tile sits inside the band. Any tile straddling the
-    // boundary gets the plain fallback instead.
-    const n = Math.pow(2, z);
-    const latTop = tileYToLat(y, n), latBottom = tileYToLat(y + 1, n);
-    // latTop is always the tile's northern (larger) edge, latBottom the
-    // southern (smaller) edge. "Fully in the south band" means even the
-    // tile's northernmost edge is still deep south of -GALLERY_BAND_LAT;
-    // "fully in the north band" means even its southernmost edge is
-    // still deep north of +GALLERY_BAND_LAT. (An earlier version checked
-    // min(|latTop|, |latBottom|) instead, which wrongly passed the
-    // single z0 tile — it spans pole to pole, so both its edges have a
-    // large absolute latitude even though the tile covers the equator.)
-    const fullyInBand = latTop <= -GALLERY_BAND_LAT || latBottom >= GALLERY_BAND_LAT;
+let galleryCardsLayerAdded = false;
+let galleryCardSlots = []; // [{ mesh, frontMat, texture }]
+let galleryTextureCache = new Map(); // "itemIdx-frameIdx" -> THREE.Texture, so stepGalleryCards doesn't re-upload the same frame to the GPU every tick
 
-    const canvas = new OffscreenCanvas(size, size);
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#69cef1'; // matches --ocean — fallback outside the band, or nothing loaded yet
-    ctx.fillRect(0, 0, size, size);
-    if (fullyInBand && galleryItems.length) {
-      // which image lands in this tile column: tile x plus a slowly
-      // advancing step offset, wrapped to however many images are
-      // loaded — the "scroll" is this mapping shifting by one every
-      // GALLERY_STEP_MS, not a sub-tile pixel scroll
-      const item = galleryItems[((x + galleryScrollStep) % galleryItems.length + galleryItems.length) % galleryItems.length];
-      const frameIdx = Math.floor(Date.now() / (item.intervalMs || 1000)) % item.frames.length;
-      const bitmap = item.frames[frameIdx];
-      // fit WITHIN a margin instead of stretching to cover the whole
-      // tile — a full-tile cover-fit was the other half of "too big"
-      const pad = 28;
-      const maxW = size - pad * 2, maxH = size - pad * 2;
-      const scale = Math.min(maxW / bitmap.width, maxH / bitmap.height);
-      const dw = bitmap.width * scale, dh = bitmap.height * scale;
-      ctx.drawImage(bitmap, (size - dw) / 2, (size - dh) / 2, dw, dh);
+// Builds one slot's geometry+materials, standing upright and facing
+// toward the equator (south for the north-pole ring, north for the
+// south-pole ring) — the only direction that's actually well-defined once
+// you're working in Mercator's flat projection rather than a true globe,
+// since a ring of constant latitude is a straight horizontal line there,
+// not a circle to "face outward" from.
+function buildGalleryCardSlot(scene, lon, hemiLat) {
+  const merc = maplibregl.MercatorCoordinate.fromLngLat([lon, hemiLat], CARD_BASE_ALT_M);
+  const metersToMerc = merc.meterInMercatorCoordinateUnits();
+  const w = CARD_WIDTH_M * metersToMerc;
+  const h = w * CARD_ASPECT;
+  const depth = w * CARD_THICKNESS_RATIO;
+
+  const edgeMat = new THREE.MeshLambertMaterial({ color: 0x1d1610 }); // matches --panel — reads as a card's plain edge/back stock
+  const frontMat = new THREE.MeshBasicMaterial({ color: 0x69cef1 }); // placeholder tone (matches --ocean) until a texture loads
+  // BoxGeometry(width, height, depth) face-material order is
+  // [+x,-x,+y,-y,+z,-z] = [right, left, top, bottom, front, back]
+  const geometry = new THREE.BoxGeometry(w, h, depth);
+  const mesh = new THREE.Mesh(geometry, [edgeMat, edgeMat, edgeMat, edgeMat, frontMat, edgeMat]);
+
+  // Mercator/MapLibre's custom-layer space is Z-up (Z = altitude), not
+  // Three's default Y-up, so mesh.up has to be overridden before lookAt
+  // will keep the box standing vertically rather than lying flat.
+  mesh.up.set(0, 0, 1);
+  mesh.position.set(merc.x, merc.y, merc.z);
+  const facingDir = hemiLat > 0 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, -1, 0); // Mercator Y increases southward
+  const lookTarget = new THREE.Vector3(merc.x, merc.y, merc.z).sub(facingDir);
+  mesh.lookAt(lookTarget); // local -Z points at lookTarget, i.e. opposite facingDir, so local +Z (the textured front face) ends up pointing along facingDir
+
+  scene.add(mesh);
+  return { mesh, frontMat, geometryWidth: w, geometryHeight: h };
+}
+
+function buildGalleryCardScene(scene) {
+  galleryCardSlots = [];
+  for (const hemiLat of [CARD_LAT, -CARD_LAT]) {
+    for (let i = 0; i < CARD_COUNT_PER_POLE; i++) {
+      const lon = -180 + (360 / CARD_COUNT_PER_POLE) * i;
+      galleryCardSlots.push(buildGalleryCardSlot(scene, lon, hemiLat));
     }
-    const blob = await canvas.convertToBlob({ type: 'image/png' });
-    return { data: await blob.arrayBuffer() };
-  });
+  }
 }
 
-let galleryStepTimer = null;
-function stepGalleryBand() {
+function getGalleryTexture(itemIdx, frameIdx) {
+  const key = `${itemIdx}-${frameIdx}`;
+  let tex = galleryTextureCache.get(key);
+  if (tex) return tex;
+  const bitmap = galleryItems[itemIdx].frames[frameIdx];
+  tex = new THREE.Texture(bitmap);
+  tex.needsUpdate = true;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  galleryTextureCache.set(key, tex);
+  return tex;
+}
+
+// advances which image (and which animation frame) each card slot shows —
+// this IS the "scroll": the mapping between slot and image index shifts
+// by one every GALLERY_STEP_MS, not a smooth per-pixel motion
+function stepGalleryCards() {
+  if (!galleryItems.length || !galleryCardSlots.length) return;
   galleryScrollStep = (galleryScrollStep + 1) % 100000;
-  if (!terrainMapInstance) return;
-  // MapLibre's tile cache is keyed by the resolved URL, so a changed
-  // (but otherwise ignored — see the protocol handler) trailing segment
-  // forces a refetch of the same z/x/y instead of reusing the old frame
-  const tiles = [`${GALLERY_PROTOCOL}://{z}/{x}/{y}/${galleryScrollStep}`];
-  const south = terrainMapInstance.getSource('galleryBandSouth');
-  const north = terrainMapInstance.getSource('galleryBandNorth');
-  if (south) south.setTiles(tiles);
-  if (north) north.setTiles(tiles);
+  for (let slotIdx = 0; slotIdx < galleryCardSlots.length; slotIdx++) {
+    const itemIdx = ((slotIdx + galleryScrollStep) % galleryItems.length + galleryItems.length) % galleryItems.length;
+    const item = galleryItems[itemIdx];
+    const frameIdx = Math.floor(Date.now() / (item.intervalMs || 1000)) % item.frames.length;
+    const slot = galleryCardSlots[slotIdx];
+    const tex = getGalleryTexture(itemIdx, frameIdx);
+    if (slot.frontMat.map !== tex) {
+      slot.frontMat.map = tex;
+      slot.frontMat.color.set(0xffffff); // let the texture show true colors instead of the placeholder tint
+      slot.frontMat.needsUpdate = true;
+      // correct the card's aspect ratio to the real image now that it's
+      // known, rather than the CARD_ASPECT guess it was built with
+      const realAspect = item.height / item.width;
+      if (Math.abs(realAspect - slot.mesh.scale.y * CARD_ASPECT) > 0.01) {
+        slot.mesh.scale.y = realAspect / CARD_ASPECT;
+      }
+    }
+  }
+  if (terrainMapInstance) terrainMapInstance.triggerRepaint();
+}
+
+async function installGalleryCardsLayer() {
+  if (galleryCardsLayerAdded || !terrainMapInstance) return;
+  galleryCardsLayerAdded = true;
+  await loadThree();
+
+  const layer = {
+    id: 'gallery-cards-3d',
+    type: 'custom',
+    renderingMode: '3d',
+    onAdd(map, gl) {
+      this.camera = new THREE.Camera();
+      this.scene = new THREE.Scene();
+      this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+      const sun = new THREE.DirectionalLight(0xffffff, 0.5);
+      sun.position.set(0, -1, 1);
+      this.scene.add(sun);
+      this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
+      this.renderer.autoClear = false;
+      buildGalleryCardScene(this.scene);
+    },
+    render(gl, matrix) {
+      // No extra rotation baked in here (unlike the common "load a glTF
+      // model" example, which needs one to convert a Y-up authored model
+      // into Mercator's Z-up space) — our own geometry is already
+      // authored directly in Mercator-native position/orientation via
+      // buildGalleryCardSlot above, so the raw matrix applies as-is.
+      this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
+      this.renderer.resetState();
+      this.renderer.render(this.scene, this.camera);
+    },
+  };
+  terrainMapInstance.addLayer(layer);
 }
 
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   installAntarcticTerrainProtocol();
   initWeatherProtocol();
-  installGalleryProtocol();
-  if (!galleryStepTimer) {
+  if (!galleryRefreshTimer) {
     refreshGalleryItems();
-    setInterval(refreshGalleryItems, GALLERY_REFRESH_MS);
-    galleryStepTimer = setInterval(stepGalleryBand, GALLERY_STEP_MS);
+    galleryRefreshTimer = setInterval(refreshGalleryItems, GALLERY_REFRESH_MS);
+    setInterval(stepGalleryCards, GALLERY_STEP_MS);
   }
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
@@ -1489,28 +1549,6 @@ function initTerrainMap() {
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
-        // Two sources, not one, because MapLibre raster sources take a
-        // single bounds box — bounds restricts MapLibre to ever requesting
-        // tiles within it at all, so the empty-tile-outside-the-band
-        // problem doesn't need handling in the protocol handler itself.
-        galleryBandSouth: {
-          type: 'raster',
-          tiles: [`${GALLERY_PROTOCOL}://{z}/{x}/{y}`],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 10,
-          bounds: [-180, -85.05, 180, -GALLERY_BAND_LAT],
-          attribution: 'Gallery: rolling public uploads',
-        },
-        galleryBandNorth: {
-          type: 'raster',
-          tiles: [`${GALLERY_PROTOCOL}://{z}/{x}/{y}`],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 10,
-          bounds: [-180, GALLERY_BAND_LAT, 180, 85.05],
-          attribution: 'Gallery: rolling public uploads',
-        },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -1562,24 +1600,6 @@ function initTerrainMap() {
             'raster-fade-duration': 0
           }
         },
-        // Replaces the ocean-blue void toward each pole with the scrolling
-        // gallery — sits ABOVE color-relief/hillshade (so it actually
-        // covers that blue) but BELOW antarctic-relief, which stays
-        // transparent everywhere except real Antarctic land, so wherever
-        // the two bands overlap, real ice-shaded terrain still wins over
-        // a gallery image and only genuine open-ocean/void gets replaced.
-        {
-          id: 'gallery-band-south',
-          type: 'raster',
-          source: 'galleryBandSouth',
-          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 300 }
-        },
-        {
-          id: 'gallery-band-north',
-          type: 'raster',
-          source: 'galleryBandNorth',
-          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 300 }
-        },
         // Real DEM-derived ice shading, draped directly onto the terrain
         // surface — see installAntarcticTerrainProtocol() above.
         {
@@ -1622,7 +1642,7 @@ function initTerrainMap() {
     dragRotate: true,
     touchPitch: true,
   });
-  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); applyLayerToggles(); });
+  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); applyLayerToggles(); installGalleryCardsLayer(); });
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);

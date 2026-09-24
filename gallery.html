@@ -823,245 +823,101 @@ function handlePoleWrap() {
 }
 
 // ============================================================
-// ANTARCTIC TERRAIN SHADER
+// ANTARCTIC TERRAIN COLOR PROTOCOL
 //
-// This is deliberately NOT a GeoJSON/fill/mask.  The shader renders a
-// second copy of the actual MapLibre terrain mesh only where the geographic
-// latitude is Antarctic, using elevations sampled from MapLibre's live DEM.
-// The fragment shader chooses the ice palette from elevation, while the
-// vertex shader puts every sample back at its real DEM height.  Thus the
-// white/cool relief follows the same terrain geometry instead of sitting on
-// top as a flat geographic overlay.
+// This is the important change: do NOT draw a second terrain mesh.
+// Instead, use the exact Mapterhorn DEM tiles that MapLibre already uses,
+// decode them client-side, and generate an ordinary raster tile whose pixels
+// are colored from BOTH elevation and geographic latitude. MapLibre then
+// drapes that raster tile over its real 3D terrain geometry. There is no
+// GeoJSON, polygon, mask, floating mesh, or white overlay.
 // ============================================================
-function makeAntarcticShaderLayer() {
-  const layer = {
-    id: 'antarctic-terrain-shader',
-    type: 'custom',
-    renderingMode: '3d',
-    program: null,
-    gl: null,
-    aPos: -1,
-    aElev: -1,
-    aLat: -1,
-    uMatrix: null,
-    buffer: null,
-    vertexCount: 0,
-    lastBuildKey: '',
-    building: false,
-    rebuildQueued: false,
+let antarcticProtocolInstalled = false;
 
-    onAdd(map, gl) {
-      this.gl = gl;
-      const vertexSource = `#version 300 es
-        uniform mat4 u_matrix;
-        in vec3 a_pos;
-        in float a_elev;
-        in float a_lat;
-        out float v_elev;
-        out float v_lat;
-        void main() {
-          v_elev = a_elev;
-          v_lat = a_lat;
-          gl_Position = u_matrix * vec4(a_pos, 1.0);
-        }
-      `;
-      const fragmentSource = `#version 300 es
-        precision highp float;
-        in float v_elev;
-        in float v_lat;
-        out vec4 fragColor;
+function installAntarcticTerrainProtocol() {
+  if (antarcticProtocolInstalled) return;
+  antarcticProtocolInstalled = true;
 
-        vec3 mix3(vec3 a, vec3 b, float t) {
-          return mix(a, b, clamp(t, 0.0, 1.0));
+  maplibregl.addProtocol('antarctic-relief', async (params, abortController) => {
+    const parts = params.url.replace('antarctic-relief://', '').split('/').map(Number);
+    const z = parts[0], x = parts[1], y = parts[2];
+    const size = 512;
+    const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
+    const response = await fetch(sourceUrl, {signal: abortController && abortController.signal});
+    if (!response.ok) throw new Error(`Mapterhorn DEM ${response.status}`);
+    const bitmap = await createImageBitmap(await response.blob());
+
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d', {willReadFrequently:true});
+    ctx.drawImage(bitmap, 0, 0, size, size);
+    if (bitmap.close) bitmap.close();
+    const src = ctx.getImageData(0, 0, size, size).data;
+    const out = ctx.createImageData(size, size);
+
+    const decode = (i) => (src[i] * 256 + src[i+1] + src[i+2] / 256) - 32768;
+    const n = Math.pow(2, z);
+    const lonForPixel = (px) => ((x + px / size) / n) * 360 - 180;
+    const latForPixel = (py) => {
+      const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
+      return 180 / Math.PI * Math.atan(Math.sinh(q));
+    };
+
+    // Same global elevation bands as the existing color-relief, but the
+    // Antarctic land palette is cool/white. Ocean remains transparent so the
+    // existing vivid-blue native DEM color-relief remains visible.
+    const normalPalette = (e) => {
+      if (e <= 0) return [24,191,255];
+      const stops = [[5,[169,208,137]],[300,[127,184,92]],[1000,[150,196,110]],
+        [1700,[194,181,126]],[2400,[143,174,92]],[3100,[217,198,143]],[4200,[245,236,212]]];
+      let a = [0,[169,208,137]];
+      for (const b of stops) { if (e <= b[0]) { const t=(e-a[0])/(b[0]-a[0]); return a[1].map((v,k)=>Math.round(v+(b[1][k]-v)*t)); } a=b; }
+      return stops[stops.length-1][1];
+    };
+    const icePalette = (e) => {
+      if (e < 100) return [222,236,242];
+      if (e < 500) { const t=(e-100)/400; return [Math.round(222+25*t),Math.round(236+17*t),Math.round(242+13*t)]; }
+      if (e < 1500) { const t=(e-500)/1000; return [247,253,255]; }
+      if (e < 2500) { const t=(e-1500)/1000; return [Math.round(247-18*t),Math.round(253-15*t),Math.round(255-5*t)]; }
+      return [245,250,255];
+    };
+
+    for (let py=0; py<size; py++) {
+      const lat = latForPixel(py);
+      for (let px=0; px<size; px++) {
+        const si = (py*size+px)*4;
+        const e = decode(si);
+        const di = si;
+
+        // Geographic condition is computed per DEM pixel. Elevation keeps
+        // ocean blue: only actual positive land/ice is recolored.
+        const isAntarctic = lat <= -60.0 && e > 0.0;
+        if (!isAntarctic) {
+          out.data[di]=0; out.data[di+1]=0; out.data[di+2]=0; out.data[di+3]=0;
+          continue;
         }
 
-        // Antarctic equivalent of the existing elevation color-relief.
-        // The breakpoints deliberately mirror the global terrain bands,
-        // but use snow/ice/cool shadow tones instead of green/tan.
-        vec3 icePalette(float e) {
-          if (e <= 0.0) return vec3(0.0941, 0.7490, 1.0);
-          if (e < 250.0) return mix3(vec3(0.93,0.97,0.98), vec3(0.82,0.90,0.94), e/250.0);
-          if (e < 1000.0) return mix3(vec3(0.82,0.90,0.94), vec3(0.91,0.94,0.96), (e-250.0)/750.0);
-          if (e < 1700.0) return mix3(vec3(0.91,0.94,0.96), vec3(0.97,0.98,0.99), (e-1000.0)/700.0);
-          if (e < 2400.0) return mix3(vec3(0.97,0.98,0.99), vec3(0.86,0.92,0.96), (e-1700.0)/700.0);
-          if (e < 3100.0) return mix3(vec3(0.86,0.92,0.96), vec3(0.97,0.98,1.0), (e-2400.0)/700.0);
-          return mix3(vec3(0.97,0.98,1.0), vec3(1.0), clamp((e-3100.0)/1100.0,0.0,1.0));
-        }
-
-        void main() {
-          // Geographic condition lives in the shader, not in a polygon.
-          // Fade the condition only at the ice-sheet edge so the custom
-          // surface never creates a hard white geographic border.
-          float antarctic = step(v_lat, -60.0);
-          vec3 ice = icePalette(v_elev);
-          // Very restrained cool shadowing is baked into the elevation
-          // palette itself; actual 3D relief remains supplied by the DEM
-          // geometry and MapLibre's depth buffer.
-          fragColor = vec4(ice, 1.0);
-          if (v_lat > -59.0) discard;
-        }
-      `;
-      const compile = (type, src) => {
-        const sh = gl.createShader(type);
-        gl.shaderSource(sh, src);
-        gl.compileShader(sh);
-        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-          console.error('Antarctic shader compile error:', gl.getShaderInfoLog(sh));
-          gl.deleteShader(sh);
-          return null;
-        }
-        return sh;
-      };
-      const vs = compile(gl.VERTEX_SHADER, vertexSource);
-      const fs = compile(gl.FRAGMENT_SHADER, fragmentSource);
-      if (!vs || !fs) return;
-      this.program = gl.createProgram();
-      gl.attachShader(this.program, vs);
-      gl.attachShader(this.program, fs);
-      gl.linkProgram(this.program);
-      if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
-        console.error('Antarctic shader link error:', gl.getProgramInfoLog(this.program));
-        return;
+        let rgb = icePalette(e);
+        // Real hillshade from the same DEM, using adjacent pixels. This is
+        // not a fake gradient: it is calculated from the DEM slope.
+        const px0=Math.max(0,px-1), px1=Math.min(size-1,px+1);
+        const py0=Math.max(0,py-1), py1=Math.min(size-1,py+1);
+        const ex0=decode((py*size+px0)*4), ex1=decode((py*size+px1)*4);
+        const ey0=decode((py0*size+px)*4), ey1=decode((py1*size+px)*4);
+        const dx=(ex1-ex0)*0.5, dy=(ey1-ey0)*0.5;
+        const shade=Math.max(0.68, Math.min(1.12, 0.94 - dx*0.012 + dy*0.012));
+        rgb=rgb.map(v=>Math.max(0,Math.min(255,Math.round(v*shade))));
+        out.data[di]=rgb[0]; out.data[di+1]=rgb[1]; out.data[di+2]=rgb[2]; out.data[di+3]=255;
       }
-      gl.deleteShader(vs); gl.deleteShader(fs);
-      this.aPos = gl.getAttribLocation(this.program, 'a_pos');
-      this.aElev = gl.getAttribLocation(this.program, 'a_elev');
-      this.aLat = gl.getAttribLocation(this.program, 'a_lat');
-      this.uMatrix = gl.getUniformLocation(this.program, 'u_matrix');
-      this.buffer = gl.createBuffer();
-
-      const rebuild = () => this.queueRebuild(map);
-      map.on('idle', rebuild);
-      map.on('moveend', rebuild);
-      map.on('zoomend', rebuild);
-      map.on('resize', rebuild);
-      this.queueRebuild(map);
-      map.once('idle', () => this.queueRebuild(map));
-      setTimeout(() => this.queueRebuild(map), 1200);
-    },
-
-    queueRebuild(map) {
-      if (this.building) { this.rebuildQueued = true; return; }
-      const c = map.getCenter();
-      const z = map.getZoom();
-      // Only rebuild when the view is meaningfully different. The DEM itself
-      // is still MapLibre's terrain source; queryTerrainElevation samples it.
-      const key = `${c.lng.toFixed(2)}|${c.lat.toFixed(2)}|${z.toFixed(1)}`;
-      if (key === this.lastBuildKey) return;
-      this.lastBuildKey = key;
-      this.buildMesh(map).catch(err => console.warn('Antarctic shader mesh:', err));
-    },
-
-    async buildMesh(map) {
-      if (this.building) { this.rebuildQueued = true; return; }
-      this.building = true;
-      try {
-        const b = map.getBounds();
-        const south = Math.max(-89.5, b.getSouth() - 8);
-        const north = Math.min(-57.0, b.getNorth() + 8);
-        if (south >= north) {
-          this.vertexCount = 0;
-          return;
-        }
-        let west = b.getWest() - 8, east = b.getEast() + 8;
-        // When the view crosses the antimeridian, normalize into a continuous
-        // interval so the mesh follows the visible world copy.
-        if (east - west > 360) { west = -180; east = 180; }
-        const step = Math.max(0.45, Math.min(0.9, 14 / Math.pow(2, Math.max(0, map.getZoom()-1))));
-        const cols = Math.ceil((east - west) / step) + 1;
-        const rows = Math.ceil((north - south) / step) + 1;
-        if (cols * rows > 24000) return;
-        const verts = [];
-        const heights = new Float32Array(cols * rows);
-        const lats = new Float32Array(cols * rows);
-
-        // queryTerrainElevation reads the same raster-dem source that powers
-        // MapLibre's actual 3D terrain. A small pause yields to tile decoding
-        // on iPhone before the synchronous sampling pass.
-        await new Promise(r => requestAnimationFrame(r));
-        let idx = 0;
-        for (let r = 0; r < rows; r++) {
-          const lat = Math.min(north, south + r * step);
-          for (let c = 0; c < cols; c++, idx++) {
-            const lon = west + c * step;
-            const e = map.queryTerrainElevation({lng: lon, lat}, {exaggerated: false});
-            heights[idx] = Number.isFinite(e) ? e : 0;
-            lats[idx] = lat;
-          }
-        }
-
-        // Build indexed-free triangle vertices. MapLibre's MercatorCoordinate
-        // uses the same world coordinate system as its terrain renderer.
-        for (let r = 0; r < rows - 1; r++) {
-          for (let c = 0; c < cols - 1; c++) {
-            const i00 = r * cols + c, i10 = i00 + 1, i01 = i00 + cols, i11 = i01 + 1;
-            const push = i => {
-              const lon = west + (i % cols) * step;
-              const lat = lats[i];
-              const elev = heights[i];
-              const mc = maplibregl.MercatorCoordinate.fromLngLat({lng:lon,lat}, elev);
-              const a = mc.toArray();
-              verts.push(a[0], a[1], a[2], elev, lat);
-            };
-            push(i00); push(i10); push(i11);
-            push(i00); push(i11); push(i01);
-          }
-        }
-        const gl = this.gl;
-        if (gl && this.buffer) {
-          gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
-          gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
-          gl.bindBuffer(gl.ARRAY_BUFFER, null);
-          this.vertexCount = verts.length / 5;
-          map.triggerRepaint();
-        }
-      } finally {
-        this.building = false;
-        if (this.rebuildQueued) { this.rebuildQueued = false; setTimeout(() => this.queueRebuild(map), 80); }
-      }
-    },
-
-    render(gl, args) {
-      const modelViewProjectionMatrix = args.modelViewProjectionMatrix;
-      if (!this.program || !this.buffer || !this.vertexCount) return;
-      gl.useProgram(this.program);
-      gl.uniformMatrix4fv(this.uMatrix, false, modelViewProjectionMatrix);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
-      const stride = 5 * 4;
-      gl.enableVertexAttribArray(this.aPos);
-      gl.vertexAttribPointer(this.aPos, 3, gl.FLOAT, false, stride, 0);
-      gl.enableVertexAttribArray(this.aElev);
-      gl.vertexAttribPointer(this.aElev, 1, gl.FLOAT, false, stride, 12);
-      gl.enableVertexAttribArray(this.aLat);
-      gl.vertexAttribPointer(this.aLat, 1, gl.FLOAT, false, stride, 16);
-      // This is a true 3D custom layer: use MapLibre's shared terrain depth
-      // buffer so the Antarctic surface follows the actual DEM rather than
-      // being drawn as a screen-space overlay.
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthFunc(gl.LEQUAL);
-      gl.depthMask(false);
-      gl.disable(gl.CULL_FACE);
-      gl.disable(gl.BLEND);
-      gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount);
-      gl.disableVertexAttribArray(this.aPos);
-      gl.disableVertexAttribArray(this.aElev);
-      gl.disableVertexAttribArray(this.aLat);
-      gl.depthMask(true);
-      gl.bindBuffer(gl.ARRAY_BUFFER, null);
-      gl.useProgram(null);
-    },
-
-    onRemove(map, gl) {
-      if (this.buffer) gl.deleteBuffer(this.buffer);
-      if (this.program) gl.deleteProgram(this.program);
-      this.buffer = null; this.program = null; this.vertexCount = 0; this.gl = null;
     }
-  };
-  return layer;
+    ctx.putImageData(out,0,0);
+    return {data: await createImageBitmap(canvas)};
+  });
 }
 
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
+  installAntarcticTerrainProtocol();
   initWeatherProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
@@ -1073,6 +929,12 @@ function initTerrainMap() {
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
+        antarcticRelief: {
+          type: 'raster',
+          tiles: ['antarctic-relief://{z}/{x}/{y}'],
+          tileSize: 512, minzoom: 0, maxzoom: 14,
+          attribution: 'Elevation: <a href="https://mapterhorn.com/" target="_blank">Mapterhorn</a>'
+        },
         stamenTonerLabels: {
           type: 'raster',
           tiles: ['https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}.png'],
@@ -1108,15 +970,7 @@ function initTerrainMap() {
     },
     attributionControl: { compact: true }, maxPitch:75, dragRotate:true, touchPitch:true,
   });
-  terrainMapInstance.on('load', () => {
-    // The shader is a MapLibre custom 3D layer, not a geographic fill. It
-    // samples MapLibre's live DEM and uses lat/lon only inside the shader.
-    terrainMapInstance.addLayer(makeAntarcticShaderLayer(), 'lakes');
-    // It is intentionally inserted immediately before the lakes layer: above
-    // color-relief + hillshade, below hydrology and labels. It is not a fill
-    // and does not use Antarctic country geometry.
-    addWeatherLayerIfReady();
-  });
+  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); });
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);

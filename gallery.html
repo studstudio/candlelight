@@ -1352,11 +1352,34 @@ function installGalleryProtocol() {
     // stepGalleryBand below) are intentionally ignored here
     const [z, x, y] = params.url.replace(`${GALLERY_PROTOCOL}://`, '').split('/').map(Number);
     const size = 256;
+
+    // The source's own `bounds` only controls which tiles MapLibre
+    // BOTHERS requesting — it does NOT mean every requested tile is
+    // fully inside that box. At low zoom a single tile can be enormous
+    // (a whole hemisphere at z0) and still merely OVERLAP the band, so
+    // MapLibre requests it anyway — and without this check, a full
+    // image would get stretched across that whole oversized tile,
+    // leaking miles beyond the poles into ordinary terrain. So: compute
+    // this tile's actual latitude span and only draw an image if the
+    // ENTIRE tile sits inside the band. Any tile straddling the
+    // boundary gets the plain fallback instead.
+    const n = Math.pow(2, z);
+    const latTop = tileYToLat(y, n), latBottom = tileYToLat(y + 1, n);
+    // latTop is always the tile's northern (larger) edge, latBottom the
+    // southern (smaller) edge. "Fully in the south band" means even the
+    // tile's northernmost edge is still deep south of -GALLERY_BAND_LAT;
+    // "fully in the north band" means even its southernmost edge is
+    // still deep north of +GALLERY_BAND_LAT. (An earlier version checked
+    // min(|latTop|, |latBottom|) instead, which wrongly passed the
+    // single z0 tile — it spans pole to pole, so both its edges have a
+    // large absolute latitude even though the tile covers the equator.)
+    const fullyInBand = latTop <= -GALLERY_BAND_LAT || latBottom >= GALLERY_BAND_LAT;
+
     const canvas = new OffscreenCanvas(size, size);
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#69cef1'; // matches --ocean — fallback while nothing's loaded yet
+    ctx.fillStyle = '#69cef1'; // matches --ocean — fallback outside the band, or nothing loaded yet
     ctx.fillRect(0, 0, size, size);
-    if (galleryItems.length) {
+    if (fullyInBand && galleryItems.length) {
       // which image lands in this tile column: tile x plus a slowly
       // advancing step offset, wrapped to however many images are
       // loaded — the "scroll" is this mapping shifting by one every
@@ -1364,7 +1387,11 @@ function installGalleryProtocol() {
       const item = galleryItems[((x + galleryScrollStep) % galleryItems.length + galleryItems.length) % galleryItems.length];
       const frameIdx = Math.floor(Date.now() / (item.intervalMs || 1000)) % item.frames.length;
       const bitmap = item.frames[frameIdx];
-      const scale = Math.max(size / bitmap.width, size / bitmap.height); // cover-fit, centered
+      // fit WITHIN a margin instead of stretching to cover the whole
+      // tile — a full-tile cover-fit was the other half of "too big"
+      const pad = 28;
+      const maxW = size - pad * 2, maxH = size - pad * 2;
+      const scale = Math.min(maxW / bitmap.width, maxH / bitmap.height);
       const dw = bitmap.width * scale, dh = bitmap.height * scale;
       ctx.drawImage(bitmap, (size - dw) / 2, (size - dh) / 2, dw, dh);
     }

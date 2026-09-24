@@ -1365,12 +1365,29 @@ async function loadThree() {
   return THREE;
 }
 
-const CARD_LAT = 82; // degrees — matches POLE_PORTAL_LAT above: deep enough in the void that the pole-portal's own fade/jump takes over shortly after
+const CARD_LAT = 84.5; // degrees — deliberately PAST POLE_PORTAL_LAT (82, above): these are visible-on-the-horizon objects, not something the camera needs to actually reach (it never gets there — crossing 82 triggers the fade/jump instead), so they sit right up near MapLibre's real Mercator limit (~85.05) rather than at the reachable edge
 const CARD_COUNT_PER_POLE = 24; // evenly spaced around the full ring of longitude
-const CARD_WIDTH_M = 15000; // real-world meters — the actual on-screen size dial; tune this directly if it still reads too big/small
+const CARD_WIDTH_M = 50000; // real-world meters — the actual on-screen size dial; tune this directly if it still reads too big/small
 const CARD_ASPECT = 0.75; // height / width, overwritten per-card once each image's real dimensions are known
 const CARD_THICKNESS_RATIO = 0.06; // fraction of width — genuine depth, not a paper-thin plane
-const CARD_BASE_ALT_M = 100; // sits just above sea level rather than clipping into the water
+const CARD_BASE_ALT_M = 100; // fallback ONLY — used before real terrain data has loaded at a given spot, or if the query fails; see elevationForCard below
+const CARD_ALT_BUFFER_M = 400; // clearance above the real ground/ice surface, so cards float visibly rather than sitting flush with (or buried in) the terrain
+
+// Antarctica's interior ice sheet commonly sits 2,000–3,000+ meters above
+// sea level — a flat low altitude buried cards and markers well below the
+// actual ice surface, leaving only a sliver poking through. This queries
+// MapLibre's own real terrain height at a point (a genuine documented
+// API — MapLibre added it specifically for this kind of use) and floats
+// above THAT instead of an assumed constant.
+function elevationForCard(lon, lat) {
+  if (!terrainMapInstance) return CARD_BASE_ALT_M;
+  try {
+    const e = terrainMapInstance.queryTerrainElevation([lon, lat]);
+    return (typeof e === 'number' && !isNaN(e)) ? e + CARD_ALT_BUFFER_M : CARD_BASE_ALT_M;
+  } catch {
+    return CARD_BASE_ALT_M;
+  }
+}
 
 let galleryCardsLayerAdded = false;
 let galleryCardSlots = []; // [{ mesh, frontMat, texture }]
@@ -1383,7 +1400,8 @@ let galleryTextureCache = new Map(); // "itemIdx-frameIdx" -> THREE.Texture, so 
 // since a ring of constant latitude is a straight horizontal line there,
 // not a circle to "face outward" from.
 function buildGalleryCardSlot(scene, lon, hemiLat, isFirst) {
-  const merc = maplibregl.MercatorCoordinate.fromLngLat([lon, hemiLat], CARD_BASE_ALT_M);
+  const alt = elevationForCard(lon, hemiLat);
+  const merc = maplibregl.MercatorCoordinate.fromLngLat([lon, hemiLat], alt);
   const metersToMerc = merc.meterInMercatorCoordinateUnits();
   const w = CARD_WIDTH_M * metersToMerc;
   const h = w * CARD_ASPECT;
@@ -1413,27 +1431,7 @@ function buildGalleryCardSlot(scene, lon, hemiLat, isFirst) {
   }
 
   scene.add(mesh);
-  return { mesh, frontMat, geometryWidth: w, geometryHeight: h };
-}
-
-// A dead-simple reference object: fixed position, no lookAt, no rotation,
-// enormous and bright red — if THIS doesn't show up either, the bug is in
-// the basic camera/rendering setup (onAdd/render), not in the cards'
-// lookAt/positioning math specifically. If this DOES show up but the real
-// cards don't, the bug is isolated to buildGalleryCardSlot above. One per
-// card slot (not just a single fixed point) so it's visible from wherever
-// you happen to be looking near a pole, no precise navigation needed.
-function buildDiagnosticMarker(scene, lon, hemiLat, isFirst) {
-  const merc = maplibregl.MercatorCoordinate.fromLngLat([lon, hemiLat], CARD_BASE_ALT_M);
-  const scale = merc.meterInMercatorCoordinateUnits();
-  const radius = CARD_WIDTH_M * 3 * scale; // deliberately huge — impossible to miss if visible at all
-  const mat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 12, 12), mat); // low-poly — this machine is slow, no need for a smooth sphere here
-  mesh.position.set(merc.x, merc.y, merc.z);
-  scene.add(mesh);
-  if (isFirst) {
-    console.log('gallery: diagnostic markers placed around both poles, first at lon=' + lon + ' lat=' + hemiLat + ', mercator', { x: merc.x, y: merc.y, z: merc.z }, 'radius', radius);
-  }
+  return { mesh, frontMat, lon, hemiLat, geometryWidth: w, geometryHeight: h };
 }
 
 function buildGalleryCardScene(scene) {
@@ -1442,7 +1440,6 @@ function buildGalleryCardScene(scene) {
   for (const hemiLat of [CARD_LAT, -CARD_LAT]) {
     for (let i = 0; i < CARD_COUNT_PER_POLE; i++) {
       const lon = -180 + (360 / CARD_COUNT_PER_POLE) * i;
-      buildDiagnosticMarker(scene, lon, hemiLat, first);
       galleryCardSlots.push(buildGalleryCardSlot(scene, lon, hemiLat, first));
       first = false;
     }
@@ -1469,10 +1466,18 @@ function stepGalleryCards() {
   try {
     galleryScrollStep = (galleryScrollStep + 1) % 100000;
     for (let slotIdx = 0; slotIdx < galleryCardSlots.length; slotIdx++) {
+      const slot = galleryCardSlots[slotIdx];
+      // re-query elevation each step: terrain tiles for a given pole
+      // location likely aren't loaded yet the instant the scene first
+      // builds (nobody's been there to trigger the fetch), so this lets
+      // altitude self-correct as real DEM data actually arrives, instead
+      // of being stuck with whatever fallback was available at build time
+      const merc = maplibregl.MercatorCoordinate.fromLngLat([slot.lon, slot.hemiLat], elevationForCard(slot.lon, slot.hemiLat));
+      slot.mesh.position.z = merc.z;
+
       const itemIdx = ((slotIdx + galleryScrollStep) % galleryItems.length + galleryItems.length) % galleryItems.length;
       const item = galleryItems[itemIdx];
       const frameIdx = Math.floor(Date.now() / (item.intervalMs || 1000)) % item.frames.length;
-      const slot = galleryCardSlots[slotIdx];
       const tex = getGalleryTexture(itemIdx, frameIdx);
       if (slot.frontMat.map !== tex) {
         slot.frontMat.map = tex;

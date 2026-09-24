@@ -307,7 +307,7 @@ function updateLocationReadout() {
   document.getElementById('locationCity').textContent = polarPlace || (city ? 'near ' + city[0] : '');
   const coordsEl = document.getElementById('locationCoords');
   coordsEl.textContent = formatLatLon(lon, lat);
-  coordsEl.href = wikiNearbyUrl(lon, lat);
+  coordsEl.href = wikimapUrl(lon, lat);
 }
 
 let events = [];
@@ -565,13 +565,30 @@ function formatLatLon(lon, lat) {
   return `${latStr}, ${lonStr}`;
 }
 
-// WikiNearby wants plain signed decimals ("30.05, -8.02"), not the N/S/E/W
-// display format — the dashboard keeps showing N/S/E/W, this just builds the
-// link target from the same underlying numbers.
-function wikiNearbyUrl(lon, lat) {
+// wikimap.wiki plots locations in Web Mercator (EPSG:3857) meters, not
+// plain lat/lon degrees — and, per their own URL format, the "lat" query
+// param actually holds the mercator X (derived from longitude) while "lon"
+// holds the mercator Y (derived from latitude). Confirmed against their own
+// example link for Lima city center.
+const EARTH_RADIUS_M = 6378137;
+function toWebMercator(lat, lon) {
+  const x = lon * (Math.PI / 180) * EARTH_RADIUS_M;
+  const y = EARTH_RADIUS_M * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
+  return [x, y];
+}
+function wikimapUrl(lon, lat) {
   const wrappedLon = ((lon + 540) % 360) - 180; // normalize in case 3D world-copy wrap pushed lon outside -180..180
-  const q = `${lat.toFixed(2)}, ${wrappedLon.toFixed(2)}`;
-  return `https://wikinearby.toolforge.org/?lang=en&q=${encodeURIComponent(q).replace(/%20/g, '+')}`;
+  const clampedLat = Math.max(-85.05, Math.min(85.05, lat)); // Web Mercator's own latitude limit
+  const [mercX, mercY] = toWebMercator(clampedLat, wrappedLon);
+  const params = new URLSearchParams({
+    base: 'map',
+    lat: mercX.toFixed(4),
+    lon: mercY.toFixed(4),
+    showAll: 'true',
+    wiki: 'enwiki',
+    zoom: '14',
+  });
+  return `https://wikimap.wiki/?${params.toString()}`;
 }
 
 function undockWithFade(lon, lat) {

@@ -520,7 +520,12 @@ const zoomBehavior = d3.zoom()
       // exit path already)
       if (!in3D && !transitioning && transform.k <= REDOCK_K) dockWithFade();
     }
-    draw();
+    // no draw() here — tick()'s rAF loop already redraws every frame
+    // unconditionally. Calling draw() again per raw touch-move event was
+    // redundant, and since a two-finger gesture (especially a fast
+    // direction reversal) can fire many touch events within a single
+    // frame, those extra synchronous draws piled up and backed up the
+    // main thread, which is what caused the jumpiness/freeze-ups.
   });
 d3.select(canvas).call(zoomBehavior);
 
@@ -890,12 +895,12 @@ function initTerrainMap() {
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
-        // Stamen Toner's line-only layer group (roads, borders — no fill,
+        // Stamen Terrain's line-only layer group (roads, borders — no fill,
         // no labels), at 0.6 opacity over color-relief + hillshade.
-        stamenTonerLines: {
+        stamenTerrainLines: {
           type: 'raster',
           tiles: [
-            'https://tiles.stadiamaps.com/tiles/stamen_toner_lines/{z}/{x}/{y}.png' +
+            'https://tiles.stadiamaps.com/tiles/stamen_terrain_lines/{z}/{x}/{y}.png' +
               (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
           ],
           tileSize: 256,
@@ -941,13 +946,13 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        // 0.6-opacity experiment: Stamen Toner's line layer (roads,
+        // 0.6-opacity experiment: Stamen Terrain's line layer (roads,
         // borders) laid over our own color-relief + hillshade. Sits below
         // Antarctica/lakes/rivers/labels so those stay crisp on top.
         {
-          id: 'stamen-toner-lines',
+          id: 'stamen-terrain-lines',
           type: 'raster',
-          source: 'stamenTonerLines',
+          source: 'stamenTerrainLines',
           paint: {
             'raster-opacity': 0.6,
             'raster-fade-duration': 0

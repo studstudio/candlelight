@@ -110,8 +110,9 @@
   #count b { color: #2a1f10; font-size: 16px; display: block; }
   #layerToggles {
     position: absolute; right: 14px; top: 14px; z-index: 3;
-    display: flex; flex-direction: column; gap: 8px;
+    display: none; flex-direction: column; gap: 8px;
   }
+  #layerToggles.visible { display: flex; }
   .layerToggle {
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
     padding: 7px 11px; font-size: 11px; color: var(--cream-dim);
@@ -753,7 +754,7 @@ function tilePixelToLonLat(tx, ty, z, px, py, tileSize) {
   return [lon, lat];
 }
 
-async function fetchWeatherTilePoints(tx, ty) {
+async function fetchWeatherTilePoints(tx, ty, keepFraction) {
   const url = weatherTileUrl.replace('{z}', WEATHER_Z).replace('{x}', tx).replace('{y}', ty);
   try {
     const res = await fetch(url);
@@ -766,15 +767,13 @@ async function fetchWeatherTilePoints(tx, ty) {
     octx.drawImage(bitmap, 0, 0);
     const src = octx.getImageData(0, 0, w, h).data;
 
-    const STEP = 3; // much finer sampling — was 5, now every few source pixels
+    const STEP = 2; // dense sampling — every couple source pixels
     const points = [];
     for (let py = 0; py < h; py += STEP) {
       for (let px = 0; px < w; px += STEP) {
         const i = (py * w + px) * 4;
         if (src[i + 3] < 10) continue; // no signal here
-        // still thin slightly so dense storms don't become a solid wash,
-        // but keep far more than before now that each point is tiny
-        if (Math.random() > 0.7) continue;
+        if (Math.random() > keepFraction) continue; // thinning factor, scaled by how many tiles are in view (see refreshWeatherPoints)
         const isSnow = src[i + 2] > 130 && src[i] < 110; // snow renders in RainViewer's blue/purple range, distinct from the green-yellow-red rain ramp
         const jx = px + (Math.random() - 0.5) * STEP, jy = py + (Math.random() - 0.5) * STEP; // small jitter so points read as organic scatter, not a rigid grid
         const [lon, lat] = tilePixelToLonLat(tx, ty, WEATHER_Z, jx, jy, w);
@@ -805,7 +804,12 @@ async function refreshWeatherPoints() {
     for (let y = Math.max(0, yMin); y <= Math.min(n - 1, yMax); y++) tiles.push([x, y]);
   }
   if (tiles.length === 0 || tiles.length > 16) return; // zoomed too far out for this to mean anything — leave whatever was last shown
-  const results = await Promise.all(tiles.map(([x, y]) => fetchWeatherTilePoints(x, y)));
+  // Near-max density when zoomed in close (the common case right after the
+  // 3D handoff, usually 1-4 tiles) — thin more aggressively as more tiles
+  // come into view, so a wide zoomed-out view with a big storm system can't
+  // generate an unbounded number of points and lag the map.
+  const keepFraction = tiles.length <= 4 ? 0.9 : tiles.length <= 9 ? 0.55 : 0.3;
+  const results = await Promise.all(tiles.map(([x, y]) => fetchWeatherTilePoints(x, y, keepFraction)));
   const features = results.flat();
   src.setData({ type: 'FeatureCollection', features });
 }
@@ -836,10 +840,11 @@ function addWeatherLayerIfReady() {
     terrainMapInstance.addLayer({
       id: 'weatherPoints', type: 'circle', source: 'weatherPoints',
       paint: {
-        // tiny, with a touch of per-point size variance (sizeRand, set
-        // per feature above) so it reads as scattered sparkle/glint
-        // rather than a uniform grid of dots
-        'circle-radius': ['interpolate', ['linear'], ['get', 'sizeRand'], 0, 0.5, 1, 1.1],
+        // small but clearly visible, with a touch of per-point size
+        // variance (sizeRand, set per feature above) so it reads as
+        // scattered sparkle/glint rather than a uniform grid of dots —
+        // the previous 0.5–1.1px range was too small to actually see
+        'circle-radius': ['interpolate', ['linear'], ['get', 'sizeRand'], 0, 1.1, 1, 2.0],
         'circle-color': ['case', ['==', ['get', 'kind'], 'snow'], '#ffffff', '#b9dde2'],
         'circle-opacity': 0.9,
         'circle-blur': 0.05,
@@ -1109,6 +1114,7 @@ async function enter3D(lon, lat) {
   document.getElementById('terrainMap').classList.add('active');
   canvas.classList.add('faded');
   backBtn.classList.add('visible');
+  document.getElementById('layerToggles').classList.add('visible');
   setTimeout(() => map3d.resize(), 50); // container was display:none-adjacent (opacity 0); MapLibre needs a resize once it's actually laid out
 }
 
@@ -1130,6 +1136,7 @@ function exit3D() {
   document.getElementById('terrainMap').classList.remove('active');
   canvas.classList.remove('faded');
   backBtn.classList.remove('visible');
+  document.getElementById('layerToggles').classList.remove('visible');
   draw();
 }
 const backBtn = document.getElementById('backBtn');

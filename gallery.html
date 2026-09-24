@@ -235,10 +235,15 @@ let terrainLinesOn = true;
 // city" style seen in vintage azimuthal equidistant maps, rather than the
 // default polar-centered aspect. d3's .rotate() takes the negated
 // [longitude, latitude] of the point that should land at the center.
-const US_CENTER = [98.58, -39.83];
+// Note: the docked view's location label reads "near Nice, France"
+// (HOME_LAT/HOME_LON below) even though the map itself is still actually
+// centered here — a deliberate mismatch, since panning to Kansas looked
+// worse than the label being decorative until you tap in and the real
+// coordinates take over.
+const PROJECTION_CENTER = [98.58, -39.83];
 let rotationGamma = 0; // two-finger twist offset, degrees — applied as a pure canvas rotation at draw time (see draw()), NOT baked into the projection, so spinning stays cheap even with the terrain layer below
 let spinVelocity = 0; // degrees/frame of residual spin after a flick, decays via friction in tick()
-const projection = d3.geoAzimuthalEquidistant().rotate(US_CENTER).precision(0.3);
+const projection = d3.geoAzimuthalEquidistant().rotate(PROJECTION_CENTER).precision(0.3);
 const path = d3.geoPath(projection, ctx);
 
 let discCenter = { x: 0, y: 0 }, discRadius = 0; // fixed once per resize(), since the projection itself no longer changes with gamma
@@ -320,7 +325,7 @@ const MAJOR_CITIES = [
   ['Curitiba', -25.43, -49.27], ['Porto Alegre', -30.03, -51.23], ['Córdoba', -31.42, -64.18],
   ['Guayaquil', -2.19, -79.89],
   // Western & Northern Europe
-  ['London', 51.51, -0.13], ['Paris', 48.85, 2.35], ['Berlin', 52.52, 13.40],
+  ['London', 51.51, -0.13], ['Paris', 48.85, 2.35], ['Nice', 43.70, 7.27], ['Berlin', 52.52, 13.40],
   ['Madrid', 40.42, -3.70], ['Rome', 41.90, 12.50], ['Amsterdam', 52.37, 4.90],
   ['Vienna', 48.21, 16.37], ['Zurich', 47.38, 8.54], ['Geneva', 46.20, 6.14],
   ['Brussels', 50.85, 4.35], ['Copenhagen', 55.68, 12.57], ['Stockholm', 59.33, 18.07],
@@ -393,7 +398,7 @@ function nearestCity(lat, lon) {
   }
   return best;
 }
-const HOME_LAT = 39.83, HOME_LON = -98.58; // matches the flat map's projection center
+const HOME_LAT = 43.70, HOME_LON = 7.27; // Nice, France — label/coords only; does NOT match the projection's actual visual center (see PROJECTION_CENTER above), intentionally
 
 // ---- regional weather readout (under the coords link) ----
 // Open-Meteo: free, no API key, and current_weather + timezone=auto gives
@@ -486,10 +491,16 @@ function updateLocationReadout() {
   }
   const polarPlace = lat <= -60 ? 'Antarctica' : (lat >= 60 ? 'Arctic' : null);
   const city = polarPlace ? null : nearestCity(lat, lon);
-  document.getElementById('locationCity').textContent = polarPlace || (city ? 'near ' + city[0] : '');
+  document.getElementById('locationCity').textContent =
+    docked ? 'near Nice, France' : (polarPlace || (city ? 'near ' + city[0] : ''));
   const coordsEl = document.getElementById('locationCoords');
-  coordsEl.textContent = formatLatLon(lon, lat);
-  coordsEl.href = wikimapUrl(lon, lat);
+  if (docked) {
+    coordsEl.textContent = '';
+    coordsEl.removeAttribute('href');
+  } else {
+    coordsEl.textContent = formatLatLon(lon, lat);
+    coordsEl.href = wikimapUrl(lon, lat);
+  }
 
   // weather only at a "regional" zoom or closer — docked (the fixed home
   // view) and any wide zoomed-out view show nothing here
@@ -520,6 +531,7 @@ function resize() {
   const b = path.bounds(sphere);
   discCenter = { x: (b[0][0] + b[1][0]) / 2, y: (b[0][1] + b[1][1]) / 2 };
   discRadius = (b[1][0] - b[0][0]) / 2;
+  updatePanBounds();
   // rivers/lakes now draw live as vectors each frame (see draw()) — no
   // pre-baked bitmap to build on resize anymore
 
@@ -671,6 +683,23 @@ function touchAngle(touches) {
   const dy = touches[1].clientY - touches[0].clientY;
   return Math.atan2(dy, dx) * 180 / Math.PI;
 }
+// Bounds how far the undocked azimuthal can be panned: without this, d3-zoom
+// allows panning arbitrarily far in any direction, which let the whole disc
+// scroll off-screen into blank space while the dashboard below kept
+// reporting coordinates/cities for wherever the (now invisible) center of
+// the viewport happened to be. translateExtent constrains d3 so the
+// viewport, mapped back into the projection's own coordinate space, can
+// never leave this box — panning near the edge still works, it just can't
+// escape into empty space beyond the disc. A small margin (not a tight fit
+// to the disc) keeps that boundary from feeling like a hard wall.
+const PAN_EDGE_MARGIN = 1.15;
+function updatePanBounds() {
+  const m = discRadius * PAN_EDGE_MARGIN;
+  zoomBehavior.translateExtent([
+    [discCenter.x - m, discCenter.y - m],
+    [discCenter.x + m, discCenter.y + m],
+  ]);
+}
 const zoomBehavior = d3.zoom()
   .scaleExtent([0.25, 10])
   .on('zoom', (event) => {
@@ -723,14 +752,25 @@ const zoomBehavior = d3.zoom()
   });
 d3.select(canvas).call(zoomBehavior);
 
-// tapping the inlay pops the map out, zoomed in on whatever was tapped —
-// plain native click, which the browser already only fires for a genuine
-// tap (no meaningful movement between press and release), not a drag
+// Tapping a point on the map acts on it directly, rather than requiring
+// the person to think to pinch-zoom: docked, it pops the inlay out
+// zoomed in on whatever was tapped; undocked (and not already in 3D), it
+// jumps straight into the 3D view at that point, same as zooming in past
+// HANDOFF_K would — that pinch/zoom path (see the zoomBehavior handler
+// above) still works exactly as before, this is purely an additional way
+// in, not a replacement for it. Plain native click, which the browser
+// already only fires for a genuine tap (no meaningful movement between
+// press and release), not a drag.
 canvas.addEventListener('click', (e) => {
-  if (!docked || transitioning) return;
+  if (transitioning) return;
   const rect = canvas.getBoundingClientRect();
   const lonlat = lonLatAtScreenPoint(e.clientX - rect.left, e.clientY - rect.top);
-  if (lonlat) undockWithFade(lonlat[0], lonlat[1]);
+  if (!lonlat) return;
+  if (docked) {
+    undockWithFade(lonlat[0], lonlat[1]);
+  } else if (!in3D) {
+    enter3D(lonlat[0], lonlat[1]);
+  }
 });
 
 // ============================================================
@@ -1179,10 +1219,184 @@ function installAntarcticTerrainProtocol() {
   });
 }
 
+// ============================================================
+// POLAR GALLERY BAND: replaces the flat ocean-blue "void" toward the
+// north/south edges of the Mercator terrain with a scrolling strip of
+// images pulled from the Worker's rolling public gallery (R2, under
+// gallery-images/{tag}/..., served by the /gallery/{tag}/images routes).
+//
+// The images are already dithered — nothing to do there — but some are
+// the same custom-chunked PNGs the lamp composer tool produces for its
+// B/W e-ink animations: a normal, fully valid PNG (so it's never broken
+// as a file) with extra ancillary chunks appended before IEND — 'epRa'
+// (an animation header: dims, bits/pixel, frame count, interval) followed
+// by one 'epRb' chunk per frame, each a raw packed bitmap. Browsers
+// silently skip chunk types they don't recognize, so just drawImage()-ing
+// a chunked file would only ever show ONE frame (whatever the composer's
+// live canvas looked like at export time) — the actual animation frames
+// are invisible to a normal renderer. This decodes that structure
+// directly instead, walking the PNG's chunks by hand.
+// ============================================================
+const GALLERY_TAG = 'test-gallery';
+const GALLERY_PROTOCOL = 'gallery-band';
+// 4° of buffer before POLE_PORTAL_LAT (82, above) — the band is meant to
+// replace the void you'd otherwise see as you approach a pole, and by the
+// time you'd actually cross into the pole-portal's own fade/jump, this has
+// already taken over what was blue.
+const GALLERY_BAND_LAT = 78;
+const GALLERY_REFRESH_MS = 6 * 60 * 1000; // repoll the Worker for newly-uploaded images
+const GALLERY_STEP_MS = 900; // how often the scroll position (and any animation frames) advance
+
+let galleryItems = []; // [{ frames: ImageBitmap[], intervalMs, width, height }]
+let galleryProtocolInstalled = false;
+let galleryScrollStep = 0;
+
+function u32beRead(bytes, offset) {
+  return ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+}
+
+// inverse of the composer's packBits(): MSB-first, bpp bits per pixel,
+// code -> gray = code * 255/maxCode
+function unpackBits(bytes, offset, W, H, bpp) {
+  const bytesPerRow = Math.ceil(W * bpp / 8);
+  const maxCode = (1 << bpp) - 1;
+  const img = new ImageData(W, H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const bitOffset = (x * bpp) % 8;
+      const byteIndex = offset + y * bytesPerRow + ((x * bpp) >> 3);
+      const code = (bytes[byteIndex] >> (8 - bpp - bitOffset)) & maxCode;
+      const gray = Math.round(code * 255 / maxCode);
+      const i = (y * W + x) * 4;
+      img.data[i] = gray; img.data[i + 1] = gray; img.data[i + 2] = gray; img.data[i + 3] = 255;
+    }
+  }
+  return img;
+}
+async function imageDataToBitmap(imgData) {
+  const c = new OffscreenCanvas(imgData.width, imgData.height);
+  c.getContext('2d').putImageData(imgData, 0, 0);
+  return c.transferToImageBitmap();
+}
+
+async function decodeGalleryImage(bytes) {
+  // PNG signature is the first 8 bytes; chunks follow as
+  // [len(4) type(4) data(len) crc(4)], repeated to IEND
+  const epRbChunks = [];
+  let epRaData = null;
+  let offset = 8;
+  while (offset + 8 <= bytes.length) {
+    const len = u32beRead(bytes, offset);
+    const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+    const dataStart = offset + 8;
+    if (type === 'epRa') epRaData = bytes.slice(dataStart, dataStart + len);
+    else if (type === 'epRb') epRbChunks.push(bytes.slice(dataStart, dataStart + len));
+    else if (type === 'IEND') break;
+    offset = dataStart + len + 4;
+  }
+
+  if (epRaData && epRbChunks.length) {
+    // epRa: [W_hi, W_lo, H_hi, H_lo, bpp, frameCount, interval_hi, interval_lo]
+    const W = (epRaData[0] << 8) | epRaData[1], H = (epRaData[2] << 8) | epRaData[3];
+    const bpp = epRaData[4], frameCount = epRaData[5];
+    const intervalMs = ((epRaData[6] << 8) | epRaData[7]) || 1000;
+    const frames = [];
+    for (let i = 0; i < Math.min(frameCount, epRbChunks.length); i++) {
+      frames.push(await imageDataToBitmap(unpackBits(epRbChunks[i], 0, W, H, bpp)));
+    }
+    return { frames, intervalMs, width: W, height: H };
+  }
+  if (epRbChunks.length === 1) {
+    // static (non-animated) chunked image: [W_hi, W_lo, H_hi, H_lo, bpp] + packed bitmap
+    const d = epRbChunks[0];
+    const W = (d[0] << 8) | d[1], H = (d[2] << 8) | d[3], bpp = d[4];
+    const frame = await imageDataToBitmap(unpackBits(d, 5, W, H, bpp));
+    return { frames: [frame], intervalMs: 1000, width: W, height: H };
+  }
+  // no custom chunks at all — a plain image, decode it the normal way
+  const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+  return { frames: [bitmap], intervalMs: 1000, width: bitmap.width, height: bitmap.height };
+}
+
+async function refreshGalleryItems() {
+  try {
+    const res = await fetch(`${WORKER_BASE_URL}/gallery/${GALLERY_TAG}/images`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const decoded = (await Promise.all((data.items || []).map(async (entry) => {
+      try {
+        const r = await fetch(`${WORKER_BASE_URL}/gallery/${GALLERY_TAG}/images/${encodeURIComponent(entry.itemId)}`);
+        if (!r.ok) return null;
+        return await decodeGalleryImage(new Uint8Array(await r.arrayBuffer()));
+      } catch (err) {
+        console.warn('gallery: failed to decode', entry.itemId, err);
+        return null;
+      }
+    }))).filter(Boolean);
+    if (decoded.length) galleryItems = decoded; // only replace once there's actually something — a transient fetch hiccup shouldn't blank out the band
+  } catch (err) {
+    console.warn('gallery: image list fetch failed —', err.message);
+  }
+}
+
+function tileYToLat(y, n) {
+  const q = Math.PI - 2 * Math.PI * y / n;
+  return 180 / Math.PI * Math.atan(Math.sinh(q));
+}
+
+function installGalleryProtocol() {
+  if (galleryProtocolInstalled) return;
+  galleryProtocolInstalled = true;
+  maplibregl.addProtocol(GALLERY_PROTOCOL, async (params) => {
+    // trailing segments beyond z/x/y (a scroll-step cache-buster, see
+    // stepGalleryBand below) are intentionally ignored here
+    const [z, x, y] = params.url.replace(`${GALLERY_PROTOCOL}://`, '').split('/').map(Number);
+    const size = 256;
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#69cef1'; // matches --ocean — fallback while nothing's loaded yet
+    ctx.fillRect(0, 0, size, size);
+    if (galleryItems.length) {
+      // which image lands in this tile column: tile x plus a slowly
+      // advancing step offset, wrapped to however many images are
+      // loaded — the "scroll" is this mapping shifting by one every
+      // GALLERY_STEP_MS, not a sub-tile pixel scroll
+      const item = galleryItems[((x + galleryScrollStep) % galleryItems.length + galleryItems.length) % galleryItems.length];
+      const frameIdx = Math.floor(Date.now() / (item.intervalMs || 1000)) % item.frames.length;
+      const bitmap = item.frames[frameIdx];
+      const scale = Math.max(size / bitmap.width, size / bitmap.height); // cover-fit, centered
+      const dw = bitmap.width * scale, dh = bitmap.height * scale;
+      ctx.drawImage(bitmap, (size - dw) / 2, (size - dh) / 2, dw, dh);
+    }
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    return { data: await blob.arrayBuffer() };
+  });
+}
+
+let galleryStepTimer = null;
+function stepGalleryBand() {
+  galleryScrollStep = (galleryScrollStep + 1) % 100000;
+  if (!terrainMapInstance) return;
+  // MapLibre's tile cache is keyed by the resolved URL, so a changed
+  // (but otherwise ignored — see the protocol handler) trailing segment
+  // forces a refetch of the same z/x/y instead of reusing the old frame
+  const tiles = [`${GALLERY_PROTOCOL}://{z}/{x}/{y}/${galleryScrollStep}`];
+  const south = terrainMapInstance.getSource('galleryBandSouth');
+  const north = terrainMapInstance.getSource('galleryBandNorth');
+  if (south) south.setTiles(tiles);
+  if (north) north.setTiles(tiles);
+}
+
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   installAntarcticTerrainProtocol();
   initWeatherProtocol();
+  installGalleryProtocol();
+  if (!galleryStepTimer) {
+    refreshGalleryItems();
+    setInterval(refreshGalleryItems, GALLERY_REFRESH_MS);
+    galleryStepTimer = setInterval(stepGalleryBand, GALLERY_STEP_MS);
+  }
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
     // Restore continuous east/west wrapping. MapLibre natively repeats the
@@ -1248,6 +1462,28 @@ function initTerrainMap() {
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
+        // Two sources, not one, because MapLibre raster sources take a
+        // single bounds box — bounds restricts MapLibre to ever requesting
+        // tiles within it at all, so the empty-tile-outside-the-band
+        // problem doesn't need handling in the protocol handler itself.
+        galleryBandSouth: {
+          type: 'raster',
+          tiles: [`${GALLERY_PROTOCOL}://{z}/{x}/{y}`],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 10,
+          bounds: [-180, -85.05, 180, -GALLERY_BAND_LAT],
+          attribution: 'Gallery: rolling public uploads',
+        },
+        galleryBandNorth: {
+          type: 'raster',
+          tiles: [`${GALLERY_PROTOCOL}://{z}/{x}/{y}`],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 10,
+          bounds: [-180, GALLERY_BAND_LAT, 180, 85.05],
+          attribution: 'Gallery: rolling public uploads',
+        },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -1298,6 +1534,24 @@ function initTerrainMap() {
             'raster-opacity': 0.6,
             'raster-fade-duration': 0
           }
+        },
+        // Replaces the ocean-blue void toward each pole with the scrolling
+        // gallery — sits ABOVE color-relief/hillshade (so it actually
+        // covers that blue) but BELOW antarctic-relief, which stays
+        // transparent everywhere except real Antarctic land, so wherever
+        // the two bands overlap, real ice-shaded terrain still wins over
+        // a gallery image and only genuine open-ocean/void gets replaced.
+        {
+          id: 'gallery-band-south',
+          type: 'raster',
+          source: 'galleryBandSouth',
+          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 300 }
+        },
+        {
+          id: 'gallery-band-north',
+          type: 'raster',
+          source: 'galleryBandNorth',
+          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 300 }
         },
         // Real DEM-derived ice shading, draped directly onto the terrain
         // surface — see installAntarcticTerrainProtocol() above.

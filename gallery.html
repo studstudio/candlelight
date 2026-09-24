@@ -97,7 +97,11 @@
   #legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4a3a22; }
   #location { text-align: center; font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; color: #4a3a22; }
   #locationCity { font-size: 12px; font-weight: 500; letter-spacing: 0.03em; }
-  #locationCoords { font-size: 10px; font-weight: 300; letter-spacing: 0.06em; opacity: 0.75; margin-top: 2px; }
+  #locationCoords {
+    font-size: 10px; font-weight: 300; letter-spacing: 0.06em; opacity: 0.75; margin-top: 2px;
+    display: block; color: inherit; text-decoration: none;
+  }
+  #locationCoords:hover, #locationCoords:focus-visible { opacity: 1; text-decoration: underline; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   #count { font-size: 11px; color: #4a3a22; text-align: right; }
@@ -163,7 +167,7 @@
     </div>
     <div id="location">
       <div id="locationCity"></div>
-      <div id="locationCoords"></div>
+      <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
     </div>
     <div id="count"><b id="countNum">0</b>lights shared</div>
   </div>
@@ -299,7 +303,9 @@ function updateLocationReadout() {
   const polarPlace = lat <= -60 ? 'Antarctica' : (lat >= 60 ? 'Arctic' : null);
   const city = polarPlace ? null : nearestCity(lat, lon);
   document.getElementById('locationCity').textContent = polarPlace || (city ? 'near ' + city[0] : '');
-  document.getElementById('locationCoords').textContent = formatLatLon(lon, lat);
+  const coordsEl = document.getElementById('locationCoords');
+  coordsEl.textContent = formatLatLon(lon, lat);
+  coordsEl.href = wikiNearbyUrl(lon, lat);
 }
 
 let events = [];
@@ -365,20 +371,16 @@ function bakeWater() {
   const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
   if (rivers) {
     octx.save();
-    octx.filter = 'blur(1px)';
     octx.beginPath(); bakePath(rivers);
     octx.strokeStyle = oceanColor;
-    octx.globalAlpha = 0.8;
     octx.lineWidth = 0.4;
     octx.stroke();
     octx.restore();
   }
   if (lakes) {
     octx.save();
-    octx.filter = 'blur(1.5px)';
     octx.beginPath(); bakePath(lakes);
     octx.fillStyle = oceanColor;
-    octx.globalAlpha = 0.8;
     octx.fill();
     octx.restore();
   }
@@ -398,6 +400,17 @@ async function loadGeo(url, isTopo, objectName) {
 }
 
 const sphere = { type: 'Sphere' };
+
+// 3D terrain map's ocean blue (color-relief sea-level stop / sky-color) —
+// the azimuthal's own --ocean is the pastel inlay tone; this is only used to
+// compute a blend, never applied directly.
+const VIBRANT_OCEAN = '#18BFFF';
+function lerpHexColor(hexA, hexB, t) {
+  const a = hexA.replace('#', ''), b = hexB.replace('#', '');
+  const ar = parseInt(a.slice(0, 2), 16), ag = parseInt(a.slice(2, 4), 16), ab = parseInt(a.slice(4, 6), 16);
+  const br = parseInt(b.slice(0, 2), 16), bg = parseInt(b.slice(2, 4), 16), bb = parseInt(b.slice(4, 6), 16);
+  return [Math.round(ar + (br - ar) * t), Math.round(ag + (bg - ag) * t), Math.round(ab + (bb - ab) * t)];
+}
 
 
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
@@ -424,11 +437,17 @@ function draw() {
   const pr = (px) => px / transform.k; // same for point radii
 
   // ocean fades to transparent near the disc's outer edge, so it blends
-  // softly into the beige page background instead of a hard circular border
+  // softly into the beige page background instead of a hard circular border.
+  // Docked (small inlay): pastel --ocean as-is. Undocked (tapped into the
+  // zoomed azimuthal): halfway between that pastel tone and the 3D map's
+  // more vibrant ocean blue, so the transition into 3D doesn't jump.
   const oceanGrad = ctx.createRadialGradient(discCenter.x, discCenter.y, discRadius * 0.92, discCenter.x, discCenter.y, discRadius);
-  const oceanColor = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
-  oceanGrad.addColorStop(0, oceanColor);
-  oceanGrad.addColorStop(1, 'rgba(185,221,226,0)');
+  const pastelOcean = getComputedStyle(document.documentElement).getPropertyValue('--ocean').trim();
+  const [or, og, ob] = docked
+    ? lerpHexColor(pastelOcean, pastelOcean, 0)
+    : lerpHexColor(pastelOcean, VIBRANT_OCEAN, 0.5);
+  oceanGrad.addColorStop(0, `rgb(${or}, ${og}, ${ob})`);
+  oceanGrad.addColorStop(1, `rgba(${or}, ${og}, ${ob}, 0)`);
   ctx.beginPath(); path(sphere);
   ctx.fillStyle = oceanGrad;
   ctx.fill();
@@ -576,6 +595,15 @@ function formatLatLon(lon, lat) {
   const latStr = Math.abs(lat).toFixed(2) + '°' + (lat >= 0 ? 'N' : 'S');
   const lonStr = Math.abs(lon).toFixed(2) + '°' + (lon >= 0 ? 'E' : 'W');
   return `${latStr}, ${lonStr}`;
+}
+
+// WikiNearby wants plain signed decimals ("30.05, -8.02"), not the N/S/E/W
+// display format — the dashboard keeps showing N/S/E/W, this just builds the
+// link target from the same underlying numbers.
+function wikiNearbyUrl(lon, lat) {
+  const wrappedLon = ((lon + 540) % 360) - 180; // normalize in case 3D world-copy wrap pushed lon outside -180..180
+  const q = `${lat.toFixed(2)}, ${wrappedLon.toFixed(2)}`;
+  return `https://wikinearby.toolforge.org/?lang=en&q=${encodeURIComponent(q).replace(/%20/g, '+')}`;
 }
 
 function undockWithFade(lon, lat) {
@@ -941,6 +969,7 @@ function initTerrainMap() {
           source: 'stamenTonerLabels',
           paint: {
             'raster-opacity': 1.0,
+            'raster-contrast': -0.6,
             'raster-fade-duration': 0
           }
         },

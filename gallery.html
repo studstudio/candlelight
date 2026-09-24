@@ -133,11 +133,11 @@
        no camera tracking, nothing we can dynamically light or texture the
        way real terrain gets rendered. What we CAN do is make the static
        fallback itself read as soft atmospheric haze rather than a flat
-       paint-bucket fill: a gentle radial gradient (so it's not one dead-
-       flat tone) plus a very faint film-grain texture (an inline SVG
-       turbulence filter, no image request) for a bit of visual noise —
-       both cheap, both static, but together they read much more like
-       "obscured by mist" than a hard, artificial-looking fallback block.
+       paint-bucket fill: overlapping soft-edged color patches instead of
+       one flat tone (a film-grain SVG texture was tried here too, but
+       overlay-blending neutral/unstyled noise systematically desaturates
+       whatever's underneath toward gray — that's why it's gone; the
+       patches alone read as varied pale white/blue without that problem).
        This used to be solid #18BFFF (vivid ocean blue) — the actual root
        cause of the original "vivid blue void" complaint this whole
        conversation started from, sitting in plain CSS the whole time.
@@ -148,9 +148,7 @@
       radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
       radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
       radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
-      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%),
-      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/%3E%3C/svg%3E");
-    background-blend-mode: normal, normal, normal, normal, normal, overlay;
+      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap .maplibregl-canvas {
     background-color: #f2f7fa;
@@ -159,9 +157,7 @@
       radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
       radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
       radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
-      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%),
-      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/%3E%3C/svg%3E");
-    background-blend-mode: normal, normal, normal, normal, normal, overlay;
+      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }

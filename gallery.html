@@ -905,6 +905,20 @@ function initTerrainMap() {
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
+        // Stamen Terrain's own background layer group (landcover/water,
+        // no lines or labels) — an experiment layered at half opacity over
+        // our existing color-relief + hillshade, not a replacement for them.
+        stamenTerrainBackground: {
+          type: 'raster',
+          tiles: [
+            'https://tiles.stadiamaps.com/tiles/stamen_terrain_background/{z}/{x}/{y}.png' +
+              (STADIA_API_KEY ? `?api_key=${STADIA_API_KEY}` : '')
+          ],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 20,
+          attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
+        },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -942,6 +956,19 @@ function initTerrainMap() {
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
           },
+        },
+        // Half-opacity experiment: Stamen Terrain's background raster
+        // (landcover/water shading) laid over our own color-relief +
+        // hillshade. Sits below Antarctica/lakes/rivers/labels so those
+        // stay crisp on top.
+        {
+          id: 'stamen-terrain-background',
+          type: 'raster',
+          source: 'stamenTerrainBackground',
+          paint: {
+            'raster-opacity': 0.5,
+            'raster-fade-duration': 0
+          }
         },
         // Antarctica gets its own geographic ice palette while preserving
         // the existing terrain/hillshade stack. The white fill replaces the

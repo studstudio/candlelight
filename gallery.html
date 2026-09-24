@@ -123,12 +123,22 @@
   #terrainMap {
     position: absolute; inset: 0; opacity: 0; pointer-events: none;
     transition: opacity 0.6s ease; z-index: 1;
-    /* MapLibre remains genuinely full-screen. The ocean itself is rendered
-       by the terrain style; this is only the fallback canvas background. */
-    background: #18BFFF;
+    /* This shows through anywhere MapLibre genuinely renders nothing at
+       all — not just before the first frame, but permanently wherever
+       the terrain source has a real coverage gap (confirmed: Mapterhorn's
+       DEM data has real gaps near Antarctica) or the mesh simply doesn't
+       extend that far. No raster overlay, fog, or terrain-draped layer
+       can ever affect this — those only apply to pixels MapLibre actually
+       draws something on. A soft white reads as "obscured by cloud/mist"
+       instead of "cut off to ocean" wherever that happens, which used to
+       be #18BFFF (vivid ocean blue) — the actual root cause of the
+       original "vivid blue void" complaint this whole conversation
+       started from, sitting in plain CSS the whole time.
+    */
+    background: #ebf2f7;
   }
   #terrainMap .maplibregl-canvas {
-    background: #18BFFF;
+    background: #ebf2f7;
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }

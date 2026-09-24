@@ -142,18 +142,26 @@
        cause of the original "vivid blue void" complaint this whole
        conversation started from, sitting in plain CSS the whole time.
     */
-    background-color: #eef4f8;
+    background-color: #f2f7fa;
     background-image:
-      radial-gradient(ellipse at 50% 25%, #fbfdfe 0%, #eef4f8 55%, #dde8ef 100%),
-      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
-    background-blend-mode: normal, overlay;
+      radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
+      radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
+      radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
+      radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
+      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/%3E%3C/svg%3E");
+    background-blend-mode: normal, normal, normal, normal, normal, overlay;
   }
   #terrainMap .maplibregl-canvas {
-    background-color: #eef4f8;
+    background-color: #f2f7fa;
     background-image:
-      radial-gradient(ellipse at 50% 25%, #fbfdfe 0%, #eef4f8 55%, #dde8ef 100%),
-      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
-    background-blend-mode: normal, overlay;
+      radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
+      radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
+      radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
+      radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
+      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/%3E%3C/svg%3E");
+    background-blend-mode: normal, normal, normal, normal, normal, overlay;
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }

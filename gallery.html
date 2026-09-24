@@ -1321,8 +1321,9 @@ async function decodeGalleryImage(bytes) {
 async function refreshGalleryItems() {
   try {
     const res = await fetch(`${WORKER_BASE_URL}/gallery/${GALLERY_TAG}/images`);
-    if (!res.ok) return;
+    if (!res.ok) { console.warn('gallery: /images list fetch returned', res.status); return; }
     const data = await res.json();
+    if (!data.items || !data.items.length) { console.log('gallery: worker has no images yet for tag', GALLERY_TAG); return; }
     const decoded = (await Promise.all((data.items || []).map(async (entry) => {
       try {
         const r = await fetch(`${WORKER_BASE_URL}/gallery/${GALLERY_TAG}/images/${encodeURIComponent(entry.itemId)}`);
@@ -1333,7 +1334,12 @@ async function refreshGalleryItems() {
         return null;
       }
     }))).filter(Boolean);
-    if (decoded.length) galleryItems = decoded; // only replace once there's actually something — a transient fetch hiccup shouldn't blank out the band
+    if (decoded.length) {
+      galleryItems = decoded; // only replace once there's actually something — a transient fetch hiccup shouldn't blank out the band
+      console.log('gallery: loaded', decoded.length, 'image(s)');
+    } else {
+      console.warn('gallery: found', data.items.length, 'item(s) in the list but none decoded successfully');
+    }
   } catch (err) {
     console.warn('gallery: image list fetch failed —', err.message);
   }
@@ -1419,60 +1425,86 @@ function getGalleryTexture(itemIdx, frameIdx) {
 // by one every GALLERY_STEP_MS, not a smooth per-pixel motion
 function stepGalleryCards() {
   if (!galleryItems.length || !galleryCardSlots.length) return;
-  galleryScrollStep = (galleryScrollStep + 1) % 100000;
-  for (let slotIdx = 0; slotIdx < galleryCardSlots.length; slotIdx++) {
-    const itemIdx = ((slotIdx + galleryScrollStep) % galleryItems.length + galleryItems.length) % galleryItems.length;
-    const item = galleryItems[itemIdx];
-    const frameIdx = Math.floor(Date.now() / (item.intervalMs || 1000)) % item.frames.length;
-    const slot = galleryCardSlots[slotIdx];
-    const tex = getGalleryTexture(itemIdx, frameIdx);
-    if (slot.frontMat.map !== tex) {
-      slot.frontMat.map = tex;
-      slot.frontMat.color.set(0xffffff); // let the texture show true colors instead of the placeholder tint
-      slot.frontMat.needsUpdate = true;
-      // correct the card's aspect ratio to the real image now that it's
-      // known, rather than the CARD_ASPECT guess it was built with
-      const realAspect = item.height / item.width;
-      if (Math.abs(realAspect - slot.mesh.scale.y * CARD_ASPECT) > 0.01) {
-        slot.mesh.scale.y = realAspect / CARD_ASPECT;
+  try {
+    galleryScrollStep = (galleryScrollStep + 1) % 100000;
+    for (let slotIdx = 0; slotIdx < galleryCardSlots.length; slotIdx++) {
+      const itemIdx = ((slotIdx + galleryScrollStep) % galleryItems.length + galleryItems.length) % galleryItems.length;
+      const item = galleryItems[itemIdx];
+      const frameIdx = Math.floor(Date.now() / (item.intervalMs || 1000)) % item.frames.length;
+      const slot = galleryCardSlots[slotIdx];
+      const tex = getGalleryTexture(itemIdx, frameIdx);
+      if (slot.frontMat.map !== tex) {
+        slot.frontMat.map = tex;
+        slot.frontMat.color.set(0xffffff); // let the texture show true colors instead of the placeholder tint
+        slot.frontMat.needsUpdate = true;
+        // correct the card's aspect ratio to the real image now that it's
+        // known, rather than the CARD_ASPECT guess it was built with
+        const realAspect = item.height / item.width;
+        if (Math.abs(realAspect - slot.mesh.scale.y * CARD_ASPECT) > 0.01) {
+          slot.mesh.scale.y = realAspect / CARD_ASPECT;
+        }
       }
     }
+    if (terrainMapInstance) terrainMapInstance.triggerRepaint();
+  } catch (err) {
+    console.error('gallery: stepGalleryCards failed —', err);
   }
-  if (terrainMapInstance) terrainMapInstance.triggerRepaint();
 }
 
 async function installGalleryCardsLayer() {
   if (galleryCardsLayerAdded || !terrainMapInstance) return;
   galleryCardsLayerAdded = true;
-  await loadThree();
+  try {
+    await loadThree();
+  } catch (err) {
+    console.error('gallery: failed to load three.js from CDN —', err);
+    galleryCardsLayerAdded = false; // allow a retry on the next 3D entry rather than permanently giving up
+    return;
+  }
 
+  let renderErrorCount = 0;
   const layer = {
     id: 'gallery-cards-3d',
     type: 'custom',
     renderingMode: '3d',
     onAdd(map, gl) {
-      this.camera = new THREE.Camera();
-      this.scene = new THREE.Scene();
-      this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
-      const sun = new THREE.DirectionalLight(0xffffff, 0.5);
-      sun.position.set(0, -1, 1);
-      this.scene.add(sun);
-      this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
-      this.renderer.autoClear = false;
-      buildGalleryCardScene(this.scene);
+      try {
+        this.camera = new THREE.Camera();
+        this.scene = new THREE.Scene();
+        this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+        const sun = new THREE.DirectionalLight(0xffffff, 0.5);
+        sun.position.set(0, -1, 1);
+        this.scene.add(sun);
+        this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
+        this.renderer.autoClear = false;
+        buildGalleryCardScene(this.scene);
+        console.log('gallery: 3D card layer initialized,', galleryCardSlots.length, 'slots');
+      } catch (err) {
+        console.error('gallery: onAdd failed —', err);
+      }
     },
     render(gl, matrix) {
-      // No extra rotation baked in here (unlike the common "load a glTF
-      // model" example, which needs one to convert a Y-up authored model
-      // into Mercator's Z-up space) — our own geometry is already
-      // authored directly in Mercator-native position/orientation via
-      // buildGalleryCardSlot above, so the raw matrix applies as-is.
-      this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
-      this.renderer.resetState();
-      this.renderer.render(this.scene, this.camera);
+      // A per-frame exception here must never propagate — this runs on
+      // every single repaint, so an uncaught throw would fire constantly
+      // and risks destabilizing MapLibre's own render loop (which is
+      // exactly when things like the pole-wrap fade/jump need to run
+      // cleanly). Log it a few times for diagnosis, then go quiet.
+      try {
+        if (!this.renderer) return; // onAdd never finished successfully
+        this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
+        this.renderer.resetState();
+        this.renderer.render(this.scene, this.camera);
+      } catch (err) {
+        renderErrorCount++;
+        if (renderErrorCount <= 3) console.error('gallery: render() failed —', err);
+      }
     },
   };
-  terrainMapInstance.addLayer(layer);
+  try {
+    terrainMapInstance.addLayer(layer);
+  } catch (err) {
+    console.error('gallery: addLayer failed —', err);
+  }
 }
 
 function initTerrainMap() {
@@ -1642,7 +1674,11 @@ function initTerrainMap() {
     dragRotate: true,
     touchPitch: true,
   });
-  terrainMapInstance.on('load', () => { addWeatherLayerIfReady(); applyLayerToggles(); installGalleryCardsLayer(); });
+  terrainMapInstance.on('load', () => {
+    addWeatherLayerIfReady();
+    applyLayerToggles();
+    installGalleryCardsLayer().catch(err => console.error('gallery: 3D layer install failed —', err));
+  });
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);

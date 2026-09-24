@@ -129,16 +129,31 @@
        DEM data has real gaps near Antarctica) or the mesh simply doesn't
        extend that far. No raster overlay, fog, or terrain-draped layer
        can ever affect this — those only apply to pixels MapLibre actually
-       draws something on. A soft white reads as "obscured by cloud/mist"
-       instead of "cut off to ocean" wherever that happens, which used to
-       be #18BFFF (vivid ocean blue) — the actual root cause of the
-       original "vivid blue void" complaint this whole conversation
-       started from, sitting in plain CSS the whole time.
+       draws something on, and this is genuinely empty canvas: no geometry,
+       no camera tracking, nothing we can dynamically light or texture the
+       way real terrain gets rendered. What we CAN do is make the static
+       fallback itself read as soft atmospheric haze rather than a flat
+       paint-bucket fill: a gentle radial gradient (so it's not one dead-
+       flat tone) plus a very faint film-grain texture (an inline SVG
+       turbulence filter, no image request) for a bit of visual noise —
+       both cheap, both static, but together they read much more like
+       "obscured by mist" than a hard, artificial-looking fallback block.
+       This used to be solid #18BFFF (vivid ocean blue) — the actual root
+       cause of the original "vivid blue void" complaint this whole
+       conversation started from, sitting in plain CSS the whole time.
     */
-    background: #ebf2f7;
+    background-color: #eef4f8;
+    background-image:
+      radial-gradient(ellipse at 50% 25%, #fbfdfe 0%, #eef4f8 55%, #dde8ef 100%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+    background-blend-mode: normal, overlay;
   }
   #terrainMap .maplibregl-canvas {
-    background: #ebf2f7;
+    background-color: #eef4f8;
+    background-image:
+      radial-gradient(ellipse at 50% 25%, #fbfdfe 0%, #eef4f8 55%, #dde8ef 100%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+    background-blend-mode: normal, overlay;
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }

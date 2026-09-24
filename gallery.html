@@ -1231,78 +1231,12 @@ function installAntarcticTerrainProtocol() {
 }
 
 
-// ============================================================
-// POLAR MIST: obscures the hard edge of the Mercator projection
-// (~85.05°N/S, where MapLibre simply can't represent latitude any
-// further and terrain rendering has to stop) with a soft white mist
-// instead of leaving a visible cutoff. Two bounded raster sources (one
-// per pole), each backed by a custom protocol that paints a smooth
-// per-pixel-row gradient: transparent at MIST_START_LAT, ramping up to
-// nearly opaque right at the true edge.
-//
-// Unlike the old photo-gallery raster band, this doesn't need the
-// "reject any tile that isn't FULLY inside the band" fix that turned out
-// to be necessary there — that was a problem specific to stretching one
-// discrete image across a whole tile. Here every row of every tile gets
-// its own correctly-computed opacity from its own real latitude, so even
-// a huge low-zoom tile spanning well past the mist band still renders
-// correctly: thick near the pole edge, fading smoothly to fully
-// transparent everywhere else within that same tile.
-// ============================================================
-const MIST_PROTOCOL = 'polar-mist';
-const MIST_START_LAT = 75; // degrees — mist begins fading in here
-const MIST_EDGE_LAT = 85.05; // matches MapLibre's actual Mercator limit
-const MIST_RAMP_DEGREES = 3; // how far past MIST_START_LAT it takes to reach full thickness — NOT the same as the distance to the true edge; it should be solid well before you get anywhere close to it
-const MIST_MAX_OPACITY = 1.0; // it needs to fully obscure the ocean blue underneath, not just mostly
-const MIST_COLOR = [235, 242, 247]; // soft icy white — a hint of blue so it doesn't read as flat paper-white against the terrain
-
-function tileLatAtRow(y, n, rowFraction) {
-  // rowFraction: 0 = tile's top (north) edge, 1 = tile's bottom (south) edge
-  const yFrac = y + rowFraction;
-  const q = Math.PI - 2 * Math.PI * yFrac / n;
-  return 180 / Math.PI * Math.atan(Math.sinh(q));
-}
-
-function mistOpacityForLat(lat) {
-  const t = (Math.abs(lat) - MIST_START_LAT) / MIST_RAMP_DEGREES;
-  const clamped = Math.max(0, Math.min(1, t));
-  return clamped * clamped * MIST_MAX_OPACITY; // eased ramp over MIST_RAMP_DEGREES, then holds at MIST_MAX_OPACITY for the rest of the way to MIST_EDGE_LAT
-}
-
-function installPolarMistProtocol() {
-  maplibregl.addProtocol(MIST_PROTOCOL, async (params) => {
-    const [z, x, y] = params.url.replace(`${MIST_PROTOCOL}://`, '').split('/').map(Number);
-    const size = 256;
-    const n = Math.pow(2, z);
-    const canvas = new OffscreenCanvas(size, size);
-    const ctx = canvas.getContext('2d');
-
-    // A handful of gradient stops sampled at real latitudes, not size
-    // linear pixel steps — cheap (no per-pixel loop, unlike the old
-    // weather-tile classifier) while still tracking Mercator's non-linear
-    // latitude-per-pixel compression reasonably closely near the poles.
-    const STOPS = 12;
-    const grad = ctx.createLinearGradient(0, 0, 0, size);
-    for (let i = 0; i <= STOPS; i++) {
-      const rowFraction = i / STOPS;
-      const lat = tileLatAtRow(y, n, rowFraction);
-      const alpha = mistOpacityForLat(lat);
-      grad.addColorStop(rowFraction, `rgba(${MIST_COLOR[0]}, ${MIST_COLOR[1]}, ${MIST_COLOR[2]}, ${alpha})`);
-    }
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, size, size);
-
-    const blob = await canvas.convertToBlob({ type: 'image/png' });
-    return { data: await blob.arrayBuffer() };
-  });
-}
 
 
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   installAntarcticTerrainProtocol();
   initWeatherProtocol();
-  installPolarMistProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
     // Restore continuous east/west wrapping. MapLibre natively repeats the
@@ -1367,26 +1301,6 @@ function initTerrainMap() {
           minzoom: 0,
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
-        },
-        // bounds here is purely a performance optimization (skip
-        // generating near-fully-transparent tiles far from either pole) —
-        // unlike the old gallery band, correctness doesn't depend on it,
-        // since every tile computes its own real per-row opacity anyway.
-        polarMistSouth: {
-          type: 'raster',
-          tiles: [`${MIST_PROTOCOL}://{z}/{x}/{y}`],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 10,
-          bounds: [-180, -85.05, 180, -MIST_START_LAT],
-        },
-        polarMistNorth: {
-          type: 'raster',
-          tiles: [`${MIST_PROTOCOL}://{z}/{x}/{y}`],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 10,
-          bounds: [-180, MIST_START_LAT, 180, 85.05],
         },
       },
       layers: [
@@ -1464,31 +1378,24 @@ function initTerrainMap() {
             'raster-fade-duration': 0
           }
         },
-        // Mist goes last of all — on top of terrain, ice-shading, lakes,
-        // rivers, and labels alike, the way real atmospheric haze would
-        // sit in front of everything as you look toward either pole.
-        {
-          id: 'polar-mist-south',
-          type: 'raster',
-          source: 'polarMistSouth',
-          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 300 }
-        },
-        {
-          id: 'polar-mist-north',
-          type: 'raster',
-          source: 'polarMistNorth',
-          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 300 }
-        },
       ],
       terrain: { source: 'terrainSource', exaggeration: 1 },
-      // Keep the 3D camera's exposed sky/horizon vividly blue instead of
-      // inheriting the app's dark chrome. The horizon blend is kept moderate
-      // so the blue remains visible when the camera is pitched steeply.
+      // Keep the 3D camera's exposed sky/horizon vividly blue up close,
+      // but fade distant TERRAIN (not just the sky) toward a soft white
+      // as it approaches the horizon — fog-color/fog-ground-blend are the
+      // properties that actually do this, based on view distance rather
+      // than latitude, so it works correctly regardless of exact pitch or
+      // how far toward a pole the visible horizon happens to reach.
+      // (There was also a latitude-gated mist raster layer here at one
+      // point, guaranteeing full opacity right at the true edge — removed
+      // for now to evaluate this fog approach on its own first.)
       sky: {
         'sky-color': '#18BFFF',
         'sky-horizon-blend': 0.28,
         'horizon-color': '#72D8FF',
-        'horizon-fog-blend': 0.18
+        'horizon-fog-blend': 0.85,
+        'fog-color': '#ebf2f7', // soft icy white
+        'fog-ground-blend': 0.85
       },
     },
     attributionControl: { compact: true },

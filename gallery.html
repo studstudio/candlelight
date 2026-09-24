@@ -1165,6 +1165,7 @@ function installAntarcticTerrainProtocol() {
       // throwing, so the ordinary color-relief ocean blue shows through
       // underneath for that one tile instead of spamming the console.
       const blankCanvas = new OffscreenCanvas(size, size);
+      blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
       const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
       return { data: await blankBlob.arrayBuffer() };
     }
@@ -1523,7 +1524,7 @@ async function installGalleryCardsLayer() {
         console.error('gallery: onAdd failed —', err);
       }
     },
-    render(gl, matrix) {
+    render(gl, matrixOrArgs) {
       // A per-frame exception here must never propagate — this runs on
       // every single repaint, so an uncaught throw would fire constantly
       // and risks destabilizing MapLibre's own render loop (which is
@@ -1531,11 +1532,22 @@ async function installGalleryCardsLayer() {
       // cleanly). Log it a few times for diagnosis, then go quiet.
       try {
         if (!this.renderer) return; // onAdd never finished successfully
+        // MapLibre's custom-layer render signature has changed across
+        // versions: older/simpler versions pass a flat mat4 array
+        // directly as the second argument; this project's version
+        // evidently passes a richer object instead, with the real matrix
+        // nested at defaultProjectionData.mainMatrix. Array.from() on
+        // that object silently produced an EMPTY array rather than
+        // throwing (confirmed via a one-time console log) — which is
+        // exactly why nothing ever rendered without any error at all.
+        const matrixArray = (matrixOrArgs && matrixOrArgs.defaultProjectionData)
+          ? matrixOrArgs.defaultProjectionData.mainMatrix
+          : matrixOrArgs;
         if (!this._loggedMatrix) {
           this._loggedMatrix = true;
-          console.log('gallery: first render() matrix —', Array.from(matrix));
+          console.log('gallery: resolved render matrix —', matrixArray && Array.from(matrixArray));
         }
-        this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
+        this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrixArray);
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
       } catch (err) {

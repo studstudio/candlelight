@@ -1157,7 +1157,17 @@ function installAntarcticTerrainProtocol() {
     const size = 512;
     const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
     const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
-    if (!response.ok) throw new Error(`Mapterhorn DEM ${response.status}`);
+    if (!response.ok) {
+      // Mapterhorn's coverage has real gaps (their own docs note it
+      // started with a European-DEM focus, not full global coverage) —
+      // a missing tile here just means "no ice-shading data available",
+      // not a fatal error. Hand back a fully transparent tile instead of
+      // throwing, so the ordinary color-relief ocean blue shows through
+      // underneath for that one tile instead of spamming the console.
+      const blankCanvas = new OffscreenCanvas(size, size);
+      const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
+      return { data: await blankBlob.arrayBuffer() };
+    }
     const bitmap = await createImageBitmap(await response.blob());
 
     const canvas = document.createElement('canvas');
@@ -1371,7 +1381,7 @@ let galleryTextureCache = new Map(); // "itemIdx-frameIdx" -> THREE.Texture, so 
 // you're working in Mercator's flat projection rather than a true globe,
 // since a ring of constant latitude is a straight horizontal line there,
 // not a circle to "face outward" from.
-function buildGalleryCardSlot(scene, lon, hemiLat) {
+function buildGalleryCardSlot(scene, lon, hemiLat, isFirst) {
   const merc = maplibregl.MercatorCoordinate.fromLngLat([lon, hemiLat], CARD_BASE_ALT_M);
   const metersToMerc = merc.meterInMercatorCoordinateUnits();
   const w = CARD_WIDTH_M * metersToMerc;
@@ -1394,16 +1404,46 @@ function buildGalleryCardSlot(scene, lon, hemiLat) {
   const lookTarget = new THREE.Vector3(merc.x, merc.y, merc.z).sub(facingDir);
   mesh.lookAt(lookTarget); // local -Z points at lookTarget, i.e. opposite facingDir, so local +Z (the textured front face) ends up pointing along facingDir
 
+  if (isFirst) {
+    console.log('gallery: first card diagnostic —', {
+      lon, hemiLat, mercX: merc.x, mercY: merc.y, mercZ: merc.z,
+      metersToMerc, width: w, height: h, depth,
+    });
+  }
+
   scene.add(mesh);
   return { mesh, frontMat, geometryWidth: w, geometryHeight: h };
 }
 
+// A dead-simple reference object: fixed position, no lookAt, no rotation,
+// enormous and bright red — if THIS doesn't show up either, the bug is in
+// the basic camera/rendering setup (onAdd/render), not in the cards'
+// lookAt/positioning math specifically. If this DOES show up but the real
+// cards don't, the bug is isolated to buildGalleryCardSlot above. One per
+// card slot (not just a single fixed point) so it's visible from wherever
+// you happen to be looking near a pole, no precise navigation needed.
+function buildDiagnosticMarker(scene, lon, hemiLat, isFirst) {
+  const merc = maplibregl.MercatorCoordinate.fromLngLat([lon, hemiLat], CARD_BASE_ALT_M);
+  const scale = merc.meterInMercatorCoordinateUnits();
+  const radius = CARD_WIDTH_M * 3 * scale; // deliberately huge — impossible to miss if visible at all
+  const mat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 12, 12), mat); // low-poly — this machine is slow, no need for a smooth sphere here
+  mesh.position.set(merc.x, merc.y, merc.z);
+  scene.add(mesh);
+  if (isFirst) {
+    console.log('gallery: diagnostic markers placed around both poles, first at lon=' + lon + ' lat=' + hemiLat + ', mercator', { x: merc.x, y: merc.y, z: merc.z }, 'radius', radius);
+  }
+}
+
 function buildGalleryCardScene(scene) {
   galleryCardSlots = [];
+  let first = true;
   for (const hemiLat of [CARD_LAT, -CARD_LAT]) {
     for (let i = 0; i < CARD_COUNT_PER_POLE; i++) {
       const lon = -180 + (360 / CARD_COUNT_PER_POLE) * i;
-      galleryCardSlots.push(buildGalleryCardSlot(scene, lon, hemiLat));
+      buildDiagnosticMarker(scene, lon, hemiLat, first);
+      galleryCardSlots.push(buildGalleryCardSlot(scene, lon, hemiLat, first));
+      first = false;
     }
   }
 }
@@ -1491,6 +1531,10 @@ async function installGalleryCardsLayer() {
       // cleanly). Log it a few times for diagnosis, then go quiet.
       try {
         if (!this.renderer) return; // onAdd never finished successfully
+        if (!this._loggedMatrix) {
+          this._loggedMatrix = true;
+          console.log('gallery: first render() matrix —', Array.from(matrix));
+        }
         this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);

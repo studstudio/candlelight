@@ -144,6 +144,7 @@
     */
     background-color: #f2f7fa;
     background-image:
+      linear-gradient(to bottom, #ffffff 0%, #ffffff 6%, rgba(255,255,255,0) 28%),
       radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
       radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
       radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
@@ -153,6 +154,7 @@
   #terrainMap .maplibregl-canvas {
     background-color: #f2f7fa;
     background-image:
+      linear-gradient(to bottom, #ffffff 0%, #ffffff 6%, rgba(255,255,255,0) 28%),
       radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
       radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
       radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
@@ -1176,6 +1178,49 @@ function handlePoleWrap() {
 // ============================================================
 let antarcticProtocolInstalled = false;
 
+// Real, successfully-decoded ice tiles, cached so a genuine Mapterhorn gap
+// can borrow a nearby one instead of going blank — see findNearbyAntarcticTile
+// below. Bounded size so long panning sessions don't grow this forever.
+const antarcticTileCache = new Map(); // "z/x/y" -> ImageData
+const ANTARCTIC_CACHE_MAX = 300;
+
+function cacheAntarcticTile(z, x, y, imageData) {
+  const key = `${z}/${x}/${y}`;
+  antarcticTileCache.set(key, imageData);
+  if (antarcticTileCache.size > ANTARCTIC_CACHE_MAX) {
+    antarcticTileCache.delete(antarcticTileCache.keys().next().value); // Map preserves insertion order, so this evicts the oldest
+  }
+}
+
+// Same column first (north/south neighbors read as the most visually
+// coherent choice for "ice continuing into the distance"), then same row,
+// expanding outward one ring at a time.
+function findNearbyAntarcticTile(z, x, y, maxRadius) {
+  for (let r = 1; r <= maxRadius; r++) {
+    for (const dy of [-r, r]) {
+      const hit = antarcticTileCache.get(`${z}/${x}/${y + dy}`);
+      if (hit) return hit;
+    }
+    for (const dx of [-r, r]) {
+      const hit = antarcticTileCache.get(`${z}/${x + dx}/${y}`);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+// A genuine top-bottom mirror, not just a repeat — reads as a reflection
+// of real ice rather than an obviously-tiled duplicate.
+function mirrorImageDataVertically(imgData) {
+  const { width, height, data } = imgData;
+  const out = new ImageData(width, height);
+  for (let row = 0; row < height; row++) {
+    const srcRow = height - 1 - row;
+    out.data.set(data.subarray(srcRow * width * 4, (srcRow + 1) * width * 4), row * width * 4);
+  }
+  return out;
+}
+
 function installAntarcticTerrainProtocol() {
   if (antarcticProtocolInstalled) return;
   antarcticProtocolInstalled = true;
@@ -1188,11 +1233,23 @@ function installAntarcticTerrainProtocol() {
     const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
     if (!response.ok) {
       // Mapterhorn's coverage has real gaps (their own docs note it
-      // started with a European-DEM focus, not full global coverage) —
-      // a missing tile here just means "no ice-shading data available",
-      // not a fatal error. Hand back a fully transparent tile instead of
-      // throwing, so the ordinary color-relief ocean blue shows through
-      // underneath for that one tile instead of spamming the console.
+      // started with a European-DEM focus, not full global coverage).
+      // Rather than leaving that as empty space, borrow a nearby ALREADY
+      // real, already-rendered ice tile and mirror it — genuine ice
+      // texture that reads as reflecting/continuing outward, instead of a
+      // flat fallback color or a hard cutoff to nothing.
+      const nearby = findNearbyAntarcticTile(z, x, y, 6);
+      if (nearby) {
+        const mirrored = mirrorImageDataVertically(nearby);
+        const mirrorCanvas = new OffscreenCanvas(size, size);
+        const mirrorCtx = mirrorCanvas.getContext('2d');
+        mirrorCtx.putImageData(mirrored, 0, 0);
+        const mirrorBlob = await mirrorCanvas.convertToBlob({ type: 'image/png' });
+        return { data: await mirrorBlob.arrayBuffer() };
+      }
+      // Nothing nearby cached yet (e.g. the very first tiles requested
+      // this session) — fall back to blank, letting the CSS fallback
+      // background (see #terrainMap above) show through instead.
       const blankCanvas = new OffscreenCanvas(size, size);
       blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
       const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
@@ -1255,6 +1312,7 @@ function installAntarcticTerrainProtocol() {
       }
     }
     ctx.putImageData(out, 0, 0);
+    cacheAntarcticTile(z, x, y, out);
     return { data: await createImageBitmap(canvas) };
   });
 }

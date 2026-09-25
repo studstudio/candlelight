@@ -248,24 +248,33 @@ async function loadMapLibre() {
 }
 // ---- config ----
 // ============================================================
-// DEBUG KILL-SWITCHES — for tracking down the freeze/bounce glitch by
-// process of elimination. Flip one to `true` to fully remove that system
-// (not just hide it — no source, no layer, no listeners), reload, and
-// test. Suggested order, most-suspicious first:
-//   1. DEBUG_DISABLE_ZOOM_FLOOR  — newest, most complex, already had one
-//      confirmed real bug in it. Disabled by default below — this is
-//      already the first test.
+// DEBUG KILL-SWITCHES — used to track down the freeze/bounce glitch by
+// process of elimination. ROOT CAUSE FOUND: ZOOM_FLOOR_CURVE's lowest
+// point was [10, 4.55], applied everywhere below that latitude too — a
+// hard minZoom of 4.55 was active globally, not just near poles. The
+// separate fixed EXIT_ZOOM constant was 4.5. Since 4.55 > 4.5, MapLibre's
+// hard clamp made "zoom below EXIT_ZOOM" mathematically unreachable
+// everywhere, which is why auto-exit broke globally rather than only near
+// poles — and very likely why the glitch itself happened "anywhere on the
+// map" too (an active zoom-out gesture pushing against a floor with no
+// exit available at that point). Fixed properly by UNIFYING the two
+// instead of just avoiding the conflict: EXIT_ZOOM is gone, and
+// autoExitCheck now compares against computeZoomFloor's own current
+// value — hitting the floor IS what triggers exit, so the two can never
+// contradict each other at any latitude, and the floor is fully active
+// everywhere again exactly as originally intended.
+//
+// These flags are left in place for any future regressions — flip one to
+// `true` to fully remove that system (not just hide it) and reload:
+//   1. DEBUG_DISABLE_ZOOM_FLOOR
 //   2. DEBUG_DISABLE_WEATHER     — its opacity fade zoom expression ends
-//      exactly at zoom 8, which is suspiciously close to where this was
-//      once caught stuck.
-//   3. DEBUG_DISABLE_BATHYMETRY  — newest visual addition; this fully
-//      removes the sources too, not just the toggle-off state.
-//   4. DEBUG_DISABLE_ANTARCTIC   — decodes DEM tiles on every request,
-//      real per-pixel work, less likely but cheap to rule out.
-// If NONE of these fix it, the glitch predates all of them and is
-// somewhere in the base map/camera code itself.
+//      exactly at zoom 8, worth remembering if zoom-8-adjacent issues
+//      ever come up again.
+//   3. DEBUG_DISABLE_BATHYMETRY  — fully removes the sources too, not
+//      just the toggle-off state.
+//   4. DEBUG_DISABLE_ANTARCTIC   — decodes DEM tiles on every request.
 // ============================================================
-const DEBUG_DISABLE_ZOOM_FLOOR = true;
+const DEBUG_DISABLE_ZOOM_FLOOR = false;
 const DEBUG_DISABLE_WEATHER = false;
 const DEBUG_DISABLE_BATHYMETRY = false;
 const DEBUG_DISABLE_ANTARCTIC = false;
@@ -1581,7 +1590,7 @@ function initTerrainMap() {
     maxPitch: 75,
     dragRotate: true,
     touchPitch: true,
-    minZoom: DEBUG_DISABLE_ZOOM_FLOOR ? undefined : ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move' events start firing
+    minZoom: DEBUG_DISABLE_ZOOM_FLOOR ? undefined : ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() corrects this to the exact entry latitude's floor immediately after (see enter3D below)
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
@@ -1655,7 +1664,10 @@ function syncFlatMapToMapLibre() {
   d3.select(canvas).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(k));
 }
 
-const EXIT_ZOOM = 4.5; // lowered from 6.5 — gives real buffer room so rotating at a moderate zoom doesn't brush the threshold
+// EXIT_ZOOM used to be a fixed threshold here (4.5) — removed. The exit
+// threshold is now the dynamic zoom floor itself (computeZoomFloor,
+// defined below with the rest of that system), not a separate fixed
+// number, so the two can never contradict each other at any latitude.
 const EXIT_GRACE_MS = 400; // ignore the very first zoom event or two right after entry/jumpTo settling
 const TREND_WINDOW_MS = 500; // exit is judged against zoom from this long ago, not the single previous event — absorbs gesture restarts/jitter that were eating pinch progress
 const MIN_EXIT_DELTA = 0.35; // must have genuinely dropped by this much over the window, not just crossed the line — rotating the camera alone can nudge the reported zoom slightly, and this keeps that from misreading as a real zoom-out
@@ -1692,6 +1704,14 @@ let zoomHistory = []; // rolling [{t, z}, ...] samples, trimmed to TREND_WINDOW_
 // To add more data points later: append [lat, zoom] pairs to this array in
 // the same format, in any order — ZOOM_FLOOR_CURVE gets sorted before use.
 // ============================================================
+// The floor is active everywhere, exactly as originally intended — the
+// low-latitude points here (4.55-5.14) are real data from testing, not a
+// problem to work around. What WAS the problem: comparing this dynamic,
+// location-dependent floor against a separate FIXED exit threshold
+// (EXIT_ZOOM) could contradict it at some latitudes. Fixed by unifying
+// them — see autoExitCheck below, which now exits when the camera hits
+// THIS curve's current value, not a fixed number, so the two can never
+// be in conflict again regardless of latitude.
 const ZOOM_FLOOR_CURVE = [
   [10, 4.55], [15, 4.55], [25, 4.83], [35, 4.87], [45, 4.92], [50, 5.12],
   [55, 5.14], [62, 5.25], [66, 5.41], [68, 5.48], [70, 5.65], [72, 5.79],
@@ -1860,7 +1880,18 @@ function autoExitCheck() {
   while (zoomHistory.length > 1 && now - zoomHistory[0].t > TREND_WINDOW_MS) zoomHistory.shift();
   if (now - enteredAt < EXIT_GRACE_MS) return; // still settling from entry — ignore
   const oldest = zoomHistory[0];
-  if (z < EXIT_ZOOM && (oldest.z - z) > MIN_EXIT_DELTA) exit3D(); // below threshold AND a real, sustained zoom-out over the window — not rotation noise or gesture-restart jitter
+  // The floor IS the exit threshold now, not a separate fixed number —
+  // this is what "hitting the floor" means: minZoom clamps the camera so
+  // it literally cannot go below this value, so once zoomed-out gesture
+  // pressure gets the camera down to (within a small tolerance of) its
+  // current location's floor, that's the trigger. A fixed EXIT_ZOOM used
+  // to be compared against separately, which could sit BELOW the floor at
+  // some latitudes — making exit unreachable there, and very likely
+  // trapping an active zoom-out gesture uselessly pushing against a wall
+  // with no escape, which is probably what the glitch actually was.
+  const currentFloor = computeZoomFloor(terrainMapInstance.getCenter().lat);
+  const atFloor = z <= currentFloor + 0.05; // small tolerance for float/interpolation jitter, not an exact equality check
+  if (atFloor && (oldest.z - z) > MIN_EXIT_DELTA) exit3D(); // at the floor AND a real, sustained zoom-out over the window — not rotation noise or gesture-restart jitter
 }
 
 function exit3D() {

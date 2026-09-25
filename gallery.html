@@ -108,9 +108,18 @@
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   /* Debug/tuning readout — zoom/elevation only mean anything in 3D, so this
-     reads "–" otherwise. */
-  #zoomReadout { font-size: 11px; color: #4a3a22; text-align: right; }
-  #zoomReadout .zrRow { margin-top: 2px; }
+     reads "–" otherwise. Its text updates on EVERY 'move' event during
+     active panning/zooming — min-height + nowrap here are load-bearing,
+     not cosmetic: if this box's height ever fluctuated as numbers of
+     different lengths came through (e.g. a 6-digit altitude wrapping
+     differently than a 4-digit one), that would resize #dashboard, which
+     resizes main (flex: 1 1 auto, takes whatever's left over), which
+     resizes #terrainMap — and MapLibre has its own internal
+     ResizeObserver watching that container, so a fluctuating readout size
+     could genuinely drive a repeating internal-resize loop the whole time
+     the camera is moving. Fixed height removes that possibility outright. */
+  #zoomReadout { font-size: 11px; color: #4a3a22; text-align: right; min-height: 64px; }
+  #zoomReadout .zrRow { margin-top: 2px; white-space: nowrap; }
   #zoomReadout .zrRow:first-child { margin-top: 0; }
   #zoomReadout b { color: #2a1f10; font-size: 15px; }
   #layerToggles {
@@ -1458,19 +1467,22 @@ function initTerrainMap() {
         },
         // Depth-varying ocean tint from real bathymetry, replacing the
         // flat single ocean-blue above for actual underwater elevation.
-        // Deep water is a lighter, closer-to-base shade of the same blue
-        // (earlier attempts ranged too far toward dark navy, then too far
-        // toward dark teal — this one continuous interpolation runs
-        // straight from a lighter #168aa8 at the abyssal end to the exact
-        // base #18BFFF, eased so most of the visible change happens in the
-        // shore zone: nine separate stops between -200 and -2 for real
-        // variance close to shore, converging seamlessly into the regular
-        // ocean color-relief with no visible seam. The interpolate's last
-        // stop sits at 0 (sea level) and is fully transparent — MapLibre
-        // clamps values beyond a stop's range to that boundary stop, so
-        // every positive (land) elevation also clamps to the same
-        // transparent value, meaning land is automatically left untouched
-        // with no separate branch.
+        // Deep water is a noticeably darker but same-hue shade of the base
+        // ocean color — previous attempts kept the deep end too CLOSE to
+        // the shallow end (barely visible variance), so this widens the
+        // contrast considerably while keeping every stop's channel order
+        // (blue > green > red, same as the base #18BFFF itself) so it
+        // reads as "our blue, genuinely deeper" rather than drifting
+        // toward navy (blue dominating too hard) or teal (green catching
+        // up to blue) the way earlier attempts did. Eased so most of the
+        // visible change happens in the shore zone: nine separate stops
+        // between -200 and -2 for real variance close to shore,
+        // converging seamlessly into the regular ocean color-relief with
+        // no visible seam. The interpolate's last stop sits at 0 (sea
+        // level) and is fully transparent — MapLibre clamps values beyond
+        // a stop's range to that boundary stop, so every positive (land)
+        // elevation also clamps to the same transparent value, meaning
+        // land is automatically left untouched with no separate branch.
         {
           id: 'bathymetry-color-relief',
           type: 'color-relief',
@@ -1479,18 +1491,18 @@ function initTerrainMap() {
           paint: {
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
-              -6000, '#168aa8',  // abyssal — clearly still "our blue", just a bit deeper, not a mismatched dark color
-              -4000, '#1690b2',
-              -2000, '#1799c0',
-              -1000, '#179fcb',
-              -500, '#17a5d4',
-              -200, '#17a9da',
-              -100, '#17aee3',
-              -50, '#18b3ec',
-              -30, '#18b7f2',
-              -20, '#18baf6',
-              -10, '#18bcfa',
-              -5, '#18bdfc',
+              -6000, '#0a4b78',  // abyssal — genuinely darker now, real contrast, still unmistakably the same blue
+              -4000, '#0c5b8b',
+              -2000, '#0e6ea1',
+              -1000, '#107cb1',
+              -500, '#1187be',
+              -200, '#1291c9',
+              -100, '#149ad4',
+              -50, '#15a3df',
+              -30, '#16abe8',
+              -20, '#16b1ef',
+              -10, '#17b7f6',
+              -5, '#18bcfb',
               -2, '#18befe',     // nearly identical to #18BFFF — the seamless handoff
               0, 'rgba(24,190,254,0)', // sea level — fully transparent
             ],
@@ -1502,8 +1514,8 @@ function initTerrainMap() {
           source: 'bathymetryDem',
           layout: { visibility: bathymetryOn ? 'visible' : 'none' },
           paint: {
-            // same lighter, closer-to-base family as the depth palette above
-            'hillshade-shadow-color': '#1690b2',
+            // same wider-contrast, same-hue family as the depth palette above
+            'hillshade-shadow-color': '#0c5b8b',
             'hillshade-highlight-color': '#cdeeff',
             'hillshade-accent-color': '#18bfff',
             'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight

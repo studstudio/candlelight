@@ -39,6 +39,13 @@
   main {
     position: relative; flex: 1 1 auto; min-height: 0;
     background: var(--land);
+    /* Second independent guarantee, alongside #dashboard's fixed height:
+       nothing inside main (terrainMap, canvas, any future overlay) can
+       affect main's OWN box size — that's governed purely by the flex
+       layout from #app now. contain:size still respects sizing that
+       comes from OUTSIDE the element (like flex-grow here); it only
+       blocks the element's content from pushing back on its own size. */
+    contain: layout size;
   }
   #mapInlay {
     position: absolute; left: 50%; top: 8%; transform: translateX(-50%);
@@ -92,6 +99,25 @@
      it — that's what guarantees it can never end up covered by the map
      canvas or the 3D terrain view, unlike absolute positioning would */
   #dashboard {
+    /* FIXED height, not content-driven — this is the actual fix, not
+       min-height (which only sets a floor; content could still grow past
+       it) or nowrap alone (only blocks one specific growth mechanism).
+       `contain: layout size` is the browser's own purpose-built guarantee
+       that this element's box size is determined ENTIRELY by its own CSS
+       (the explicit height below), completely independent of whatever its
+       content does — text changing inside literally cannot affect the
+       outer box anymore, full stop. overflow:hidden is the backstop in
+       case any content ever exceeds this height regardless: clipped, not
+       expanding. This directly targets the resize loop: #dashboard's
+       fluctuating content-driven height was resizing main (flex:1 1 auto,
+       takes whatever's left over), which resized #terrainMap, which
+       MapLibre's own internal ResizeObserver was reacting to on every
+       single change — a fixed, contained #dashboard removes that
+       possibility at the source rather than trying to prevent every
+       individual way its content could have grown. */
+    height: calc(74px + env(safe-area-inset-bottom, 0px));
+    contain: layout size;
+    overflow: hidden;
     flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
     gap: 12px; padding: 10px 16px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
     background: var(--land); border-top: 1px solid var(--land-line); z-index: 10;
@@ -108,20 +134,13 @@
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   /* Debug/tuning readout — zoom/elevation only mean anything in 3D, so this
-     reads "–" otherwise. Its text updates on EVERY 'move' event during
-     active panning/zooming — min-height + nowrap here are load-bearing,
-     not cosmetic: if this box's height ever fluctuated as numbers of
-     different lengths came through (e.g. a 6-digit altitude wrapping
-     differently than a 4-digit one), that would resize #dashboard, which
-     resizes main (flex: 1 1 auto, takes whatever's left over), which
-     resizes #terrainMap — and MapLibre has its own internal
-     ResizeObserver watching that container, so a fluctuating readout size
-     could genuinely drive a repeating internal-resize loop the whole time
-     the camera is moving. Fixed height removes that possibility outright. */
-  #zoomReadout { font-size: 11px; color: #4a3a22; text-align: right; min-height: 64px; }
+     reads "–" otherwise. Deliberately small/light now, not the visually
+     dominant bold readout it was before — it's a debug aid, not a primary
+     UI element, and doesn't need to compete for attention. */
+  #zoomReadout { font-size: 10px; color: #4a3a22; text-align: right; }
   #zoomReadout .zrRow { margin-top: 2px; white-space: nowrap; }
   #zoomReadout .zrRow:first-child { margin-top: 0; }
-  #zoomReadout b { color: #2a1f10; font-size: 15px; }
+  #zoomReadout b { color: #2a1f10; font-size: 12px; font-weight: 600; }
   #layerToggles {
     position: absolute; right: 14px; top: 14px; z-index: 3;
     display: none; flex-direction: column; gap: 8px;
@@ -229,7 +248,7 @@
     <div id="zoomReadout">
       <div class="zrRow"><b id="zoomVal">–</b> zoom</div>
       <div class="zrRow"><b id="elevVal">–</b> m elev</div>
-      <div class="zrRow"><b id="camAltVal">–</b> ft agl/asl</div>
+      <div class="zrRow"><b id="camAltVal">–</b> mi agl/asl</div>
     </div>
   </div>
 </div>
@@ -1859,7 +1878,7 @@ function updateZoomElevReadout() {
   elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
   const camAlt = estimateCameraAltitudeFt();
   camAltValEl.textContent = camAlt
-    ? `${Math.round(camAlt.aboveTerrainFt / 10) * 10} / ${Math.round(camAlt.aboveSeaLevelFt / 10) * 10}`
+    ? `${(camAlt.aboveTerrainFt / 5280).toFixed(2)} / ${(camAlt.aboveSeaLevelFt / 5280).toFixed(2)}`
     : '–';
 }
 

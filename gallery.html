@@ -203,6 +203,7 @@
       <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
       <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
       <button id="toggleBathymetryBtn" class="layerToggle active">bathymetry</button>
+      <button id="toggleContoursBtn" class="layerToggle active">contours</button>
     </div>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
@@ -271,9 +272,11 @@ const tooltipEl = document.getElementById('tooltip');
 const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
 const toggleLinesBtn = document.getElementById('toggleLinesBtn');
 const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
+const toggleContoursBtn = document.getElementById('toggleContoursBtn');
 let tonerLabelsOn = true;
 let terrainLinesOn = true;
 let bathymetryOn = true;
+let bathymetryContoursOn = true;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -925,10 +928,13 @@ function applyLayerToggles() {
     if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
       terrainMapInstance.setLayoutProperty('stamen-terrain-lines', 'visibility', terrainLinesOn ? 'visible' : 'none');
     }
-    for (const id of ['bathymetry-color-relief', 'bathymetry-hillshade', 'bathymetry-contours']) {
+    for (const id of ['bathymetry-color-relief', 'bathymetry-hillshade']) {
       if (terrainMapInstance.getLayer(id)) {
         terrainMapInstance.setLayoutProperty(id, 'visibility', bathymetryOn ? 'visible' : 'none');
       }
+    }
+    if (terrainMapInstance.getLayer('bathymetry-contours')) {
+      terrainMapInstance.setLayoutProperty('bathymetry-contours', 'visibility', bathymetryContoursOn ? 'visible' : 'none');
     }
   } catch (err) {
     console.warn('gallery: layer toggle failed', err);
@@ -948,6 +954,11 @@ toggleLinesBtn.onclick = () => {
 toggleBathymetryBtn.onclick = () => {
   bathymetryOn = !bathymetryOn;
   toggleBathymetryBtn.classList.toggle('active', bathymetryOn);
+  applyLayerToggles();
+};
+toggleContoursBtn.onclick = () => {
+  bathymetryContoursOn = !bathymetryContoursOn;
+  toggleContoursBtn.classList.toggle('active', bathymetryContoursOn);
   applyLayerToggles();
 };
 
@@ -1496,11 +1507,17 @@ function initTerrainMap() {
         },
         // Depth-varying ocean tint from real bathymetry, replacing the
         // flat single ocean-blue above for actual underwater elevation.
-        // The interpolate's last stop sits at 0 (sea level) and is fully
-        // transparent — MapLibre clamps values beyond a stop's range to
-        // that boundary stop, so every positive (land) elevation also
-        // clamps to the same transparent value, meaning land is
-        // automatically left untouched with no separate branch needed.
+        // Palette derived directly from the app's own ocean color
+        // (#18BFFF, used everywhere else — color-relief sea level, sky,
+        // lakes) rather than an unrelated navy/cyan ramp: it's the same
+        // hue throughout, just darkening with depth, converging right
+        // into #18BFFF at the shallow end so there's no visible seam
+        // where bathymetry data runs out and the regular ocean color-
+        // relief takes over. The interpolate's last stop sits at 0 (sea
+        // level) and is fully transparent — MapLibre clamps values beyond
+        // a stop's range to that boundary stop, so every positive (land)
+        // elevation also clamps to the same transparent value, meaning
+        // land is automatically left untouched with no separate branch.
         {
           id: 'bathymetry-color-relief',
           type: 'color-relief',
@@ -1509,15 +1526,15 @@ function initTerrainMap() {
           paint: {
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
-              -6000, '#061a33',  // abyssal
-              -4000, '#0d2b4d',
-              -2000, '#154a72',
-              -1000, '#1c6690',
-              -500, '#2483ac',
-              -200, '#3aa0c4',
-              -50, '#63bcd6',
-              -5, '#94d6e2',     // very shallow, near-shore
-              0, 'rgba(6,26,51,0)', // sea level — fully transparent (color value itself doesn't matter at alpha 0, just needs to be valid)
+              -6000, '#041020',  // abyssal
+              -4000, '#083048',
+              -2000, '#0c5679',
+              -1000, '#0f709b',
+              -500, '#1287b8',
+              -200, '#149cd2',
+              -50, '#16aee9',
+              -5, '#17baf8',     // nearly identical to #18BFFF — the seamless handoff
+              0, 'rgba(23,186,248,0)', // sea level — fully transparent
             ],
           },
         },
@@ -1527,28 +1544,32 @@ function initTerrainMap() {
           source: 'bathymetryDem',
           layout: { visibility: bathymetryOn ? 'visible' : 'none' },
           paint: {
-            // cooler tones than the land hillshade above, fitting an
-            // underwater surface rather than a warm beige landscape
-            'hillshade-shadow-color': '#0a2d4a',
-            'hillshade-highlight-color': '#bfe8f2',
-            'hillshade-accent-color': '#1c5a82',
+            // same #18BFFF-derived family as the depth palette above, not
+            // an unrelated navy/beige — shadow is the palette's dark end,
+            // highlight a pale tint of the same hue, accent the mid-tone
+            'hillshade-shadow-color': '#0c3a5a',
+            'hillshade-highlight-color': '#cdeeff',
+            'hillshade-accent-color': '#18bfff',
             'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight
           },
         },
         // Bathymetric contour lines (isobaths) from Seascape's vector
-        // tiles — a subtle white line over the depth-tinted ocean, in the
-        // spirit of a real nautical chart without trying to reproduce one
-        // exactly (no depth labels, safety-depth shading, or soundings —
-        // straightforward to add later if wanted).
+        // tiles — bright yellow-orange and dashed, deliberately contrasting
+        // against the cool depth-tinted water rather than blending into
+        // it, in the spirit of a real nautical chart (no depth labels,
+        // safety-depth shading, or soundings — straightforward to add
+        // later if wanted). Toggled independently of the color/hillshade
+        // pair above via bathymetryContoursOn, not tied to bathymetryOn.
         {
           id: 'bathymetry-contours',
           type: 'line',
           source: 'bathymetryVector',
           'source-layer': 'contours',
-          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
+          layout: { visibility: bathymetryContoursOn ? 'visible' : 'none' },
           paint: {
-            'line-color': 'rgba(255,255,255,0.35)',
-            'line-width': 0.6,
+            'line-color': '#ffa726',
+            'line-width': 0.9,
+            'line-dasharray': [3, 2],
           },
         },
         // 0.6-opacity experiment: Stamen Terrain's line layer (roads,
@@ -1613,7 +1634,7 @@ function initTerrainMap() {
     maxPitch: 75,
     dragRotate: true,
     touchPitch: true,
-    minZoom: ZOOM_FLOOR_BASE, // real baseline floor from the start — updateZoomFloor() tightens this dynamically once 'move' events start firing
+    minZoom: ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move' events start firing
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
@@ -1682,18 +1703,43 @@ let zoomHistory = []; // rolling [{t, z}, ...] samples, trimmed to TREND_WINDOW_
 // hide or blend it (the entire rest of this file's struggle with mist,
 // fog, and DEM mirroring), just never let the camera reach a position
 // where both conditions are true at once. Simpler and actually reliable.
+//
+// The curve itself: NOT a guessed formula. It's a piecewise-linear fit
+// through 36 real (latitude, desired-min-zoom) data points, collected by
+// testing at random longitudes and reporting the minimum zoom-out that
+// still hid the void there. Sorted by latitude, binned (5° below 60°,
+// 2° from 60-82°, tightening to 0.1° right at the edge, where sampling was
+// densest and the curve is steepest — from 84.58° to 84.96°, only 0.38°,
+// the desired floor rises from 9.74 to 13.13), then smoothed to be
+// monotonic non-decreasing (two points, 12.42°->4.55 and 16.71°->4.22,
+// disagreed — real noise from eyeballing screenshots, not a genuine signal
+// that the floor should ever relax closer to a pole, so the curve takes
+// the running max rather than dipping).
+// To add more data points later: append [lat, zoom] pairs to this array in
+// the same format, in any order — ZOOM_FLOOR_CURVE gets sorted before use.
 // ============================================================
-const ZOOM_FLOOR_BASE = 3.0; // baseline floor everywhere else — matches the lowest zoom enter3D() itself ever uses
-const ZOOM_FLOOR_TIGHTEN_START_LAT = 65; // degrees — floor starts rising here
-const ZOOM_FLOOR_MAX_AT_POLE = 7.0; // right at POLE_PORTAL_LAT, well above EXIT_ZOOM — you can barely zoom out at all that close to a pole
+const ZOOM_FLOOR_CURVE = [
+  [10, 4.55], [15, 4.55], [25, 4.83], [35, 4.87], [45, 4.92], [50, 5.12],
+  [55, 5.14], [62, 5.25], [66, 5.41], [68, 5.48], [70, 5.65], [72, 5.79],
+  [76, 6.14], [78, 6.43], [80, 6.85], [82.5, 7.46], [82.75, 7.46],
+  [83.5, 7.87], [83.75, 8.14], [84.3, 8.81], [84.6, 9.74], [84.8, 10.5],
+  [84.9, 11.39], [85, 13.13],
+].sort((a, b) => a[0] - b[0]);
 let lastAppliedZoomFloor = null;
 
 function computeZoomFloor(lat) {
   const absLat = Math.abs(lat);
-  if (absLat <= ZOOM_FLOOR_TIGHTEN_START_LAT) return ZOOM_FLOOR_BASE;
-  const t = Math.min(1, (absLat - ZOOM_FLOOR_TIGHTEN_START_LAT) / (POLE_PORTAL_LAT - ZOOM_FLOOR_TIGHTEN_START_LAT));
-  const eased = t * t; // quadratic — gentle at first, aggressive right near the pole
-  return ZOOM_FLOOR_BASE + eased * (ZOOM_FLOOR_MAX_AT_POLE - ZOOM_FLOOR_BASE);
+  const curve = ZOOM_FLOOR_CURVE;
+  if (absLat <= curve[0][0]) return curve[0][1]; // at or below the lowest sampled latitude — flat at that value
+  if (absLat >= curve[curve.length - 1][0]) return curve[curve.length - 1][1]; // at or beyond the highest sampled latitude (currently 85°, essentially the true edge) — flat at that value
+  for (let i = 1; i < curve.length; i++) {
+    const [lat0, z0] = curve[i - 1], [lat1, z1] = curve[i];
+    if (absLat <= lat1) {
+      const t = (absLat - lat0) / (lat1 - lat0);
+      return z0 + t * (z1 - z0);
+    }
+  }
+  return curve[curve.length - 1][1]; // unreachable given the bounds checks above, but keeps this defined either way
 }
 
 // Called on every 'move' — latitude changes from panning alone, not just

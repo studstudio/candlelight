@@ -107,8 +107,12 @@
   #locationWeather { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
-  #count { font-size: 11px; color: #4a3a22; text-align: right; }
-  #count b { color: #2a1f10; font-size: 16px; display: block; }
+  /* Temporary debug readout for tuning the latitude-based zoom floor —
+     zoom/elevation only mean anything in 3D, so this reads "–" otherwise. */
+  #zoomReadout { font-size: 11px; color: #4a3a22; text-align: right; }
+  #zoomReadout .zrRow { margin-top: 2px; }
+  #zoomReadout .zrRow:first-child { margin-top: 0; }
+  #zoomReadout b { color: #2a1f10; font-size: 15px; }
   #layerToggles {
     position: absolute; right: 14px; top: 14px; z-index: 3;
     display: none; flex-direction: column; gap: 8px;
@@ -218,7 +222,11 @@
       <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
       <div id="locationWeather"></div>
     </div>
-    <div id="count"><b id="countNum">0</b>lights shared</div>
+    <div id="zoomReadout">
+      <div class="zrRow"><b id="zoomVal">–</b> zoom</div>
+      <div class="zrRow"><b id="elevVal">–</b> m elev</div>
+      <div class="zrRow"><b id="camAltVal">–</b> ft agl/asl</div>
+    </div>
   </div>
 </div>
 
@@ -255,7 +263,9 @@ const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_ce
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const countEl = document.getElementById('countNum');
+const zoomValEl = document.getElementById('zoomVal');
+const elevValEl = document.getElementById('elevVal');
+const camAltValEl = document.getElementById('camAltVal');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
 const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
@@ -1143,6 +1153,7 @@ function addWeatherLayerIfReady() {
 let terrainMapInstance = null;
 
 const POLE_PORTAL_LAT = 82;
+const POLE_PORTAL_ENABLED = false; // temporarily disabled — gets in the way of testing the latitude-based zoom floor near the poles. Flip back to true once tuning's done; nothing else here needs to change.
 let poleWrapping = false;
 let lastPoleLat = 0;
 
@@ -1153,7 +1164,7 @@ function setPoleFade(active) {
 }
 
 function handlePoleWrap() {
-  if (!terrainMapInstance || poleWrapping || !in3D) return;
+  if (!POLE_PORTAL_ENABLED || !terrainMapInstance || poleWrapping || !in3D) return;
   const c = terrainMapInstance.getCenter();
   const crossedNorth = lastPoleLat <= POLE_PORTAL_LAT && c.lat > POLE_PORTAL_LAT;
   const crossedSouth = lastPoleLat >= -POLE_PORTAL_LAT && c.lat < -POLE_PORTAL_LAT;
@@ -1612,6 +1623,7 @@ function initTerrainMap() {
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
   terrainMapInstance.on('move', updateZoomFloor);
+  terrainMapInstance.on('move', updateZoomElevReadout);
   return terrainMapInstance;
 }
 
@@ -1696,6 +1708,61 @@ function updateZoomFloor() {
   terrainMapInstance.setMinZoom(floor);
 }
 
+// Estimates the CAMERA's real-world altitude — not the terrain's own
+// elevation (that's queryTerrainElevation, used for elevVal above), but
+// how high the camera itself is sitting, derived from zoom/pitch/viewport
+// height using MapLibre's documented fixed vertical FOV (36.87°, confirmed
+// against MapLibre's own docs — this is a public, stable constant, not an
+// internal implementation detail). Matches MapLibre's own internal formula
+// for camera altitude: cos(pitch) * cameraToCenterDistance / pixelsPerMeter
+// + centerElevation — reconstructed here entirely from public APIs
+// (getZoom/getPitch/getCenter/queryTerrainElevation/container size) rather
+// than reaching into transform internals.
+const MAPLIBRE_FOV_DEG = 36.87;
+const METERS_TO_FEET = 3.28084;
+function estimateCameraAltitudeFt() {
+  if (!terrainMapInstance) return null;
+  const canvasHeightPx = terrainMapInstance.getContainer().clientHeight;
+  if (!canvasHeightPx) return null;
+  const fovRad = MAPLIBRE_FOV_DEG * Math.PI / 180;
+  const cameraToCenterDistancePx = 0.5 / Math.tan(fovRad / 2) * canvasHeightPx;
+  const pitchRad = terrainMapInstance.getPitch() * Math.PI / 180;
+  const c = terrainMapInstance.getCenter();
+  const groundResolutionMPerPx = 156543.03392 * Math.cos(c.lat * Math.PI / 180) / Math.pow(2, terrainMapInstance.getZoom());
+  const altitudeAboveCenterM = Math.cos(pitchRad) * cameraToCenterDistancePx * groundResolutionMPerPx;
+  let terrainElevM = 0;
+  try {
+    const e = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]);
+    if (typeof e === 'number' && !isNaN(e)) terrainElevM = e;
+  } catch {}
+  return {
+    aboveTerrainFt: altitudeAboveCenterM * METERS_TO_FEET,
+    aboveSeaLevelFt: (altitudeAboveCenterM + terrainElevM) * METERS_TO_FEET,
+  };
+}
+
+// Temporary debug readout (replaces "lights shared" for now) — lets zoom,
+// real terrain elevation, and estimated camera altitude be read directly
+// off the dashboard while tuning computeZoomFloor() above, without
+// needing devtools.
+function updateZoomElevReadout() {
+  if (!in3D || !terrainMapInstance) {
+    zoomValEl.textContent = '–';
+    elevValEl.textContent = '–';
+    camAltValEl.textContent = '–';
+    return;
+  }
+  zoomValEl.textContent = terrainMapInstance.getZoom().toFixed(2);
+  const c = terrainMapInstance.getCenter();
+  let elev = null;
+  try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
+  elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
+  const camAlt = estimateCameraAltitudeFt();
+  camAltValEl.textContent = camAlt
+    ? `${Math.round(camAlt.aboveTerrainFt / 10) * 10} / ${Math.round(camAlt.aboveSeaLevelFt / 10) * 10}`
+    : '–';
+}
+
 async function enter3D(lon, lat) {
   if (in3D) return;
   in3D = true;
@@ -1707,6 +1774,7 @@ async function enter3D(lon, lat) {
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   lastPoleLat = map3d.getCenter().lat;
   updateZoomFloor(); // set immediately in case entry itself is already near a pole, rather than waiting for the first 'move' event
+  updateZoomElevReadout();
   poleWrapping = false;
   setPoleFade(false);
   document.getElementById('terrainMap').classList.add('active');
@@ -1735,6 +1803,7 @@ function exit3D() {
   canvas.classList.remove('faded');
   backBtn.classList.remove('visible');
   document.getElementById('layerToggles').classList.remove('visible');
+  updateZoomElevReadout(); // resets to "–" now that in3D is false
   draw();
 }
 const backBtn = document.getElementById('backBtn');
@@ -1800,7 +1869,6 @@ async function poll() {
     }
     const data = await res.json();
     events = data.events || [];
-    countEl.textContent = events.length;
     emptyEl.style.display = events.length === 0 ? 'flex' : 'none';
     statusEl.textContent = 'live';
     statusEl.classList.add('live'); statusEl.classList.remove('error');

@@ -1451,8 +1451,11 @@ function initTerrainMap() {
         // Palette derived directly from the app's own ocean color
         // (#18BFFF, used everywhere else — color-relief sea level, sky,
         // lakes) rather than an unrelated navy/cyan ramp: it's the same
-        // hue throughout, just darkening with depth, converging right
-        // into #18BFFF at the shallow end so there's no visible seam
+        // hue throughout, with only a MODEST darkening at depth (an
+        // earlier version ranged all the way to near-black at the abyssal
+        // end, which read as a completely different color family instead
+        // of "our ocean, just deeper" — narrowed considerably), converging
+        // right into #18BFFF at the shallow end so there's no visible seam
         // where bathymetry data runs out and the regular ocean color-
         // relief takes over. The interpolate's last stop sits at 0 (sea
         // level) and is fully transparent — MapLibre clamps values beyond
@@ -1467,15 +1470,15 @@ function initTerrainMap() {
           paint: {
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
-              -6000, '#041020',  // abyssal
-              -4000, '#083048',
-              -2000, '#0c5679',
-              -1000, '#0f709b',
-              -500, '#1287b8',
-              -200, '#149cd2',
-              -50, '#16aee9',
-              -5, '#17baf8',     // nearly identical to #18BFFF — the seamless handoff
-              0, 'rgba(23,186,248,0)', // sea level — fully transparent
+              -6000, '#0a5f91',  // abyssal — still clearly "our blue", just deeper
+              -4000, '#0d70a5',
+              -2000, '#1085bd',
+              -1000, '#1294ce',
+              -500, '#14a0dc',
+              -200, '#15ace9',
+              -50, '#17b5f4',
+              -5, '#18bcfc',     // nearly identical to #18BFFF — the seamless handoff
+              0, 'rgba(24,188,252,0)', // sea level — fully transparent
             ],
           },
         },
@@ -1485,10 +1488,10 @@ function initTerrainMap() {
           source: 'bathymetryDem',
           layout: { visibility: bathymetryOn ? 'visible' : 'none' },
           paint: {
-            // same #18BFFF-derived family as the depth palette above, not
-            // an unrelated navy/beige — shadow is the palette's dark end,
+            // same narrowed #18BFFF-derived family as the depth palette
+            // above — shadow is the palette's (now much closer) dark end,
             // highlight a pale tint of the same hue, accent the mid-tone
-            'hillshade-shadow-color': '#0c3a5a',
+            'hillshade-shadow-color': '#0d70a5',
             'hillshade-highlight-color': '#cdeeff',
             'hillshade-accent-color': '#18bfff',
             'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight
@@ -1584,7 +1587,8 @@ function initTerrainMap() {
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
-  terrainMapInstance.on('move', updateZoomFloor);
+  terrainMapInstance.on('move', () => updateZoomFloor(false));
+  terrainMapInstance.on('moveend', () => updateZoomFloor(true));
   terrainMapInstance.on('move', updateZoomElevReadout);
   return terrainMapInstance;
 }
@@ -1683,14 +1687,22 @@ function computeZoomFloor(lat) {
   return curve[curve.length - 1][1]; // unreachable given the bounds checks above, but keeps this defined either way
 }
 
-// Called on every 'move' — latitude changes from panning alone, not just
-// zooming, so the floor has to be able to tighten (and snap the camera in,
-// which setMinZoom does automatically if the current zoom is now below it)
-// purely from moving toward a pole, independent of any zoom gesture.
-function updateZoomFloor() {
+// Called on every 'move' (mid-gesture, coarse rounding — this used to round
+// to 0.01, meaning basically ANY pan anywhere calls setMinZoom, since the
+// curve below has no flat region left like the old quadratic version did.
+// Calling setMinZoom repeatedly WHILE a pinch/pan gesture is actively in
+// progress is the likely cause of the screen fighting/bouncing glitch —
+// MapLibre's own gesture handlers compute deltas from the transform's
+// current state each frame, and externally re-clamping that mid-gesture,
+// many times a second, is a plausible way to make the two fight each
+// other) and on 'moveend' (gesture settled, full precision — ensures the
+// floor is exactly correct at rest, not left coarse after interaction).
+function updateZoomFloor(precise) {
   if (!terrainMapInstance) return;
-  const floor = Math.round(computeZoomFloor(terrainMapInstance.getCenter().lat) * 100) / 100;
-  if (floor === lastAppliedZoomFloor) return; // skip redundant setMinZoom calls on tiny movements
+  const raw = computeZoomFloor(terrainMapInstance.getCenter().lat);
+  const roundTo = precise ? 100 : 4; // precise: 0.01 steps; coarse: 0.25 steps, so ordinary panning doesn't call setMinZoom on every tiny latitude wobble
+  const floor = Math.round(raw * roundTo) / roundTo;
+  if (floor === lastAppliedZoomFloor) return; // skip redundant setMinZoom calls when nothing's actually changed
   lastAppliedZoomFloor = floor;
   terrainMapInstance.setMinZoom(floor);
 }
@@ -1760,7 +1772,7 @@ async function enter3D(lon, lat) {
   enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   lastPoleLat = map3d.getCenter().lat;
-  updateZoomFloor(); // set immediately in case entry itself is already near a pole, rather than waiting for the first 'move' event
+  updateZoomFloor(true); // set immediately (precise) in case entry itself is already near a pole, rather than waiting for the first 'move' event
   updateZoomElevReadout();
   poleWrapping = false;
   setPoleFade(false);

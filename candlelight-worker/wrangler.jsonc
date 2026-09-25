@@ -1,0 +1,20 @@
+{
+  "name": "candlelight",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-18",
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "LAMP_KV",
+      "id": "30e2b46cc5494c688f228aab4bcb8f03"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "LAMP_IMAGES",
+      "bucket_name": "lamp-images"
+    }
+  ]
+}

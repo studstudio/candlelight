@@ -247,6 +247,29 @@ async function loadMapLibre() {
   return maplibregl;
 }
 // ---- config ----
+// ============================================================
+// DEBUG KILL-SWITCHES — for tracking down the freeze/bounce glitch by
+// process of elimination. Flip one to `true` to fully remove that system
+// (not just hide it — no source, no layer, no listeners), reload, and
+// test. Suggested order, most-suspicious first:
+//   1. DEBUG_DISABLE_ZOOM_FLOOR  — newest, most complex, already had one
+//      confirmed real bug in it. Disabled by default below — this is
+//      already the first test.
+//   2. DEBUG_DISABLE_WEATHER     — its opacity fade zoom expression ends
+//      exactly at zoom 8, which is suspiciously close to where this was
+//      once caught stuck.
+//   3. DEBUG_DISABLE_BATHYMETRY  — newest visual addition; this fully
+//      removes the sources too, not just the toggle-off state.
+//   4. DEBUG_DISABLE_ANTARCTIC   — decodes DEM tiles on every request,
+//      real per-pixel work, less likely but cheap to rule out.
+// If NONE of these fix it, the glitch predates all of them and is
+// somewhere in the base map/camera code itself.
+// ============================================================
+const DEBUG_DISABLE_ZOOM_FLOOR = true;
+const DEBUG_DISABLE_WEATHER = false;
+const DEBUG_DISABLE_BATHYMETRY = false;
+const DEBUG_DISABLE_ANTARCTIC = false;
+
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
 const POLL_MS = 8000;
 // Stadia Maps tiles (used for the Stamen Toner labels overlay below) require
@@ -1306,8 +1329,8 @@ function installAntarcticTerrainProtocol() {
 
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
-  installAntarcticTerrainProtocol();
-  initWeatherProtocol();
+  if (!DEBUG_DISABLE_ANTARCTIC) installAntarcticTerrainProtocol();
+  if (!DEBUG_DISABLE_WEATHER) initWeatherProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
     // Restore continuous east/west wrapping. MapLibre natively repeats the
@@ -1558,13 +1581,41 @@ function initTerrainMap() {
     maxPitch: 75,
     dragRotate: true,
     touchPitch: true,
-    minZoom: ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move' events start firing
+    minZoom: DEBUG_DISABLE_ZOOM_FLOOR ? undefined : ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move' events start firing
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
     applyLayerToggles();
+    if (DEBUG_DISABLE_BATHYMETRY) {
+      for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {
+        if (terrainMapInstance.getLayer(id)) terrainMapInstance.removeLayer(id);
+      }
+      for (const id of ['bathymetryVector', 'bathymetryDem']) {
+        if (terrainMapInstance.getSource(id)) terrainMapInstance.removeSource(id);
+      }
+      console.warn('gallery: DEBUG_DISABLE_BATHYMETRY — bathymetry sources/layers fully removed');
+    }
+    if (DEBUG_DISABLE_ANTARCTIC) {
+      if (terrainMapInstance.getLayer('antarctic-relief')) terrainMapInstance.removeLayer('antarctic-relief');
+      if (terrainMapInstance.getSource('antarcticRelief')) terrainMapInstance.removeSource('antarcticRelief');
+      console.warn('gallery: DEBUG_DISABLE_ANTARCTIC — antarctic-relief layer/source fully removed');
+    }
   });
   terrainMapInstance.on('zoom', autoExitCheck);
+  // Diagnostic: MapLibre has its own internal ResizeObserver watching the
+  // container and auto-resizing when it detects a change — the console
+  // showed a "ResizeObserver loop completed with undelivered
+  // notifications" error firing repeatedly during a glitch, alongside our
+  // own setMinZoom logging. Our code only calls .resize() once (at 3D
+  // entry), so if THIS fires rapidly too, that's real evidence the loop
+  // is (at least partly) MapLibre's internal auto-resize reacting to
+  // something — not just our zoom-floor code.
+  let lastResizeLogTime = 0;
+  terrainMapInstance.on('resize', () => {
+    const now = performance.now();
+    console.warn('gallery: MapLibre internal resize fired, gap since last:', Math.round(now - lastResizeLogTime), 'ms');
+    lastResizeLogTime = now;
+  });
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
   terrainMapInstance.on('move', () => updateZoomFloor(false));
@@ -1698,7 +1749,7 @@ const ZOOM_FLOOR_BREAKER_WINDOW_MS = 1500;
 const ZOOM_FLOOR_BREAKER_MAX_CALLS = 8;
 let zoomFloorBreakerTripped = false;
 function updateZoomFloor(force) {
-  if (!terrainMapInstance) return;
+  if (DEBUG_DISABLE_ZOOM_FLOOR || !terrainMapInstance) return;
   const floor = Math.round(computeZoomFloor(terrainMapInstance.getCenter().lat) * 100) / 100;
   if (floor === lastAppliedZoomFloor) return; // nothing actually changed
   const now = performance.now();

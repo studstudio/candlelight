@@ -107,8 +107,12 @@
   #locationWeather { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
-  #count { font-size: 11px; color: #4a3a22; text-align: right; }
-  #count b { color: #2a1f10; font-size: 16px; display: block; }
+  /* Debug/tuning readout — zoom/elevation only mean anything in 3D, so this
+     reads "–" otherwise. */
+  #zoomReadout { font-size: 11px; color: #4a3a22; text-align: right; }
+  #zoomReadout .zrRow { margin-top: 2px; }
+  #zoomReadout .zrRow:first-child { margin-top: 0; }
+  #zoomReadout b { color: #2a1f10; font-size: 15px; }
   #layerToggles {
     position: absolute; right: 14px; top: 14px; z-index: 3;
     display: none; flex-direction: column; gap: 8px;
@@ -192,6 +196,8 @@
     <div id="layerToggles">
       <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
       <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
+      <button id="toggleBathymetryBtn" class="layerToggle active">bathymetry</button>
+      <button id="toggleContoursBtn" class="layerToggle active">contours</button>
     </div>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
@@ -211,7 +217,11 @@
       <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
       <div id="locationWeather"></div>
     </div>
-    <div id="count"><b id="countNum">0</b>lights shared</div>
+    <div id="zoomReadout">
+      <div class="zrRow"><b id="zoomVal">–</b> zoom</div>
+      <div class="zrRow"><b id="elevVal">–</b> m elev</div>
+      <div class="zrRow"><b id="camAltVal">–</b> ft agl/asl</div>
+    </div>
   </div>
 </div>
 
@@ -248,13 +258,19 @@ const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_ce
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const countEl = document.getElementById('countNum');
+const zoomValEl = document.getElementById('zoomVal');
+const elevValEl = document.getElementById('elevVal');
+const camAltValEl = document.getElementById('camAltVal');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
 const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
 const toggleLinesBtn = document.getElementById('toggleLinesBtn');
+const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
+const toggleContoursBtn = document.getElementById('toggleContoursBtn');
 let tonerLabelsOn = true;
 let terrainLinesOn = true;
+let bathymetryOn = true;
+let bathymetryContoursOn = true;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -906,6 +922,14 @@ function applyLayerToggles() {
     if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
       terrainMapInstance.setLayoutProperty('stamen-terrain-lines', 'visibility', terrainLinesOn ? 'visible' : 'none');
     }
+    for (const id of ['bathymetry-color-relief', 'bathymetry-hillshade']) {
+      if (terrainMapInstance.getLayer(id)) {
+        terrainMapInstance.setLayoutProperty(id, 'visibility', bathymetryOn ? 'visible' : 'none');
+      }
+    }
+    if (terrainMapInstance.getLayer('bathymetry-contours')) {
+      terrainMapInstance.setLayoutProperty('bathymetry-contours', 'visibility', bathymetryContoursOn ? 'visible' : 'none');
+    }
   } catch (err) {
     console.warn('gallery: layer toggle failed', err);
   }
@@ -919,6 +943,16 @@ toggleLabelsBtn.onclick = () => {
 toggleLinesBtn.onclick = () => {
   terrainLinesOn = !terrainLinesOn;
   toggleLinesBtn.classList.toggle('active', terrainLinesOn);
+  applyLayerToggles();
+};
+toggleBathymetryBtn.onclick = () => {
+  bathymetryOn = !bathymetryOn;
+  toggleBathymetryBtn.classList.toggle('active', bathymetryOn);
+  applyLayerToggles();
+};
+toggleContoursBtn.onclick = () => {
+  bathymetryContoursOn = !bathymetryContoursOn;
+  toggleContoursBtn.classList.toggle('active', bathymetryContoursOn);
   applyLayerToggles();
 };
 
@@ -1331,6 +1365,19 @@ function initTerrainMap() {
           maxzoom: 20,
           attribution: '© <a href=\"https://stadiamaps.com/attribution/\" target=\"_blank\">Stadia Maps</a> © <a href=\"https://stamen.com/\" target=\"_blank\">Stamen Design</a> © <a href=\"https://openmaptiles.org/\" target=\"_blank\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a>'
         },
+        // Seascape (openwatersio/seascape): global open bathymetry, same
+        // Terrarium encoding as our land DEM, published as ready TileJSON —
+        // color-relief/hillshade are native MapLibre layer types that
+        // sample any raster-dem source directly, exactly like our existing
+        // land terrainSource/hillshadeSource above — no custom protocol
+        // needed here, unlike the Antarctic ice shading.
+        bathymetryDem: {
+          type: 'raster-dem',
+          url: 'https://tiles.openwaters.io/seascape/raster.json',
+          encoding: 'terrarium', // required — MapLibre defaults to Mapbox's own encoding otherwise
+          tileSize: 512,
+        },
+        bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -1367,6 +1414,77 @@ function initTerrainMap() {
             'hillshade-highlight-color': '#fdf6e3',
             'hillshade-accent-color': '#e0c896',
             'hillshade-exaggeration': 1.0,
+          },
+        },
+        // Depth-varying ocean tint from real bathymetry, replacing the
+        // flat single ocean-blue above for actual underwater elevation.
+        // Deep water is a genuine dark teal/turquoise (not navy — the
+        // green channel stays close to the blue channel throughout,
+        // rather than blue dominating), transitioning through many dense
+        // stops right in the shoreline range (-200 to -2, eight separate
+        // stops) for real visible variance close to shore, converging
+        // into #18BFFF at the very shallowest so there's no seam where
+        // bathymetry data ends and the regular ocean color-relief takes
+        // over. The interpolate's last stop sits at 0 (sea level) and is
+        // fully transparent — MapLibre clamps values beyond a stop's
+        // range to that boundary stop, so every positive (land) elevation
+        // also clamps to the same transparent value, meaning land is
+        // automatically left untouched with no separate branch.
+        {
+          id: 'bathymetry-color-relief',
+          type: 'color-relief',
+          source: 'bathymetryDem',
+          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
+          paint: {
+            'color-relief-color': [
+              'interpolate', ['linear'], ['elevation'],
+              -6000, '#0a4f52',  // abyssal — genuine dark teal, not navy
+              -4000, '#0c646c',
+              -2000, '#0f7a87',
+              -1000, '#108898',
+              -500, '#1296aa',
+              -200, '#1296aa',   // continental-shelf plateau — flat here is intentional, real variance starts below
+              -100, '#14a0bf',
+              -50, '#15a8d0',
+              -30, '#16afdd',
+              -20, '#16b4e7',
+              -10, '#17b8f1',
+              -5, '#18bcf8',
+              -2, '#18befc',     // nearly identical to #18BFFF — the seamless handoff
+              0, 'rgba(24,190,252,0)', // sea level — fully transparent
+            ],
+          },
+        },
+        {
+          id: 'bathymetry-hillshade',
+          type: 'hillshade',
+          source: 'bathymetryDem',
+          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
+          paint: {
+            // same teal-derived family as the depth palette above
+            'hillshade-shadow-color': '#0c646c',
+            'hillshade-highlight-color': '#cdeeff',
+            'hillshade-accent-color': '#18bfff',
+            'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight
+          },
+        },
+        // Bathymetric contour lines (isobaths) from Seascape's vector
+        // tiles — bright yellow-orange and dashed, deliberately contrasting
+        // against the cool depth-tinted water rather than blending into
+        // it, in the spirit of a real nautical chart (no depth labels,
+        // safety-depth shading, or soundings — straightforward to add
+        // later if wanted). Toggled independently of the color/hillshade
+        // pair above via bathymetryContoursOn, not tied to bathymetryOn.
+        {
+          id: 'bathymetry-contours',
+          type: 'line',
+          source: 'bathymetryVector',
+          'source-layer': 'contours',
+          layout: { visibility: bathymetryContoursOn ? 'visible' : 'none' },
+          paint: {
+            'line-color': '#ffa726',
+            'line-width': 0.9,
+            'line-dasharray': [3, 2],
           },
         },
         // 0.6-opacity experiment: Stamen Terrain's line layer (roads,
@@ -1431,6 +1549,7 @@ function initTerrainMap() {
     maxPitch: 75,
     dragRotate: true,
     touchPitch: true,
+    minZoom: ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move'/'moveend' events start firing
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
@@ -1439,6 +1558,9 @@ function initTerrainMap() {
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
+  terrainMapInstance.on('move', () => updateZoomFloor(false));
+  terrainMapInstance.on('moveend', () => updateZoomFloor(true));
+  terrainMapInstance.on('move', updateZoomElevReadout);
   return terrainMapInstance;
 }
 
@@ -1481,6 +1603,128 @@ const MIN_EXIT_DELTA = 0.35; // must have genuinely dropped by this much over th
 let enteredAt = 0;
 let zoomHistory = []; // rolling [{t, z}, ...] samples, trimmed to TREND_WINDOW_MS
 
+// ============================================================
+// HARD ZOOM FLOOR — this is the actual safety guarantee, not the trend
+// check above. autoExitCheck() only looks at RATE of change within a
+// rolling window (must drop >=0.35 within 500ms) — a real gap, since many
+// small, deliberately slow pinches (each under that delta) never trip it,
+// letting the camera drift arbitrarily far out with no exit ever
+// triggering. minZoom is a genuine MapLibre-enforced constraint: it clamps
+// every zoom interaction, gesture pattern or speed, so that loophole can't
+// be exploited regardless of how the trend check behaves.
+//
+// Layered on top: the floor tightens the closer the camera gets to either
+// pole. The Mercator void only ever becomes visible once you're BOTH
+// zoomed out far AND near a pole — so instead of trying to cosmetically
+// hide or blend it, just never let the camera reach a position where both
+// conditions are true at once. Simpler and actually reliable.
+//
+// The curve itself: NOT a guessed formula. It's a piecewise-linear fit
+// through 36 real (latitude, desired-min-zoom) data points, collected by
+// testing at random longitudes and reporting the minimum zoom-out that
+// still hid the void there. Sorted by latitude, binned (5° below 60°,
+// 2° from 60-82°, tightening to 0.1° right at the edge, where sampling was
+// densest and the curve is steepest — from 84.58° to 84.96°, only 0.38°,
+// the desired floor rises from 9.74 to 13.13), then smoothed to be
+// monotonic non-decreasing (two points, 12.42°->4.55 and 16.71°->4.22,
+// disagreed — real noise from eyeballing screenshots, not a genuine signal
+// that the floor should ever relax closer to a pole, so the curve takes
+// the running max rather than dipping).
+// To add more data points later: append [lat, zoom] pairs to this array in
+// the same format, in any order — ZOOM_FLOOR_CURVE gets sorted before use.
+// ============================================================
+const ZOOM_FLOOR_CURVE = [
+  [10, 4.55], [15, 4.55], [25, 4.83], [35, 4.87], [45, 4.92], [50, 5.12],
+  [55, 5.14], [62, 5.25], [66, 5.41], [68, 5.48], [70, 5.65], [72, 5.79],
+  [76, 6.14], [78, 6.43], [80, 6.85], [82.5, 7.46], [82.75, 7.46],
+  [83.5, 7.87], [83.75, 8.14], [84.3, 8.81], [84.6, 9.74], [84.8, 10.5],
+  [84.9, 11.39], [85, 13.13],
+].sort((a, b) => a[0] - b[0]);
+let lastAppliedZoomFloor = null;
+
+function computeZoomFloor(lat) {
+  const absLat = Math.abs(lat);
+  const curve = ZOOM_FLOOR_CURVE;
+  if (absLat <= curve[0][0]) return curve[0][1]; // at or below the lowest sampled latitude — flat at that value
+  if (absLat >= curve[curve.length - 1][0]) return curve[curve.length - 1][1]; // at or beyond the highest sampled latitude (currently 85°, essentially the true edge) — flat at that value
+  for (let i = 1; i < curve.length; i++) {
+    const [lat0, z0] = curve[i - 1], [lat1, z1] = curve[i];
+    if (absLat <= lat1) {
+      const t = (absLat - lat0) / (lat1 - lat0);
+      return z0 + t * (z1 - z0);
+    }
+  }
+  return curve[curve.length - 1][1]; // unreachable given the bounds checks above, but keeps this defined either way
+}
+
+// Called on every 'move' (mid-gesture, coarse rounding — calling
+// setMinZoom repeatedly WHILE a pinch/pan gesture is actively in progress
+// risks fighting MapLibre's own gesture handling, which computes deltas
+// from the transform's current state each frame) and on 'moveend' (gesture
+// settled, full precision — ensures the floor is exactly correct at rest).
+function updateZoomFloor(precise) {
+  if (!terrainMapInstance) return;
+  const raw = computeZoomFloor(terrainMapInstance.getCenter().lat);
+  const roundTo = precise ? 100 : 4; // precise: 0.01 steps; coarse: 0.25 steps, so ordinary panning doesn't call setMinZoom on every tiny latitude wobble
+  const floor = Math.round(raw * roundTo) / roundTo;
+  if (floor === lastAppliedZoomFloor) return; // skip redundant setMinZoom calls when nothing's actually changed
+  lastAppliedZoomFloor = floor;
+  terrainMapInstance.setMinZoom(floor);
+}
+
+// Estimates the CAMERA's real-world altitude — not the terrain's own
+// elevation (that's queryTerrainElevation, used for elevVal above), but
+// how high the camera itself is sitting, derived from zoom/pitch/viewport
+// height using MapLibre's documented fixed vertical FOV (36.87°, confirmed
+// against MapLibre's own docs). Matches MapLibre's own internal formula
+// for camera altitude: cos(pitch) * cameraToCenterDistance / pixelsPerMeter
+// + centerElevation — reconstructed here entirely from public APIs
+// (getZoom/getPitch/getCenter/queryTerrainElevation/container size) rather
+// than reaching into transform internals.
+const MAPLIBRE_FOV_DEG = 36.87;
+const METERS_TO_FEET = 3.28084;
+function estimateCameraAltitudeFt() {
+  if (!terrainMapInstance) return null;
+  const canvasHeightPx = terrainMapInstance.getContainer().clientHeight;
+  if (!canvasHeightPx) return null;
+  const fovRad = MAPLIBRE_FOV_DEG * Math.PI / 180;
+  const cameraToCenterDistancePx = 0.5 / Math.tan(fovRad / 2) * canvasHeightPx;
+  const pitchRad = terrainMapInstance.getPitch() * Math.PI / 180;
+  const c = terrainMapInstance.getCenter();
+  const groundResolutionMPerPx = 156543.03392 * Math.cos(c.lat * Math.PI / 180) / Math.pow(2, terrainMapInstance.getZoom());
+  const altitudeAboveCenterM = Math.cos(pitchRad) * cameraToCenterDistancePx * groundResolutionMPerPx;
+  let terrainElevM = 0;
+  try {
+    const e = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]);
+    if (typeof e === 'number' && !isNaN(e)) terrainElevM = e;
+  } catch {}
+  return {
+    aboveTerrainFt: altitudeAboveCenterM * METERS_TO_FEET,
+    aboveSeaLevelFt: (altitudeAboveCenterM + terrainElevM) * METERS_TO_FEET,
+  };
+}
+
+// Debug/tuning readout (replaces "lights shared") — lets zoom, real
+// terrain elevation, and estimated camera altitude be read directly off
+// the dashboard while tuning computeZoomFloor() above.
+function updateZoomElevReadout() {
+  if (!in3D || !terrainMapInstance) {
+    zoomValEl.textContent = '–';
+    elevValEl.textContent = '–';
+    camAltValEl.textContent = '–';
+    return;
+  }
+  zoomValEl.textContent = terrainMapInstance.getZoom().toFixed(2);
+  const c = terrainMapInstance.getCenter();
+  let elev = null;
+  try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
+  elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
+  const camAlt = estimateCameraAltitudeFt();
+  camAltValEl.textContent = camAlt
+    ? `${Math.round(camAlt.aboveTerrainFt / 10) * 10} / ${Math.round(camAlt.aboveSeaLevelFt / 10) * 10}`
+    : '–';
+}
+
 async function enter3D(lon, lat) {
   if (in3D) return;
   in3D = true;
@@ -1491,6 +1735,8 @@ async function enter3D(lon, lat) {
   enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   lastPoleLat = map3d.getCenter().lat;
+  updateZoomFloor(true); // set immediately (precise) in case entry itself is already near a pole, rather than waiting for the first 'move' event
+  updateZoomElevReadout();
   poleWrapping = false;
   setPoleFade(false);
   document.getElementById('terrainMap').classList.add('active');
@@ -1519,6 +1765,7 @@ function exit3D() {
   canvas.classList.remove('faded');
   backBtn.classList.remove('visible');
   document.getElementById('layerToggles').classList.remove('visible');
+  updateZoomElevReadout(); // resets to "–" now that in3D is false
   draw();
 }
 const backBtn = document.getElementById('backBtn');
@@ -1584,7 +1831,6 @@ async function poll() {
     }
     const data = await res.json();
     events = data.events || [];
-    countEl.textContent = events.length;
     emptyEl.style.display = events.length === 0 ? 'flex' : 'none';
     statusEl.textContent = 'live';
     statusEl.classList.add('live'); statusEl.classList.remove('error');

@@ -137,10 +137,14 @@
      reads "–" otherwise. Deliberately small/light now, not the visually
      dominant bold readout it was before — it's a debug aid, not a primary
      UI element, and doesn't need to compete for attention. */
-  #zoomReadout { font-size: 10px; color: #4a3a22; text-align: right; }
+  #zoomReadout {
+    font-size: 10px; color: #4a3a22; text-align: right;
+    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
+    font-weight: 300; letter-spacing: 0.06em;
+  }
   #zoomReadout .zrRow { margin-top: 2px; white-space: nowrap; }
   #zoomReadout .zrRow:first-child { margin-top: 0; }
-  #zoomReadout b { color: #2a1f10; font-size: 12px; font-weight: 600; }
+  #zoomReadout b { color: #4a3a22; font-size: 10px; font-weight: 300; }
   #layerToggles {
     position: absolute; right: 14px; top: 14px; z-index: 3;
     display: none; flex-direction: column; gap: 8px;
@@ -222,10 +226,10 @@
     <canvas id="map"></canvas>
     <div id="terrainMap"></div>
     <div id="layerToggles">
-      <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
-      <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
-      <button id="toggleBathymetryBtn" class="layerToggle active">bathymetry</button>
-      <button id="toggleContoursBtn" class="layerToggle active">contours</button>
+      <button id="toggleLabelsBtn" class="layerToggle">labels</button>
+      <button id="toggleLinesBtn" class="layerToggle">terrain lines</button>
+      <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
+      <button id="toggleContoursBtn" class="layerToggle">contours</button>
     </div>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
@@ -246,9 +250,9 @@
       <div id="locationWeather"></div>
     </div>
     <div id="zoomReadout">
-      <div class="zrRow"><b id="zoomVal">–</b> zoom</div>
+      <div class="zrRow"><b id="depthVal">–</b> m depth</div>
       <div class="zrRow"><b id="elevVal">–</b> m elev</div>
-      <div class="zrRow"><b id="camAltVal">–</b> mi agl/asl</div>
+      <div class="zrRow"><b id="camAltVal">–</b> mi agl</div>
     </div>
   </div>
 </div>
@@ -326,7 +330,7 @@ const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_ce
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const zoomValEl = document.getElementById('zoomVal');
+const depthValEl = document.getElementById('depthVal');
 const elevValEl = document.getElementById('elevVal');
 const camAltValEl = document.getElementById('camAltVal');
 const emptyEl = document.getElementById('empty');
@@ -335,10 +339,10 @@ const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
 const toggleLinesBtn = document.getElementById('toggleLinesBtn');
 const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
 const toggleContoursBtn = document.getElementById('toggleContoursBtn');
-let tonerLabelsOn = true;
-let terrainLinesOn = true;
-let bathymetryOn = true;
-let bathymetryContoursOn = true;
+let tonerLabelsOn = false;
+let terrainLinesOn = false;
+let bathymetryOn = false;
+let bathymetryContoursOn = false;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -1278,6 +1282,101 @@ function handlePoleWrap() {
 // ============================================================
 let antarcticProtocolInstalled = false;
 
+// ============================================================
+// OCEAN DEPTH LOOKUP — used by the dashboard's depth readout. MapLibre's
+// queryTerrainElevation() only reads whichever source is set as the
+// active 3D terrain (our land DEM), not bathymetryDem, so there's no
+// built-in way to ask "what's the bathymetry value under this point" —
+// this fetches and decodes the relevant Seascape tile directly, the same
+// approach the Antarctic ice layer already uses for its own DEM data.
+//
+// Queried at a fixed zoom (8) rather than whatever the camera's current
+// zoom is — Seascape's own docs describe global coverage through z8, with
+// denser regional detail only in some areas beyond that, so z8 is the
+// safe choice that resolves everywhere rather than returning "n/a" in
+// most of the ocean. The tradeoff is resolution: each z8 tile covers a
+// wide area, so this is a coarse reading, not a precise sounding.
+//
+// getOceanDepthMetersSync() is what the readout actually calls, and it's
+// genuinely synchronous from the caller's side: if the relevant tile is
+// already cached, it returns a real number immediately; if not, it kicks
+// off a background fetch (fire-and-forget) and returns undefined for
+// this call, with the result available on a later call once the fetch
+// resolves — same non-blocking pattern already used throughout this file.
+// ============================================================
+let seascapeRasterTemplate = null;
+let seascapeRasterTemplatePromise = null;
+async function resolveSeascapeRasterTemplate() {
+  if (seascapeRasterTemplate) return seascapeRasterTemplate;
+  if (!seascapeRasterTemplatePromise) {
+    seascapeRasterTemplatePromise = fetch('https://tiles.openwaters.io/seascape/raster.json')
+      .then(res => res.json())
+      .then(json => { seascapeRasterTemplate = (json.tiles && json.tiles[0]) || null; return seascapeRasterTemplate; })
+      .catch(err => { console.warn('gallery: failed to resolve seascape raster tile template —', err.message); return null; });
+  }
+  return seascapeRasterTemplatePromise;
+}
+
+const DEPTH_QUERY_ZOOM = 8;
+const depthTileCache = new Map(); // "z/x/y" -> {data, size} | null (null = fetched but no data there)
+const depthTileInFlight = new Set();
+
+function lngLatToTileXYZ(lng, lat, z) {
+  const n = Math.pow(2, z);
+  const x = Math.floor((lng + 180) / 360 * n);
+  const latRad = lat * Math.PI / 180;
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+  return { x, y, z, n };
+}
+
+async function ensureDepthTileLoading(key, z, x, y) {
+  if (depthTileCache.has(key) || depthTileInFlight.has(key)) return;
+  depthTileInFlight.add(key);
+  try {
+    const template = await resolveSeascapeRasterTemplate();
+    if (!template) { depthTileCache.set(key, null); return; }
+    const url = template.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+    const res = await fetch(url);
+    if (!res.ok) { depthTileCache.set(key, null); return; }
+    const bitmap = await createImageBitmap(await res.blob());
+    const size = bitmap.width;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0);
+    if (bitmap.close) bitmap.close();
+    depthTileCache.set(key, { data: ctx.getImageData(0, 0, size, size).data, size });
+  } catch {
+    depthTileCache.set(key, null);
+  } finally {
+    depthTileInFlight.delete(key);
+  }
+}
+
+// Returns: a number (elevation in meters — negative is depth below sea
+// level, >=0 is land or Seascape's land sentinel), null (fetched, no real
+// data there), or undefined (still loading — a background fetch was just
+// started, try again on a later call).
+function getOceanDepthMetersSync(lng, lat) {
+  const { x, y, z, n } = lngLatToTileXYZ(lng, lat, DEPTH_QUERY_ZOOM);
+  const key = `${z}/${x}/${y}`;
+  const cached = depthTileCache.get(key);
+  if (cached === undefined) {
+    ensureDepthTileLoading(key, z, x, y);
+    return undefined;
+  }
+  if (cached === null) return null;
+  const xFrac = (lng + 180) / 360 * n - x;
+  const latRad = lat * Math.PI / 180;
+  const yExact = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+  const yFrac = yExact - y;
+  const px = Math.max(0, Math.min(cached.size - 1, Math.floor(xFrac * cached.size)));
+  const py = Math.max(0, Math.min(cached.size - 1, Math.floor(yFrac * cached.size)));
+  const i = (py * cached.size + px) * 4;
+  const d = cached.data;
+  return (d[i] * 256 + d[i + 1] + d[i + 2] / 256) - 32768; // Terrarium encoding
+}
+
 function installAntarcticTerrainProtocol() {
   if (antarcticProtocolInstalled) return;
   antarcticProtocolInstalled = true;
@@ -1486,21 +1585,22 @@ function initTerrainMap() {
         },
         // Depth-varying ocean tint from real bathymetry, replacing the
         // flat single ocean-blue above for actual underwater elevation.
-        // Deep water is a noticeably darker but same-hue shade of the base
-        // ocean color — previous attempts kept the deep end too CLOSE to
-        // the shallow end (barely visible variance), so this widens the
-        // contrast considerably while keeping every stop's channel order
+        // Deep water (-6000 to -1000) is a lighter, more vibrant shade of
+        // the base ocean color — an earlier pass went too dark here, so
+        // this pulled it back up while keeping every stop's channel order
         // (blue > green > red, same as the base #18BFFF itself) so it
-        // reads as "our blue, genuinely deeper" rather than drifting
-        // toward navy (blue dominating too hard) or teal (green catching
-        // up to blue) the way earlier attempts did. Eased so most of the
-        // visible change happens in the shore zone: nine separate stops
-        // between -200 and -2 for real variance close to shore,
-        // converging seamlessly into the regular ocean color-relief with
-        // no visible seam. The interpolate's last stop sits at 0 (sea
-        // level) and is fully transparent — MapLibre clamps values beyond
-        // a stop's range to that boundary stop, so every positive (land)
-        // elevation also clamps to the same transparent value, meaning
+        // still reads as "our blue" rather than drifting toward navy or
+        // teal the way even-earlier attempts did. -500 and everything
+        // shallower is untouched from that same earlier pass (already
+        // considered good) — the new -1000 value joins smoothly into the
+        // unchanged -500 with no seam. Eased so most of the visible change
+        // happens in the shore zone: nine separate stops between -200 and
+        // -2 for real variance close to shore, converging seamlessly into
+        // the regular ocean color-relief with no visible seam. The
+        // interpolate's last stop sits at 0 (sea level) and is fully
+        // transparent — MapLibre clamps values beyond a stop's range to
+        // that boundary stop, so every positive (land) elevation also
+        // clamps to the same transparent value, meaning
         // land is automatically left untouched with no separate branch.
         {
           id: 'bathymetry-color-relief',
@@ -1510,10 +1610,10 @@ function initTerrainMap() {
           paint: {
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
-              -6000, '#0a4b78',  // abyssal — genuinely darker now, real contrast, still unmistakably the same blue
-              -4000, '#0c5b8b',
-              -2000, '#0e6ea1',
-              -1000, '#107cb1',
+              -6000, '#2378b2',  // abyssal — lightened/more vibrant, still deeper than shallow but no longer heavy-dark
+              -4000, '#1e7cb5',
+              -2000, '#1981b9',
+              -1000, '#1484bc',
               -500, '#1187be',
               -200, '#1291c9',
               -100, '#149ad4',
@@ -1534,7 +1634,7 @@ function initTerrainMap() {
           layout: { visibility: bathymetryOn ? 'visible' : 'none' },
           paint: {
             // same wider-contrast, same-hue family as the depth palette above
-            'hillshade-shadow-color': '#0c5b8b',
+            'hillshade-shadow-color': '#1e7cb5',
             'hillshade-highlight-color': '#cdeeff',
             'hillshade-accent-color': '#18bfff',
             'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight
@@ -1861,25 +1961,26 @@ function estimateCameraAltitudeFt() {
   };
 }
 
-// Debug/tuning readout (replaces "lights shared") — lets zoom, real
+// Debug/tuning readout (replaces "lights shared") — lets ocean depth, real
 // terrain elevation, and estimated camera altitude be read directly off
 // the dashboard while tuning computeZoomFloor() above.
 function updateZoomElevReadout() {
   if (!in3D || !terrainMapInstance) {
-    zoomValEl.textContent = '–';
+    depthValEl.textContent = '–';
     elevValEl.textContent = '–';
     camAltValEl.textContent = '–';
     return;
   }
-  zoomValEl.textContent = terrainMapInstance.getZoom().toFixed(2);
   const c = terrainMapInstance.getCenter();
+  const depth = getOceanDepthMetersSync(c.lng, c.lat);
+  if (depth === undefined) depthValEl.textContent = '…'; // background fetch just kicked off, not resolved yet
+  else if (depth === null || depth >= 0) depthValEl.textContent = 'n/a'; // no data, or on land — not a depth
+  else depthValEl.textContent = Math.round(-depth);
   let elev = null;
   try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
   elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
   const camAlt = estimateCameraAltitudeFt();
-  camAltValEl.textContent = camAlt
-    ? `${(camAlt.aboveTerrainFt / 5280).toFixed(2)} / ${(camAlt.aboveSeaLevelFt / 5280).toFixed(2)}`
-    : '–';
+  camAltValEl.textContent = camAlt ? (camAlt.aboveTerrainFt / 5280).toFixed(2) : '–';
 }
 
 async function enter3D(lon, lat) {

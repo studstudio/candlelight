@@ -55,22 +55,21 @@
   }
   #transitionFade.active { opacity: 1; }
   /* North/south pole portal: MapLibre's Mercator tile grid is finite vertically,
-     so crossing a pole is hidden behind a brief beige veil (matches the
-     2D map's land color, --land, rather than white/snow) before the
-     camera reappears at the opposite latitude. */
+     so crossing a pole is hidden behind a brief white, snow-like veil before
+     the camera reappears at the opposite latitude. */
   #poleFade {
     position: absolute; inset: 0; z-index: 8; pointer-events: none; opacity: 0;
     background:
-      radial-gradient(circle at 18% 24%, rgba(236,209,145,.95) 0 2px, transparent 3px),
-      radial-gradient(circle at 72% 18%, rgba(236,209,145,.82) 0 1.5px, transparent 3px),
-      radial-gradient(circle at 42% 68%, rgba(236,209,145,.9) 0 2px, transparent 4px),
-      radial-gradient(circle at 84% 74%, rgba(236,209,145,.78) 0 1.5px, transparent 3px),
-      rgba(236,209,145,.98);
+      radial-gradient(circle at 18% 24%, rgba(255,255,255,.95) 0 2px, transparent 3px),
+      radial-gradient(circle at 72% 18%, rgba(255,255,255,.82) 0 1.5px, transparent 3px),
+      radial-gradient(circle at 42% 68%, rgba(255,255,255,.9) 0 2px, transparent 4px),
+      radial-gradient(circle at 84% 74%, rgba(255,255,255,.78) 0 1.5px, transparent 3px),
+      rgba(255,255,255,.98);
     background-size: 150px 130px, 190px 160px, 170px 150px, 210px 180px, auto;
-    transition: opacity .72s ease;
+    transition: opacity .48s ease;
     animation: none;
   }
-  #poleFade.active { opacity: 1; animation: snowDrift 5.4s ease-in-out infinite; }
+  #poleFade.active { opacity: 1; animation: snowDrift 3.6s ease-in-out infinite; }
   @keyframes snowDrift {
     0%,100% { background-position: 0 0, 0 0, 0 0, 0 0, 0 0; }
     50% { background-position: 18px 10px, -14px 8px, 12px -9px, -16px -6px, 0 0; }
@@ -108,12 +107,8 @@
   #locationWeather { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
-  /* Temporary debug readout for tuning the latitude-based zoom floor —
-     zoom/elevation only mean anything in 3D, so this reads "–" otherwise. */
-  #zoomReadout { font-size: 11px; color: #4a3a22; text-align: right; }
-  #zoomReadout .zrRow { margin-top: 2px; }
-  #zoomReadout .zrRow:first-child { margin-top: 0; }
-  #zoomReadout b { color: #2a1f10; font-size: 15px; }
+  #count { font-size: 11px; color: #4a3a22; text-align: right; }
+  #count b { color: #2a1f10; font-size: 16px; display: block; }
   #layerToggles {
     position: absolute; right: 14px; top: 14px; z-index: 3;
     display: none; flex-direction: column; gap: 8px;
@@ -130,45 +125,39 @@
     transition: opacity 0.6s ease; z-index: 1;
     /* This shows through anywhere MapLibre genuinely renders nothing at
        all — not just before the first frame, but permanently wherever
-       the terrain source has a real coverage gap or the mesh simply
-       doesn't extend that far (most of that gap is now filled by real
-       mirrored ice texture — see decodeIceTile
-       above — this is only the remaining true edge). No raster overlay,
-       fog, or terrain-draped layer can ever affect this: genuinely empty
-       canvas, no geometry, nothing to dynamically light.
-       An earlier version of this sized the texture as a PERCENTAGE of the
-       whole container (a white cap 0-6%, patches spread across 0-100%) —
-       which looks fine when the void fills most of the screen, but when
-       it's only a thin sliver at the very top edge (the much more common
-       case — you're usually not staring straight down a void, just
-       glimpsing its edge), you only ever see the first few percent of
-       that design: the solid white cap, nothing else, which is exactly
-       the "still just one flat color" bug. Fixed by sizing the texture in
-       real PIXELS with background-repeat instead of container percentage,
-       so it tiles at a consistent visual scale no matter how much (or
-       little) of the screen the void actually occupies.
+       the terrain source has a real coverage gap (confirmed: Mapterhorn's
+       DEM data has real gaps near Antarctica) or the mesh simply doesn't
+       extend that far. No raster overlay, fog, or terrain-draped layer
+       can ever affect this — those only apply to pixels MapLibre actually
+       draws something on, and this is genuinely empty canvas: no geometry,
+       no camera tracking, nothing we can dynamically light or texture the
+       way real terrain gets rendered. What we CAN do is make the static
+       fallback itself read as soft atmospheric haze rather than a flat
+       paint-bucket fill: overlapping soft-edged color patches instead of
+       one flat tone (a film-grain SVG texture was tried here too, but
+       overlay-blending neutral/unstyled noise systematically desaturates
+       whatever's underneath toward gray — that's why it's gone; the
+       patches alone read as varied pale white/blue without that problem).
        This used to be solid #18BFFF (vivid ocean blue) — the actual root
        cause of the original "vivid blue void" complaint this whole
        conversation started from, sitting in plain CSS the whole time.
     */
-    background-color: #eef4f8;
+    background-color: #f2f7fa;
     background-image:
-      radial-gradient(circle at 30% 30%, rgba(255,255,255,0.95) 0%, transparent 60%),
-      radial-gradient(circle at 70% 65%, rgba(178,203,219,0.55) 0%, transparent 58%),
-      radial-gradient(circle at 20% 80%, rgba(200,219,231,0.5) 0%, transparent 55%),
-      radial-gradient(circle at 85% 20%, rgba(188,209,224,0.5) 0%, transparent 55%);
-    background-size: 160px 160px, 110px 110px, 95px 95px, 130px 130px;
-    background-repeat: repeat;
+      radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
+      radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
+      radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
+      radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
+      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap .maplibregl-canvas {
-    background-color: #eef4f8;
+    background-color: #f2f7fa;
     background-image:
-      radial-gradient(circle at 30% 30%, rgba(255,255,255,0.95) 0%, transparent 60%),
-      radial-gradient(circle at 70% 65%, rgba(178,203,219,0.55) 0%, transparent 58%),
-      radial-gradient(circle at 20% 80%, rgba(200,219,231,0.5) 0%, transparent 55%),
-      radial-gradient(circle at 85% 20%, rgba(188,209,224,0.5) 0%, transparent 55%);
-    background-size: 160px 160px, 110px 110px, 95px 95px, 130px 130px;
-    background-repeat: repeat;
+      radial-gradient(circle at 18% 22%, rgba(178,203,219,0.6) 0%, transparent 42%),
+      radial-gradient(circle at 78% 15%, rgba(188,209,224,0.55) 0%, transparent 46%),
+      radial-gradient(circle at 42% 58%, rgba(200,219,231,0.5) 0%, transparent 52%),
+      radial-gradient(circle at 88% 72%, rgba(172,199,217,0.55) 0%, transparent 44%),
+      radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
   #map { transition: opacity 0.6s ease; }
@@ -203,8 +192,6 @@
     <div id="layerToggles">
       <button id="toggleLabelsBtn" class="layerToggle active">labels</button>
       <button id="toggleLinesBtn" class="layerToggle active">terrain lines</button>
-      <button id="toggleBathymetryBtn" class="layerToggle active">bathymetry</button>
-      <button id="toggleContoursBtn" class="layerToggle active">contours</button>
     </div>
     <button id="backBtn">back to overview</button>
     <div id="tooltip"></div>
@@ -224,11 +211,7 @@
       <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
       <div id="locationWeather"></div>
     </div>
-    <div id="zoomReadout">
-      <div class="zrRow"><b id="zoomVal">–</b> zoom</div>
-      <div class="zrRow"><b id="elevVal">–</b> m elev</div>
-      <div class="zrRow"><b id="camAltVal">–</b> ft agl/asl</div>
-    </div>
+    <div id="count"><b id="countNum">0</b>lights shared</div>
   </div>
 </div>
 
@@ -265,19 +248,13 @@ const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_ce
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const zoomValEl = document.getElementById('zoomVal');
-const elevValEl = document.getElementById('elevVal');
-const camAltValEl = document.getElementById('camAltVal');
+const countEl = document.getElementById('countNum');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
 const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
 const toggleLinesBtn = document.getElementById('toggleLinesBtn');
-const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
-const toggleContoursBtn = document.getElementById('toggleContoursBtn');
 let tonerLabelsOn = true;
 let terrainLinesOn = true;
-let bathymetryOn = true;
-let bathymetryContoursOn = true;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -929,14 +906,6 @@ function applyLayerToggles() {
     if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
       terrainMapInstance.setLayoutProperty('stamen-terrain-lines', 'visibility', terrainLinesOn ? 'visible' : 'none');
     }
-    for (const id of ['bathymetry-color-relief', 'bathymetry-hillshade']) {
-      if (terrainMapInstance.getLayer(id)) {
-        terrainMapInstance.setLayoutProperty(id, 'visibility', bathymetryOn ? 'visible' : 'none');
-      }
-    }
-    if (terrainMapInstance.getLayer('bathymetry-contours')) {
-      terrainMapInstance.setLayoutProperty('bathymetry-contours', 'visibility', bathymetryContoursOn ? 'visible' : 'none');
-    }
   } catch (err) {
     console.warn('gallery: layer toggle failed', err);
   }
@@ -950,16 +919,6 @@ toggleLabelsBtn.onclick = () => {
 toggleLinesBtn.onclick = () => {
   terrainLinesOn = !terrainLinesOn;
   toggleLinesBtn.classList.toggle('active', terrainLinesOn);
-  applyLayerToggles();
-};
-toggleBathymetryBtn.onclick = () => {
-  bathymetryOn = !bathymetryOn;
-  toggleBathymetryBtn.classList.toggle('active', bathymetryOn);
-  applyLayerToggles();
-};
-toggleContoursBtn.onclick = () => {
-  bathymetryContoursOn = !bathymetryContoursOn;
-  toggleContoursBtn.classList.toggle('active', bathymetryContoursOn);
   applyLayerToggles();
 };
 
@@ -1165,7 +1124,6 @@ function addWeatherLayerIfReady() {
 let terrainMapInstance = null;
 
 const POLE_PORTAL_LAT = 82;
-const POLE_PORTAL_ENABLED = true; // re-enabled: disabling it let the camera pan right up to the literal 85.05° Mercator edge (the zoom floor only guards against zooming OUT near a pole, not panning IN that close at any zoom), which is almost certainly the real cause of the jumpy freezes and white bar reported — genuinely unrenderable space near that edge, not a portal bug
 let poleWrapping = false;
 let lastPoleLat = 0;
 
@@ -1176,7 +1134,7 @@ function setPoleFade(active) {
 }
 
 function handlePoleWrap() {
-  if (!POLE_PORTAL_ENABLED || !terrainMapInstance || poleWrapping || !in3D) return;
+  if (!terrainMapInstance || poleWrapping || !in3D) return;
   const c = terrainMapInstance.getCenter();
   const crossedNorth = lastPoleLat <= POLE_PORTAL_LAT && c.lat > POLE_PORTAL_LAT;
   const crossedSouth = lastPoleLat >= -POLE_PORTAL_LAT && c.lat < -POLE_PORTAL_LAT;
@@ -1186,9 +1144,8 @@ function handlePoleWrap() {
   poleWrapping = true;
   const targetLat = crossedNorth ? -POLE_PORTAL_LAT : POLE_PORTAL_LAT;
   // The 180° longitude shift puts the view on the opposite side of the
-  // sphere-like pole crossing. The beige veil hides the discontinuity and
-  // also masks the Mercator cutoff at the finite tile boundary. All three
-  // timings are 1.5x the original (420/150/240 -> 630/225/360).
+  // sphere-like pole crossing. The white veil hides the discontinuity and
+  // also masks the Mercator/Antarctica cutoff at the finite tile boundary.
   const targetLng = c.lng + 180;
   setPoleFade(true);
   terrainMapInstance.stop();
@@ -1198,10 +1155,10 @@ function handlePoleWrap() {
     requestAnimationFrame(() => {
       setTimeout(() => {
         setPoleFade(false);
-        setTimeout(() => { poleWrapping = false; }, 360);
-      }, 225);
+        setTimeout(() => { poleWrapping = false; }, 240);
+      }, 150);
     });
-  }, 630);
+  }, 420);
 }
 
 // ============================================================
@@ -1216,94 +1173,8 @@ function handlePoleWrap() {
 // polygon, mask, floating mesh, or flat white overlay, and the ice
 // shading includes real hillshading computed from the DEM's own local
 // slope, not a faked gradient.
-//
-// Genuine Mapterhorn coverage gaps (their own docs note it started with a
-// European-DEM focus, not full global coverage) simply render nothing —
-// a fully transparent tile, letting the CSS fallback background (see
-// #terrainMap above) show through instead. An earlier version tried to
-// paper over gaps by borrowing and mirroring a nearby real tile's ice
-// texture; struck entirely — it was rendering phantom ice that wasn't
-// actually there, which is worse than an honest gap.
 // ============================================================
 let antarcticProtocolInstalled = false;
-
-// Fetches ONE Mapterhorn tile and decodes it into ice-shaded ImageData, or
-// null if that tile has no real data.
-async function decodeIceTile(z, x, y, abortController) {
-  const size = 512;
-  const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
-  let response;
-  try {
-    response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
-  } catch {
-    return null; // aborted or a network failure — treat the same as "no data here"
-  }
-  if (!response.ok) return null;
-
-  const bitmap = await createImageBitmap(await response.blob());
-  const canvas = document.createElement('canvas');
-  canvas.width = size; canvas.height = size;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(bitmap, 0, 0, size, size);
-  if (bitmap.close) bitmap.close();
-  const src = ctx.getImageData(0, 0, size, size).data;
-  const out = ctx.createImageData(size, size);
-
-  const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768; // Terrarium encoding
-  const n = Math.pow(2, z);
-  const latForPixel = (py) => {
-    const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
-    return 180 / Math.PI * Math.atan(Math.sinh(q));
-  };
-
-  // Same global elevation bands as the existing color-relief, but the
-  // Antarctic land palette is cool/white. Ocean remains transparent so
-  // the existing vivid-blue native DEM color-relief remains visible.
-  const icePalette = (e) => {
-    if (e < 100) return [222, 236, 242];
-    if (e < 500) { const t = (e - 100) / 400; return [Math.round(222 + 25 * t), Math.round(236 + 17 * t), Math.round(242 + 13 * t)]; }
-    if (e < 1500) return [247, 253, 255];
-    if (e < 2500) { const t = (e - 1500) / 1000; return [Math.round(247 - 18 * t), Math.round(253 - 15 * t), Math.round(255 - 5 * t)]; }
-    return [245, 250, 255];
-  };
-
-  for (let py = 0; py < size; py++) {
-    const lat = latForPixel(py);
-    for (let px = 0; px < size; px++) {
-      const si = (py * size + px) * 4;
-      const e = decode(si);
-      const di = si;
-
-      // Geographic condition computed per DEM pixel. Elevation keeps
-      // ocean blue: only actual positive land/ice is recolored.
-      const isAntarctic = lat <= -60.0 && e > 0.0;
-      if (!isAntarctic) {
-        out.data[di] = 0; out.data[di + 1] = 0; out.data[di + 2] = 0; out.data[di + 3] = 0;
-        continue;
-      }
-
-      let rgb = icePalette(e);
-      // Real hillshade from the same DEM, using adjacent pixels — not a
-      // fake gradient, calculated from the DEM's own slope.
-      const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
-      const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
-      const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
-      const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
-      const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
-      const shade = Math.max(0.68, Math.min(1.12, 0.94 - dx * 0.012 + dy * 0.012));
-      rgb = rgb.map(v => Math.max(0, Math.min(255, Math.round(v * shade))));
-      out.data[di] = rgb[0]; out.data[di + 1] = rgb[1]; out.data[di + 2] = rgb[2]; out.data[di + 3] = 255;
-    }
-  }
-  return out;
-}
-
-async function imageDataToPngArrayBuffer(imgData) {
-  const canvas = new OffscreenCanvas(imgData.width, imgData.height);
-  canvas.getContext('2d').putImageData(imgData, 0, 0);
-  const blob = await canvas.convertToBlob({ type: 'image/png' });
-  return blob.arrayBuffer();
-}
 
 function installAntarcticTerrainProtocol() {
   if (antarcticProtocolInstalled) return;
@@ -1312,19 +1183,84 @@ function installAntarcticTerrainProtocol() {
   maplibregl.addProtocol('antarctic-relief', async (params, abortController) => {
     const parts = params.url.replace('antarctic-relief://', '').split('/').map(Number);
     const z = parts[0], x = parts[1], y = parts[2];
+    const size = 512;
+    const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
+    const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
+    if (!response.ok) {
+      // Mapterhorn's coverage has real gaps (their own docs note it
+      // started with a European-DEM focus, not full global coverage) —
+      // a missing tile here just means "no ice-shading data available",
+      // not a fatal error. Hand back a fully transparent tile instead of
+      // throwing, so the ordinary color-relief ocean blue shows through
+      // underneath for that one tile instead of spamming the console.
+      const blankCanvas = new OffscreenCanvas(size, size);
+      blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
+      const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
+      return { data: await blankBlob.arrayBuffer() };
+    }
+    const bitmap = await createImageBitmap(await response.blob());
 
-    const real = await decodeIceTile(z, x, y, abortController);
-    if (real) return { data: await imageDataToPngArrayBuffer(real) };
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, size, size);
+    if (bitmap.close) bitmap.close();
+    const src = ctx.getImageData(0, 0, size, size).data;
+    const out = ctx.createImageData(size, size);
 
-    // A genuine gap — no borrowing/mirroring a neighbor's texture. Fall
-    // back to blank, letting the CSS fallback background (see #terrainMap
-    // above) show through instead.
-    const blankCanvas = new OffscreenCanvas(512, 512);
-    blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
-    const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
-    return { data: await blankBlob.arrayBuffer() };
+    const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768; // Terrarium encoding
+    const n = Math.pow(2, z);
+    const latForPixel = (py) => {
+      const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
+      return 180 / Math.PI * Math.atan(Math.sinh(q));
+    };
+
+    // Same global elevation bands as the existing color-relief, but the
+    // Antarctic land palette is cool/white. Ocean remains transparent so
+    // the existing vivid-blue native DEM color-relief remains visible.
+    const icePalette = (e) => {
+      if (e < 100) return [222, 236, 242];
+      if (e < 500) { const t = (e - 100) / 400; return [Math.round(222 + 25 * t), Math.round(236 + 17 * t), Math.round(242 + 13 * t)]; }
+      if (e < 1500) return [247, 253, 255];
+      if (e < 2500) { const t = (e - 1500) / 1000; return [Math.round(247 - 18 * t), Math.round(253 - 15 * t), Math.round(255 - 5 * t)]; }
+      return [245, 250, 255];
+    };
+
+    for (let py = 0; py < size; py++) {
+      const lat = latForPixel(py);
+      for (let px = 0; px < size; px++) {
+        const si = (py * size + px) * 4;
+        const e = decode(si);
+        const di = si;
+
+        // Geographic condition computed per DEM pixel. Elevation keeps
+        // ocean blue: only actual positive land/ice is recolored.
+        const isAntarctic = lat <= -60.0 && e > 0.0;
+        if (!isAntarctic) {
+          out.data[di] = 0; out.data[di + 1] = 0; out.data[di + 2] = 0; out.data[di + 3] = 0;
+          continue;
+        }
+
+        let rgb = icePalette(e);
+        // Real hillshade from the same DEM, using adjacent pixels — not a
+        // fake gradient, calculated from the DEM's own slope.
+        const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
+        const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
+        const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
+        const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
+        const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
+        const shade = Math.max(0.68, Math.min(1.12, 0.94 - dx * 0.012 + dy * 0.012));
+        rgb = rgb.map(v => Math.max(0, Math.min(255, Math.round(v * shade))));
+        out.data[di] = rgb[0]; out.data[di + 1] = rgb[1]; out.data[di + 2] = rgb[2]; out.data[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+    return { data: await createImageBitmap(canvas) };
   });
 }
+
+
+
 
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
@@ -1348,19 +1284,6 @@ function initTerrainMap() {
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
-        // Seascape (openwatersio/seascape): global open bathymetry, same
-        // Terrarium encoding as our land DEM, published as ready TileJSON —
-        // unlike the Antarctic ice shading, this needs no custom protocol
-        // at all: color-relief/hillshade are native MapLibre layer types
-        // that sample any raster-dem source directly, exactly like our
-        // existing land terrainSource/hillshadeSource above.
-        bathymetryDem: {
-          type: 'raster-dem',
-          url: 'https://tiles.openwaters.io/seascape/raster.json',
-          encoding: 'terrarium', // required — MapLibre defaults to Mapbox's own encoding otherwise
-          tileSize: 512,
-        },
-        bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
         // lakes/rivers reuse the exact same GeoJSON already fetched for the
         // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
         // fed to MapLibre as plain in-memory GeoJSON
@@ -1446,76 +1369,6 @@ function initTerrainMap() {
             'hillshade-exaggeration': 1.0,
           },
         },
-        // Depth-varying ocean tint from real bathymetry, replacing the
-        // flat single ocean-blue above for actual underwater elevation.
-        // Palette derived directly from the app's own ocean color
-        // (#18BFFF, used everywhere else — color-relief sea level, sky,
-        // lakes) rather than an unrelated navy/cyan ramp: it's the same
-        // hue throughout, with only a MODEST darkening at depth (an
-        // earlier version ranged all the way to near-black at the abyssal
-        // end, which read as a completely different color family instead
-        // of "our ocean, just deeper" — narrowed considerably), converging
-        // right into #18BFFF at the shallow end so there's no visible seam
-        // where bathymetry data runs out and the regular ocean color-
-        // relief takes over. The interpolate's last stop sits at 0 (sea
-        // level) and is fully transparent — MapLibre clamps values beyond
-        // a stop's range to that boundary stop, so every positive (land)
-        // elevation also clamps to the same transparent value, meaning
-        // land is automatically left untouched with no separate branch.
-        {
-          id: 'bathymetry-color-relief',
-          type: 'color-relief',
-          source: 'bathymetryDem',
-          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
-          paint: {
-            'color-relief-color': [
-              'interpolate', ['linear'], ['elevation'],
-              -6000, '#0a5f91',  // abyssal — still clearly "our blue", just deeper
-              -4000, '#0d70a5',
-              -2000, '#1085bd',
-              -1000, '#1294ce',
-              -500, '#14a0dc',
-              -200, '#15ace9',
-              -50, '#17b5f4',
-              -5, '#18bcfc',     // nearly identical to #18BFFF — the seamless handoff
-              0, 'rgba(24,188,252,0)', // sea level — fully transparent
-            ],
-          },
-        },
-        {
-          id: 'bathymetry-hillshade',
-          type: 'hillshade',
-          source: 'bathymetryDem',
-          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
-          paint: {
-            // same narrowed #18BFFF-derived family as the depth palette
-            // above — shadow is the palette's (now much closer) dark end,
-            // highlight a pale tint of the same hue, accent the mid-tone
-            'hillshade-shadow-color': '#0d70a5',
-            'hillshade-highlight-color': '#cdeeff',
-            'hillshade-accent-color': '#18bfff',
-            'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight
-          },
-        },
-        // Bathymetric contour lines (isobaths) from Seascape's vector
-        // tiles — bright yellow-orange and dashed, deliberately contrasting
-        // against the cool depth-tinted water rather than blending into
-        // it, in the spirit of a real nautical chart (no depth labels,
-        // safety-depth shading, or soundings — straightforward to add
-        // later if wanted). Toggled independently of the color/hillshade
-        // pair above via bathymetryContoursOn, not tied to bathymetryOn.
-        {
-          id: 'bathymetry-contours',
-          type: 'line',
-          source: 'bathymetryVector',
-          'source-layer': 'contours',
-          layout: { visibility: bathymetryContoursOn ? 'visible' : 'none' },
-          paint: {
-            'line-color': '#ffa726',
-            'line-width': 0.9,
-            'line-dasharray': [3, 2],
-          },
-        },
         // 0.6-opacity experiment: Stamen Terrain's line layer (roads,
         // borders) laid over our own color-relief + hillshade. Sits below
         // Antarctica/lakes/rivers/labels so those stay crisp on top.
@@ -1578,7 +1431,6 @@ function initTerrainMap() {
     maxPitch: 75,
     dragRotate: true,
     touchPitch: true,
-    minZoom: ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move' events start firing
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
@@ -1587,9 +1439,6 @@ function initTerrainMap() {
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
-  terrainMapInstance.on('move', () => updateZoomFloor(false));
-  terrainMapInstance.on('moveend', () => updateZoomFloor(true));
-  terrainMapInstance.on('move', updateZoomElevReadout);
   return terrainMapInstance;
 }
 
@@ -1632,136 +1481,6 @@ const MIN_EXIT_DELTA = 0.35; // must have genuinely dropped by this much over th
 let enteredAt = 0;
 let zoomHistory = []; // rolling [{t, z}, ...] samples, trimmed to TREND_WINDOW_MS
 
-// ============================================================
-// HARD ZOOM FLOOR — this is the actual safety guarantee, not the trend
-// check above. autoExitCheck() only looks at RATE of change within a
-// rolling window (must drop >=0.35 within 500ms) — a real gap, since many
-// small, deliberately slow pinches (each under that delta) never trip it,
-// letting the camera drift arbitrarily far out with no exit ever
-// triggering. minZoom is a genuine MapLibre-enforced constraint: it clamps
-// every zoom interaction, gesture pattern or speed, so that loophole can't
-// be exploited regardless of how the trend check behaves.
-//
-// Layered on top: the floor tightens the closer the camera gets to either
-// pole. The Mercator void only ever becomes visible once you're BOTH
-// zoomed out far AND near a pole — so instead of trying to cosmetically
-// hide or blend it (the entire rest of this file's struggle with mist,
-// fog, and DEM mirroring), just never let the camera reach a position
-// where both conditions are true at once. Simpler and actually reliable.
-//
-// The curve itself: NOT a guessed formula. It's a piecewise-linear fit
-// through 36 real (latitude, desired-min-zoom) data points, collected by
-// testing at random longitudes and reporting the minimum zoom-out that
-// still hid the void there. Sorted by latitude, binned (5° below 60°,
-// 2° from 60-82°, tightening to 0.1° right at the edge, where sampling was
-// densest and the curve is steepest — from 84.58° to 84.96°, only 0.38°,
-// the desired floor rises from 9.74 to 13.13), then smoothed to be
-// monotonic non-decreasing (two points, 12.42°->4.55 and 16.71°->4.22,
-// disagreed — real noise from eyeballing screenshots, not a genuine signal
-// that the floor should ever relax closer to a pole, so the curve takes
-// the running max rather than dipping).
-// To add more data points later: append [lat, zoom] pairs to this array in
-// the same format, in any order — ZOOM_FLOOR_CURVE gets sorted before use.
-// ============================================================
-const ZOOM_FLOOR_CURVE = [
-  [10, 4.55], [15, 4.55], [25, 4.83], [35, 4.87], [45, 4.92], [50, 5.12],
-  [55, 5.14], [62, 5.25], [66, 5.41], [68, 5.48], [70, 5.65], [72, 5.79],
-  [76, 6.14], [78, 6.43], [80, 6.85], [82.5, 7.46], [82.75, 7.46],
-  [83.5, 7.87], [83.75, 8.14], [84.3, 8.81], [84.6, 9.74], [84.8, 10.5],
-  [84.9, 11.39], [85, 13.13],
-].sort((a, b) => a[0] - b[0]);
-let lastAppliedZoomFloor = null;
-
-function computeZoomFloor(lat) {
-  const absLat = Math.abs(lat);
-  const curve = ZOOM_FLOOR_CURVE;
-  if (absLat <= curve[0][0]) return curve[0][1]; // at or below the lowest sampled latitude — flat at that value
-  if (absLat >= curve[curve.length - 1][0]) return curve[curve.length - 1][1]; // at or beyond the highest sampled latitude (currently 85°, essentially the true edge) — flat at that value
-  for (let i = 1; i < curve.length; i++) {
-    const [lat0, z0] = curve[i - 1], [lat1, z1] = curve[i];
-    if (absLat <= lat1) {
-      const t = (absLat - lat0) / (lat1 - lat0);
-      return z0 + t * (z1 - z0);
-    }
-  }
-  return curve[curve.length - 1][1]; // unreachable given the bounds checks above, but keeps this defined either way
-}
-
-// Called on every 'move' (mid-gesture, coarse rounding — this used to round
-// to 0.01, meaning basically ANY pan anywhere calls setMinZoom, since the
-// curve below has no flat region left like the old quadratic version did.
-// Calling setMinZoom repeatedly WHILE a pinch/pan gesture is actively in
-// progress is the likely cause of the screen fighting/bouncing glitch —
-// MapLibre's own gesture handlers compute deltas from the transform's
-// current state each frame, and externally re-clamping that mid-gesture,
-// many times a second, is a plausible way to make the two fight each
-// other) and on 'moveend' (gesture settled, full precision — ensures the
-// floor is exactly correct at rest, not left coarse after interaction).
-function updateZoomFloor(precise) {
-  if (!terrainMapInstance) return;
-  const raw = computeZoomFloor(terrainMapInstance.getCenter().lat);
-  const roundTo = precise ? 100 : 4; // precise: 0.01 steps; coarse: 0.25 steps, so ordinary panning doesn't call setMinZoom on every tiny latitude wobble
-  const floor = Math.round(raw * roundTo) / roundTo;
-  if (floor === lastAppliedZoomFloor) return; // skip redundant setMinZoom calls when nothing's actually changed
-  lastAppliedZoomFloor = floor;
-  terrainMapInstance.setMinZoom(floor);
-}
-
-// Estimates the CAMERA's real-world altitude — not the terrain's own
-// elevation (that's queryTerrainElevation, used for elevVal above), but
-// how high the camera itself is sitting, derived from zoom/pitch/viewport
-// height using MapLibre's documented fixed vertical FOV (36.87°, confirmed
-// against MapLibre's own docs — this is a public, stable constant, not an
-// internal implementation detail). Matches MapLibre's own internal formula
-// for camera altitude: cos(pitch) * cameraToCenterDistance / pixelsPerMeter
-// + centerElevation — reconstructed here entirely from public APIs
-// (getZoom/getPitch/getCenter/queryTerrainElevation/container size) rather
-// than reaching into transform internals.
-const MAPLIBRE_FOV_DEG = 36.87;
-const METERS_TO_FEET = 3.28084;
-function estimateCameraAltitudeFt() {
-  if (!terrainMapInstance) return null;
-  const canvasHeightPx = terrainMapInstance.getContainer().clientHeight;
-  if (!canvasHeightPx) return null;
-  const fovRad = MAPLIBRE_FOV_DEG * Math.PI / 180;
-  const cameraToCenterDistancePx = 0.5 / Math.tan(fovRad / 2) * canvasHeightPx;
-  const pitchRad = terrainMapInstance.getPitch() * Math.PI / 180;
-  const c = terrainMapInstance.getCenter();
-  const groundResolutionMPerPx = 156543.03392 * Math.cos(c.lat * Math.PI / 180) / Math.pow(2, terrainMapInstance.getZoom());
-  const altitudeAboveCenterM = Math.cos(pitchRad) * cameraToCenterDistancePx * groundResolutionMPerPx;
-  let terrainElevM = 0;
-  try {
-    const e = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]);
-    if (typeof e === 'number' && !isNaN(e)) terrainElevM = e;
-  } catch {}
-  return {
-    aboveTerrainFt: altitudeAboveCenterM * METERS_TO_FEET,
-    aboveSeaLevelFt: (altitudeAboveCenterM + terrainElevM) * METERS_TO_FEET,
-  };
-}
-
-// Temporary debug readout (replaces "lights shared" for now) — lets zoom,
-// real terrain elevation, and estimated camera altitude be read directly
-// off the dashboard while tuning computeZoomFloor() above, without
-// needing devtools.
-function updateZoomElevReadout() {
-  if (!in3D || !terrainMapInstance) {
-    zoomValEl.textContent = '–';
-    elevValEl.textContent = '–';
-    camAltValEl.textContent = '–';
-    return;
-  }
-  zoomValEl.textContent = terrainMapInstance.getZoom().toFixed(2);
-  const c = terrainMapInstance.getCenter();
-  let elev = null;
-  try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
-  elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
-  const camAlt = estimateCameraAltitudeFt();
-  camAltValEl.textContent = camAlt
-    ? `${Math.round(camAlt.aboveTerrainFt / 10) * 10} / ${Math.round(camAlt.aboveSeaLevelFt / 10) * 10}`
-    : '–';
-}
-
 async function enter3D(lon, lat) {
   if (in3D) return;
   in3D = true;
@@ -1772,8 +1491,6 @@ async function enter3D(lon, lat) {
   enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   lastPoleLat = map3d.getCenter().lat;
-  updateZoomFloor(true); // set immediately (precise) in case entry itself is already near a pole, rather than waiting for the first 'move' event
-  updateZoomElevReadout();
   poleWrapping = false;
   setPoleFade(false);
   document.getElementById('terrainMap').classList.add('active');
@@ -1802,7 +1519,6 @@ function exit3D() {
   canvas.classList.remove('faded');
   backBtn.classList.remove('visible');
   document.getElementById('layerToggles').classList.remove('visible');
-  updateZoomElevReadout(); // resets to "–" now that in3D is false
   draw();
 }
 const backBtn = document.getElementById('backBtn');
@@ -1868,6 +1584,7 @@ async function poll() {
     }
     const data = await res.json();
     events = data.events || [];
+    countEl.textContent = events.length;
     emptyEl.style.display = events.length === 0 ? 'flex' : 'none';
     statusEl.textContent = 'live';
     statusEl.classList.add('live'); statusEl.classList.remove('error');

@@ -199,11 +199,12 @@
   #map { transition: opacity 0.6s ease; }
   #map.faded { opacity: 0; pointer-events: none; }
   #backBtn {
-    position: absolute; left: 14px; top: 14px; background: var(--panel);
-    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
-    font-size: 11px; color: var(--cream-dim); z-index: 3; display: none;
+    position: absolute; left: 14px; top: 14px; width: 36px; height: 36px; padding: 0;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 50%;
+    z-index: 3; display: none; align-items: center; justify-content: center;
   }
-  #backBtn.visible { display: block; }
+  #backBtn.visible { display: flex; }
+  #backBtn svg { display: block; }
   /* strip MapLibre's own attribution/logo chrome down to something minimal
      and on-theme rather than its default styling */
   .maplibregl-ctrl-attrib { background: var(--panel) !important; color: var(--cream-dim) !important; font-size: 10px !important; }
@@ -231,7 +232,12 @@
       <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
       <button id="toggleContoursBtn" class="layerToggle">contours</button>
     </div>
-    <button id="backBtn">back to overview</button>
+    <button id="backBtn" aria-label="back to overview">
+      <svg viewBox="0 0 32 32" width="20" height="20">
+        <circle cx="16" cy="16" r="15" fill="#18BFFF"/>
+        <path d="M10,12 Q14,8 20,10 Q24,12 22,16 Q24,20 18,22 Q12,23 9,18 Q7,14 10,12 Z" fill="#ecd191"/>
+      </svg>
+    </button>
     <div id="tooltip"></div>
     <div id="empty">
       <div>no lights shared yet</div>
@@ -250,7 +256,7 @@
       <div id="locationWeather"></div>
     </div>
     <div id="zoomReadout">
-      <div class="zrRow"><b id="depthVal">–</b> m depth</div>
+      <div class="zrRow" id="depthRow"><b id="depthVal">–</b> m depth</div>
       <div class="zrRow"><b id="elevVal">–</b> m elev</div>
       <div class="zrRow"><b id="camAltVal">–</b> mi agl</div>
     </div>
@@ -331,6 +337,7 @@ const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const depthValEl = document.getElementById('depthVal');
+const depthRowEl = document.getElementById('depthRow');
 const elevValEl = document.getElementById('elevVal');
 const camAltValEl = document.getElementById('camAltVal');
 const emptyEl = document.getElementById('empty');
@@ -1966,6 +1973,7 @@ function estimateCameraAltitudeFt() {
 // the dashboard while tuning computeZoomFloor() above.
 function updateZoomElevReadout() {
   if (!in3D || !terrainMapInstance) {
+    depthRowEl.style.display = '';
     depthValEl.textContent = '–';
     elevValEl.textContent = '–';
     camAltValEl.textContent = '–';
@@ -1973,9 +1981,9 @@ function updateZoomElevReadout() {
   }
   const c = terrainMapInstance.getCenter();
   const depth = getOceanDepthMetersSync(c.lng, c.lat);
-  if (depth === undefined) depthValEl.textContent = '…'; // background fetch just kicked off, not resolved yet
-  else if (depth === null || depth >= 0) depthValEl.textContent = 'n/a'; // no data, or on land — not a depth
-  else depthValEl.textContent = Math.round(-depth);
+  if (depth === undefined) { depthRowEl.style.display = ''; depthValEl.textContent = '…'; } // background fetch just kicked off, not resolved yet
+  else if (depth === null || depth >= 0) { depthRowEl.style.display = 'none'; } // no data, or on land — hide the whole row, not just the value
+  else { depthRowEl.style.display = ''; depthValEl.textContent = Math.round(depth); } // negative — shows as e.g. "-42", not flipped positive
   let elev = null;
   try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
   elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';

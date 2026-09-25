@@ -1418,18 +1418,19 @@ function initTerrainMap() {
         },
         // Depth-varying ocean tint from real bathymetry, replacing the
         // flat single ocean-blue above for actual underwater elevation.
-        // Deep water is a genuine dark teal/turquoise (not navy — the
-        // green channel stays close to the blue channel throughout,
-        // rather than blue dominating), transitioning through many dense
-        // stops right in the shoreline range (-200 to -2, eight separate
-        // stops) for real visible variance close to shore, converging
-        // into #18BFFF at the very shallowest so there's no seam where
-        // bathymetry data ends and the regular ocean color-relief takes
-        // over. The interpolate's last stop sits at 0 (sea level) and is
-        // fully transparent — MapLibre clamps values beyond a stop's
-        // range to that boundary stop, so every positive (land) elevation
-        // also clamps to the same transparent value, meaning land is
-        // automatically left untouched with no separate branch.
+        // Deep water is a lighter, closer-to-base shade of the same blue
+        // (earlier attempts ranged too far toward dark navy, then too far
+        // toward dark teal — this one continuous interpolation runs
+        // straight from a lighter #168aa8 at the abyssal end to the exact
+        // base #18BFFF, eased so most of the visible change happens in the
+        // shore zone: nine separate stops between -200 and -2 for real
+        // variance close to shore, converging seamlessly into the regular
+        // ocean color-relief with no visible seam. The interpolate's last
+        // stop sits at 0 (sea level) and is fully transparent — MapLibre
+        // clamps values beyond a stop's range to that boundary stop, so
+        // every positive (land) elevation also clamps to the same
+        // transparent value, meaning land is automatically left untouched
+        // with no separate branch.
         {
           id: 'bathymetry-color-relief',
           type: 'color-relief',
@@ -1438,20 +1439,20 @@ function initTerrainMap() {
           paint: {
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
-              -6000, '#0a4f52',  // abyssal — genuine dark teal, not navy
-              -4000, '#0c646c',
-              -2000, '#0f7a87',
-              -1000, '#108898',
-              -500, '#1296aa',
-              -200, '#1296aa',   // continental-shelf plateau — flat here is intentional, real variance starts below
-              -100, '#14a0bf',
-              -50, '#15a8d0',
-              -30, '#16afdd',
-              -20, '#16b4e7',
-              -10, '#17b8f1',
-              -5, '#18bcf8',
-              -2, '#18befc',     // nearly identical to #18BFFF — the seamless handoff
-              0, 'rgba(24,190,252,0)', // sea level — fully transparent
+              -6000, '#168aa8',  // abyssal — clearly still "our blue", just a bit deeper, not a mismatched dark color
+              -4000, '#1690b2',
+              -2000, '#1799c0',
+              -1000, '#179fcb',
+              -500, '#17a5d4',
+              -200, '#17a9da',
+              -100, '#17aee3',
+              -50, '#18b3ec',
+              -30, '#18b7f2',
+              -20, '#18baf6',
+              -10, '#18bcfa',
+              -5, '#18bdfc',
+              -2, '#18befe',     // nearly identical to #18BFFF — the seamless handoff
+              0, 'rgba(24,190,254,0)', // sea level — fully transparent
             ],
           },
         },
@@ -1461,8 +1462,8 @@ function initTerrainMap() {
           source: 'bathymetryDem',
           layout: { visibility: bathymetryOn ? 'visible' : 'none' },
           paint: {
-            // same teal-derived family as the depth palette above
-            'hillshade-shadow-color': '#0c646c',
+            // same lighter, closer-to-base family as the depth palette above
+            'hillshade-shadow-color': '#1690b2',
             'hillshade-highlight-color': '#cdeeff',
             'hillshade-accent-color': '#18bfff',
             'hillshade-exaggeration': 0.6, // matches Seascape's own example — subtler than land, since depth color already carries most of the visual weight
@@ -1549,7 +1550,7 @@ function initTerrainMap() {
     maxPitch: 75,
     dragRotate: true,
     touchPitch: true,
-    minZoom: ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move'/'moveend' events start firing
+    minZoom: ZOOM_FLOOR_CURVE[0][1], // real baseline floor from the start (curve's own lowest-latitude value) — updateZoomFloor() tightens this dynamically once 'move' events start firing
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
@@ -1559,7 +1560,6 @@ function initTerrainMap() {
   terrainMapInstance.on('move', handlePoleWrap);
   terrainMapInstance.on('move', updateLocationReadout);
   terrainMapInstance.on('move', () => updateZoomFloor(false));
-  terrainMapInstance.on('moveend', () => updateZoomFloor(true));
   terrainMapInstance.on('move', updateZoomElevReadout);
   return terrainMapInstance;
 }
@@ -1657,17 +1657,33 @@ function computeZoomFloor(lat) {
   return curve[curve.length - 1][1]; // unreachable given the bounds checks above, but keeps this defined either way
 }
 
-// Called on every 'move' (mid-gesture, coarse rounding — calling
-// setMinZoom repeatedly WHILE a pinch/pan gesture is actively in progress
-// risks fighting MapLibre's own gesture handling, which computes deltas
-// from the transform's current state each frame) and on 'moveend' (gesture
-// settled, full precision — ensures the floor is exactly correct at rest).
-function updateZoomFloor(precise) {
+// Single 'move' listener, ALWAYS the same rounding precision, plus a
+// time-based throttle. An earlier version used two different rounding
+// precisions — coarse on 'move', precise on 'moveend' — intending to
+// reduce how often setMinZoom fires. Instead it created two DIFFERENT
+// target values for the same latitude (e.g. 5.25 coarse vs 5.2547
+// precise), and since setMinZoom itself can trigger another move/moveend
+// event (clamping the current zoom changes the transform), those two
+// values could ping-pong forever: precise sets 5.2547 -> fires a move
+// event -> coarse recomputes 5.25 (different) -> sets it -> fires
+// moveend -> precise recomputes 5.2547 again -> different from 5.25 ->
+// sets it again -> repeat indefinitely, fully self-sustaining with no
+// user input needed. A single consistent value can't do that: once
+// applied, ANY subsequent event (even one triggered by this very call)
+// computes the exact same number, hits the "nothing changed" guard below,
+// and the cascade stops on its own. The throttle is just a lighter-touch
+// version of the original goal (don't fight active gesture handling by
+// calling setMinZoom too often) without introducing a second value to
+// oscillate against.
+let lastZoomFloorApplyTime = 0;
+const ZOOM_FLOOR_THROTTLE_MS = 200;
+function updateZoomFloor(force) {
   if (!terrainMapInstance) return;
-  const raw = computeZoomFloor(terrainMapInstance.getCenter().lat);
-  const roundTo = precise ? 100 : 4; // precise: 0.01 steps; coarse: 0.25 steps, so ordinary panning doesn't call setMinZoom on every tiny latitude wobble
-  const floor = Math.round(raw * roundTo) / roundTo;
-  if (floor === lastAppliedZoomFloor) return; // skip redundant setMinZoom calls when nothing's actually changed
+  const floor = Math.round(computeZoomFloor(terrainMapInstance.getCenter().lat) * 100) / 100;
+  if (floor === lastAppliedZoomFloor) return; // nothing actually changed
+  const now = performance.now();
+  if (!force && now - lastZoomFloorApplyTime < ZOOM_FLOOR_THROTTLE_MS) return; // rate-limited — a genuine change will still go through on the next allowed tick, since lastAppliedZoomFloor was never updated for the skipped attempt
+  lastZoomFloorApplyTime = now;
   lastAppliedZoomFloor = floor;
   terrainMapInstance.setMinZoom(floor);
 }
@@ -1735,7 +1751,7 @@ async function enter3D(lon, lat) {
   enteredAt = performance.now(); // stamped after loadMapLibre() resolves, so the grace period covers actual settling time, not library-fetch time
   map3d.jumpTo({ center: [lon, lat], zoom, pitch: 60, bearing: -rotationGamma });
   lastPoleLat = map3d.getCenter().lat;
-  updateZoomFloor(true); // set immediately (precise) in case entry itself is already near a pole, rather than waiting for the first 'move' event
+  updateZoomFloor(true); // force=true: apply immediately, bypassing the throttle, in case entry itself is already near a pole
   updateZoomElevReadout();
   poleWrapping = false;
   setPoleFade(false);

@@ -55,21 +55,22 @@
   }
   #transitionFade.active { opacity: 1; }
   /* North/south pole portal: MapLibre's Mercator tile grid is finite vertically,
-     so crossing a pole is hidden behind a brief white, snow-like veil before
-     the camera reappears at the opposite latitude. */
+     so crossing a pole is hidden behind a brief beige veil (matches the
+     2D map's land color, --land, rather than white/snow) before the
+     camera reappears at the opposite latitude. */
   #poleFade {
     position: absolute; inset: 0; z-index: 8; pointer-events: none; opacity: 0;
     background:
-      radial-gradient(circle at 18% 24%, rgba(255,255,255,.95) 0 2px, transparent 3px),
-      radial-gradient(circle at 72% 18%, rgba(255,255,255,.82) 0 1.5px, transparent 3px),
-      radial-gradient(circle at 42% 68%, rgba(255,255,255,.9) 0 2px, transparent 4px),
-      radial-gradient(circle at 84% 74%, rgba(255,255,255,.78) 0 1.5px, transparent 3px),
-      rgba(255,255,255,.98);
+      radial-gradient(circle at 18% 24%, rgba(236,209,145,.95) 0 2px, transparent 3px),
+      radial-gradient(circle at 72% 18%, rgba(236,209,145,.82) 0 1.5px, transparent 3px),
+      radial-gradient(circle at 42% 68%, rgba(236,209,145,.9) 0 2px, transparent 4px),
+      radial-gradient(circle at 84% 74%, rgba(236,209,145,.78) 0 1.5px, transparent 3px),
+      rgba(236,209,145,.98);
     background-size: 150px 130px, 190px 160px, 170px 150px, 210px 180px, auto;
-    transition: opacity .48s ease;
+    transition: opacity .72s ease;
     animation: none;
   }
-  #poleFade.active { opacity: 1; animation: snowDrift 3.6s ease-in-out infinite; }
+  #poleFade.active { opacity: 1; animation: snowDrift 5.4s ease-in-out infinite; }
   @keyframes snowDrift {
     0%,100% { background-position: 0 0, 0 0, 0 0, 0 0, 0 0; }
     50% { background-position: 18px 10px, -14px 8px, 12px -9px, -16px -6px, 0 0; }
@@ -1164,7 +1165,7 @@ function addWeatherLayerIfReady() {
 let terrainMapInstance = null;
 
 const POLE_PORTAL_LAT = 82;
-const POLE_PORTAL_ENABLED = false; // temporarily disabled — gets in the way of testing the latitude-based zoom floor near the poles. Flip back to true once tuning's done; nothing else here needs to change.
+const POLE_PORTAL_ENABLED = true; // re-enabled: disabling it let the camera pan right up to the literal 85.05° Mercator edge (the zoom floor only guards against zooming OUT near a pole, not panning IN that close at any zoom), which is almost certainly the real cause of the jumpy freezes and white bar reported — genuinely unrenderable space near that edge, not a portal bug
 let poleWrapping = false;
 let lastPoleLat = 0;
 
@@ -1185,8 +1186,9 @@ function handlePoleWrap() {
   poleWrapping = true;
   const targetLat = crossedNorth ? -POLE_PORTAL_LAT : POLE_PORTAL_LAT;
   // The 180° longitude shift puts the view on the opposite side of the
-  // sphere-like pole crossing. The white veil hides the discontinuity and
-  // also masks the Mercator/Antarctica cutoff at the finite tile boundary.
+  // sphere-like pole crossing. The beige veil hides the discontinuity and
+  // also masks the Mercator cutoff at the finite tile boundary. All three
+  // timings are 1.5x the original (420/150/240 -> 630/225/360).
   const targetLng = c.lng + 180;
   setPoleFade(true);
   terrainMapInstance.stop();
@@ -1196,10 +1198,10 @@ function handlePoleWrap() {
     requestAnimationFrame(() => {
       setTimeout(() => {
         setPoleFade(false);
-        setTimeout(() => { poleWrapping = false; }, 240);
-      }, 150);
+        setTimeout(() => { poleWrapping = false; }, 360);
+      }, 225);
     });
-  }, 420);
+  }, 630);
 }
 
 // ============================================================
@@ -1214,122 +1216,86 @@ function handlePoleWrap() {
 // polygon, mask, floating mesh, or flat white overlay, and the ice
 // shading includes real hillshading computed from the DEM's own local
 // slope, not a faked gradient.
+//
+// Genuine Mapterhorn coverage gaps (their own docs note it started with a
+// European-DEM focus, not full global coverage) simply render nothing —
+// a fully transparent tile, letting the CSS fallback background (see
+// #terrainMap above) show through instead. An earlier version tried to
+// paper over gaps by borrowing and mirroring a nearby real tile's ice
+// texture; struck entirely — it was rendering phantom ice that wasn't
+// actually there, which is worse than an honest gap.
 // ============================================================
 let antarcticProtocolInstalled = false;
 
-// Real, successfully-decoded ice tiles, cached both so repeat requests are
-// free AND so a genuine Mapterhorn gap can borrow a nearby one. Bounded
-// size so long panning sessions don't grow this forever.
-const antarcticTileCache = new Map(); // "z/x/y" -> ImageData
-const ANTARCTIC_CACHE_MAX = 300;
-const antarcticInFlight = new Map(); // "z/x/y" -> Promise<ImageData|null>, so concurrent probes for the same tile share one fetch instead of duplicating it
-
-function cacheAntarcticTile(z, x, y, imageData) {
-  const key = `${z}/${x}/${y}`;
-  antarcticTileCache.set(key, imageData);
-  if (antarcticTileCache.size > ANTARCTIC_CACHE_MAX) {
-    antarcticTileCache.delete(antarcticTileCache.keys().next().value); // Map preserves insertion order, so this evicts the oldest
+// Fetches ONE Mapterhorn tile and decodes it into ice-shaded ImageData, or
+// null if that tile has no real data.
+async function decodeIceTile(z, x, y, abortController) {
+  const size = 512;
+  const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
+  let response;
+  try {
+    response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
+  } catch {
+    return null; // aborted or a network failure — treat the same as "no data here"
   }
-}
+  if (!response.ok) return null;
 
-// A genuine top-bottom mirror, not just a repeat — reads as a reflection
-// of real ice rather than an obviously-tiled duplicate.
-function mirrorImageDataVertically(imgData) {
-  const { width, height, data } = imgData;
-  const out = new ImageData(width, height);
-  for (let row = 0; row < height; row++) {
-    const srcRow = height - 1 - row;
-    out.data.set(data.subarray(srcRow * width * 4, (srcRow + 1) * width * 4), row * width * 4);
+  const bitmap = await createImageBitmap(await response.blob());
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0, size, size);
+  if (bitmap.close) bitmap.close();
+  const src = ctx.getImageData(0, 0, size, size).data;
+  const out = ctx.createImageData(size, size);
+
+  const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768; // Terrarium encoding
+  const n = Math.pow(2, z);
+  const latForPixel = (py) => {
+    const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
+    return 180 / Math.PI * Math.atan(Math.sinh(q));
+  };
+
+  // Same global elevation bands as the existing color-relief, but the
+  // Antarctic land palette is cool/white. Ocean remains transparent so
+  // the existing vivid-blue native DEM color-relief remains visible.
+  const icePalette = (e) => {
+    if (e < 100) return [222, 236, 242];
+    if (e < 500) { const t = (e - 100) / 400; return [Math.round(222 + 25 * t), Math.round(236 + 17 * t), Math.round(242 + 13 * t)]; }
+    if (e < 1500) return [247, 253, 255];
+    if (e < 2500) { const t = (e - 1500) / 1000; return [Math.round(247 - 18 * t), Math.round(253 - 15 * t), Math.round(255 - 5 * t)]; }
+    return [245, 250, 255];
+  };
+
+  for (let py = 0; py < size; py++) {
+    const lat = latForPixel(py);
+    for (let px = 0; px < size; px++) {
+      const si = (py * size + px) * 4;
+      const e = decode(si);
+      const di = si;
+
+      // Geographic condition computed per DEM pixel. Elevation keeps
+      // ocean blue: only actual positive land/ice is recolored.
+      const isAntarctic = lat <= -60.0 && e > 0.0;
+      if (!isAntarctic) {
+        out.data[di] = 0; out.data[di + 1] = 0; out.data[di + 2] = 0; out.data[di + 3] = 0;
+        continue;
+      }
+
+      let rgb = icePalette(e);
+      // Real hillshade from the same DEM, using adjacent pixels — not a
+      // fake gradient, calculated from the DEM's own slope.
+      const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
+      const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
+      const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
+      const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
+      const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
+      const shade = Math.max(0.68, Math.min(1.12, 0.94 - dx * 0.012 + dy * 0.012));
+      rgb = rgb.map(v => Math.max(0, Math.min(255, Math.round(v * shade))));
+      out.data[di] = rgb[0]; out.data[di + 1] = rgb[1]; out.data[di + 2] = rgb[2]; out.data[di + 3] = 255;
+    }
   }
   return out;
-}
-
-// Fetches ONE Mapterhorn tile and decodes it into ice-shaded ImageData, or
-// null if that tile has no real data. Used both for the tile MapLibre
-// actually asked for AND for probing candidate neighbors when that one is
-// missing — same logic either way, just the z/x/y differ.
-async function decodeIceTile(z, x, y, abortController) {
-  const key = `${z}/${x}/${y}`;
-  const cached = antarcticTileCache.get(key);
-  if (cached) return cached;
-  if (antarcticInFlight.has(key)) return antarcticInFlight.get(key);
-
-  const promise = (async () => {
-    const size = 512;
-    const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
-    let response;
-    try {
-      response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
-    } catch {
-      return null; // aborted or a network failure — treat the same as "no data here"
-    }
-    if (!response.ok) return null;
-
-    const bitmap = await createImageBitmap(await response.blob());
-    const canvas = document.createElement('canvas');
-    canvas.width = size; canvas.height = size;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(bitmap, 0, 0, size, size);
-    if (bitmap.close) bitmap.close();
-    const src = ctx.getImageData(0, 0, size, size).data;
-    const out = ctx.createImageData(size, size);
-
-    const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768; // Terrarium encoding
-    const n = Math.pow(2, z);
-    const latForPixel = (py) => {
-      const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
-      return 180 / Math.PI * Math.atan(Math.sinh(q));
-    };
-
-    // Same global elevation bands as the existing color-relief, but the
-    // Antarctic land palette is cool/white. Ocean remains transparent so
-    // the existing vivid-blue native DEM color-relief remains visible.
-    const icePalette = (e) => {
-      if (e < 100) return [222, 236, 242];
-      if (e < 500) { const t = (e - 100) / 400; return [Math.round(222 + 25 * t), Math.round(236 + 17 * t), Math.round(242 + 13 * t)]; }
-      if (e < 1500) return [247, 253, 255];
-      if (e < 2500) { const t = (e - 1500) / 1000; return [Math.round(247 - 18 * t), Math.round(253 - 15 * t), Math.round(255 - 5 * t)]; }
-      return [245, 250, 255];
-    };
-
-    for (let py = 0; py < size; py++) {
-      const lat = latForPixel(py);
-      for (let px = 0; px < size; px++) {
-        const si = (py * size + px) * 4;
-        const e = decode(si);
-        const di = si;
-
-        // Geographic condition computed per DEM pixel. Elevation keeps
-        // ocean blue: only actual positive land/ice is recolored.
-        const isAntarctic = lat <= -60.0 && e > 0.0;
-        if (!isAntarctic) {
-          out.data[di] = 0; out.data[di + 1] = 0; out.data[di + 2] = 0; out.data[di + 3] = 0;
-          continue;
-        }
-
-        let rgb = icePalette(e);
-        // Real hillshade from the same DEM, using adjacent pixels — not a
-        // fake gradient, calculated from the DEM's own slope.
-        const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
-        const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
-        const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
-        const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
-        const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
-        const shade = Math.max(0.68, Math.min(1.12, 0.94 - dx * 0.012 + dy * 0.012));
-        rgb = rgb.map(v => Math.max(0, Math.min(255, Math.round(v * shade))));
-        out.data[di] = rgb[0]; out.data[di + 1] = rgb[1]; out.data[di + 2] = rgb[2]; out.data[di + 3] = 255;
-      }
-    }
-    cacheAntarcticTile(z, x, y, out);
-    return out;
-  })();
-
-  antarcticInFlight.set(key, promise);
-  try {
-    return await promise;
-  } finally {
-    antarcticInFlight.delete(key);
-  }
 }
 
 async function imageDataToPngArrayBuffer(imgData) {
@@ -1350,40 +1316,15 @@ function installAntarcticTerrainProtocol() {
     const real = await decodeIceTile(z, x, y, abortController);
     if (real) return { data: await imageDataToPngArrayBuffer(real) };
 
-    // Mapterhorn's coverage has real gaps (their own docs note it started
-    // with a European-DEM focus, not full global coverage). Rather than
-    // leaving that as empty space, ACTIVELY fetch nearby candidate tiles
-    // ourselves — checking the cache alone isn't reliable here, since
-    // MapLibre requests many tiles in parallel and a 404 comes back far
-    // faster than a real tile's full fetch+decode+shade pipeline, so a
-    // neighbor's data usually hasn't finished processing yet even though
-    // it's "on its way". Fetching it ourselves removes that race entirely.
-    // Same column first (north/south neighbors read as the most visually
-    // coherent choice for "ice continuing into the distance"), then same
-    // row, expanding outward one ring at a time.
-    for (let r = 1; r <= 5; r++) {
-      const candidates = [[x, y - r], [x, y + r], [x - r, y], [x + r, y]];
-      for (const [nx, ny] of candidates) {
-        const nearby = await decodeIceTile(z, nx, ny, abortController);
-        if (nearby) {
-          const mirrored = mirrorImageDataVertically(nearby);
-          return { data: await imageDataToPngArrayBuffer(mirrored) };
-        }
-      }
-    }
-
-    // Nothing real within range — truly a void here. Fall back to blank,
-    // letting the CSS fallback background (see #terrainMap above) show
-    // through instead.
+    // A genuine gap — no borrowing/mirroring a neighbor's texture. Fall
+    // back to blank, letting the CSS fallback background (see #terrainMap
+    // above) show through instead.
     const blankCanvas = new OffscreenCanvas(512, 512);
     blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
     const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
     return { data: await blankBlob.arrayBuffer() };
   });
 }
-
-
-
 
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;

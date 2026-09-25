@@ -225,6 +225,14 @@
   </div>
 </div>
 
+<!-- TEMPORARY DEBUG AID: Eruda puts a floating console/inspector button
+     directly on the page, so console output (including the zoom-floor
+     logging below) is readable right on the phone — no Mac/Safari Web
+     Inspector pairing needed. Safe to delete this one script tag once
+     the zoom-floor bug is found; it does nothing but add a small
+     floating button. -->
+<script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+<script>eruda.init();</script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
 <script type="module">
@@ -1677,14 +1685,45 @@ function computeZoomFloor(lat) {
 // oscillate against.
 let lastZoomFloorApplyTime = 0;
 const ZOOM_FLOOR_THROTTLE_MS = 200;
+// Circuit breaker: if setMinZoom is somehow still being called in a tight
+// loop (a fixed repro at 79.56°N suggests there's a second cascade this
+// throttle alone isn't catching — possibly involving the weather layer's
+// zoom-based opacity fade, which happens to end at zoom 8, right where
+// this was reported stuck), this hard-stops it after a handful of calls
+// in quick succession rather than letting it spin forever, AND logs what
+// was happening so the real mechanism can actually be identified instead
+// of guessed at again.
+let zoomFloorCallTimestamps = [];
+const ZOOM_FLOOR_BREAKER_WINDOW_MS = 1500;
+const ZOOM_FLOOR_BREAKER_MAX_CALLS = 8;
+let zoomFloorBreakerTripped = false;
 function updateZoomFloor(force) {
   if (!terrainMapInstance) return;
   const floor = Math.round(computeZoomFloor(terrainMapInstance.getCenter().lat) * 100) / 100;
   if (floor === lastAppliedZoomFloor) return; // nothing actually changed
   const now = performance.now();
+
+  zoomFloorCallTimestamps.push(now);
+  zoomFloorCallTimestamps = zoomFloorCallTimestamps.filter(t => now - t < ZOOM_FLOOR_BREAKER_WINDOW_MS);
+  if (zoomFloorCallTimestamps.length > ZOOM_FLOOR_BREAKER_MAX_CALLS) {
+    if (!zoomFloorBreakerTripped) {
+      zoomFloorBreakerTripped = true;
+      console.error('gallery: zoom-floor circuit breaker tripped —', zoomFloorCallTimestamps.length,
+        'setMinZoom attempts within', ZOOM_FLOOR_BREAKER_WINDOW_MS, 'ms at lat', terrainMapInstance.getCenter().lat.toFixed(4),
+        'zoom', terrainMapInstance.getZoom().toFixed(4), '— pausing zoom-floor updates for 3s.');
+      setTimeout(() => {
+        zoomFloorBreakerTripped = false;
+        zoomFloorCallTimestamps = [];
+        console.warn('gallery: zoom-floor circuit breaker reset, resuming normal updates');
+      }, 3000);
+    }
+    return; // hard stop — don't call setMinZoom again until the breaker resets, regardless of throttle/force
+  }
+
   if (!force && now - lastZoomFloorApplyTime < ZOOM_FLOOR_THROTTLE_MS) return; // rate-limited — a genuine change will still go through on the next allowed tick, since lastAppliedZoomFloor was never updated for the skipped attempt
   lastZoomFloorApplyTime = now;
   lastAppliedZoomFloor = floor;
+  console.log('gallery: setMinZoom(' + floor + ') at lat', terrainMapInstance.getCenter().lat.toFixed(4), 'zoom', terrainMapInstance.getZoom().toFixed(4));
   terrainMapInstance.setMinZoom(floor);
 }
 

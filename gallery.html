@@ -351,7 +351,7 @@ const toggleNightBtn = document.getElementById('toggleNightBtn');
 let tonerLabelsOn = false;
 let nightModeOn = false;
 let terrainLinesOn = false;
-let bathymetryOn = false;
+let bathymetryOn = true;
 let bathymetryContoursOn = false;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
@@ -1037,6 +1037,7 @@ toggleContoursBtn.onclick = () => {
   toggleContoursBtn.classList.toggle('active', bathymetryContoursOn);
   applyLayerToggles();
 };
+toggleBathymetryBtn.classList.add('active');
 toggleNightBtn.onclick = () => {
   nightModeOn = !nightModeOn;
   toggleNightBtn.classList.toggle('active', nightModeOn);
@@ -1739,13 +1740,17 @@ function installNightLightsProtocol() {
     finally{ terrainMaterialLoading=false; }
   }
 
+  let terrainMaterialNightLoading=false;
   async function loadTerrainNightTexture(){
     if(terrainMaterialTextures && terrainMaterialTextures.night) return;
+    if(terrainMaterialNightLoading) return;
+    terrainMaterialNightLoading=true;
     try{
       const controller=new AbortController();
       terrainMaterialTextures.night=await materialBuildTexture('VIIRS_Night_Lights','default',controller.signal);
       if(terrainMapInstance) terrainMapInstance.triggerRepaint();
     }catch(e){ console.warn('gallery: custom night luminance texture failed',e); }
+    finally{ terrainMaterialNightLoading=false; }
   }
 
   function makeTerrainMaterialLayer(){
@@ -1938,7 +1943,7 @@ function installNightLightsProtocol() {
             float warm=smoothstep(.22,.78,rad);
             vec3 dryTone=vec3(0.95,0.67,0.34);
             vec3 wetTone=vec3(0.27,0.56,0.43);
-            vec3 tone=mix(vec3(0.55,0.62,0.50),mix(wetTone,dryTone,dry),0.72);
+            vec3 tone=mix(vec3(0.61,0.62,0.55),mix(wetTone,dryTone,dry),0.58);
             tone=mix(tone,coverTone,coverStrength);
             // Climate base: warm/dry regions lean mineral/golden; humid/wet
             // regions retain cooler living tones. Soil moisture prevents
@@ -1949,8 +1954,8 @@ function installNightLightsProtocol() {
             float redRock=rockSignal*heatDry*smoothstep(0.30,0.78,thermal)*(1.0-smoothstep(0.18,0.62,vegetation));
             tone=mix(tone,greyRock,rockSignal*0.34);
             tone=mix(tone,vec3(0.62,0.30,0.14),redRock*0.28);
-            float amount=(0.12 + 0.16*abs(warm-.5)*2.0)*u_radStrength;
-            amount += (0.10 + 0.14*abs(dry-.5)*2.0)*u_wetStrength;
+            float amount=(0.07 + 0.10*abs(warm-.5)*2.0)*u_radStrength;
+            amount += (0.06 + 0.09*abs(dry-.5)*2.0)*u_wetStrength;
             // Night keeps the climate material but suppresses the daytime
             // chroma so the separate warm artificial-light field remains clear.
             if(u_night>0.5){ tone=mix(vec3(0.48,0.58,0.60),tone,0.42); amount*=0.72; }
@@ -1992,22 +1997,22 @@ function installNightLightsProtocol() {
         }
         const bufferCache=terrainMaterialLayer._glBuffers.tiles;
         for(const t of terrainMaterialTiles){
-          const verts=new Float32Array(s*s*6), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
-          for(let j=0;j<s;j++) for(let i=0;i<s;i++){
-            const gx=t.x+(i/(s-1)), gy=t.y+(j/(s-1)); const wx=gx/n, wy=gy/n; const lat=materialLatFromY(wy); const z=materialZFromElevation(t.dem[j*s+i],lat);
-            const im=Math.max(0,i-1), ip=Math.min(s-1,i+1), jm=Math.max(0,j-1), jp=Math.min(s-1,j+1);
-            const dzdx=t.dem[j*s+ip]-t.dem[j*s+im], dzdy=t.dem[jp*s+i]-t.dem[jm*s+i];
-            const dLon=(2/n/(s-1))*360.0, dLat=(2/n/(s-1))*180.0;
-            const metersLon=Math.max(1.0,dLon*111320.0*Math.cos(lat*0.01745329252));
-            const metersLat=Math.max(1.0,dLat*111320.0);
-            const sx=dzdx/metersLon, sy=dzdy/metersLat;
-            const slopeDeg=Math.atan(Math.sqrt(sx*sx+sy*sy))*57.2957795;
-            const aspect=Math.atan2(-sx,sy);
-            verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect;
-          }
-          let ii=0; for(let j=0;j<s-1;j++) for(let i=0;i<s-1;i++){ const a=j*s+i,b=a+1,c=a+s,d=c+1; inds[ii++]=a;inds[ii++]=c;inds[ii++]=b;inds[ii++]=b;inds[ii++]=c;inds[ii++]=d; }
           let cached=bufferCache.get(t);
           if(!cached){
+            const verts=new Float32Array(s*s*8), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
+            for(let j=0;j<s;j++) for(let i=0;i<s;i++){
+              const gx=t.x+(i/(s-1)), gy=t.y+(j/(s-1)); const wx=gx/n, wy=gy/n; const lat=materialLatFromY(wy); const z=materialZFromElevation(t.dem[j*s+i],lat);
+              const im=Math.max(0,i-1), ip=Math.min(s-1,i+1), jm=Math.max(0,j-1), jp=Math.min(s-1,j+1);
+              const dzdx=t.dem[j*s+ip]-t.dem[j*s+im], dzdy=t.dem[jp*s+i]-t.dem[jm*s+i];
+              const dLon=(2/n/(s-1))*360.0, dLat=(2/n/(s-1))*180.0;
+              const metersLon=Math.max(1.0,dLon*111320.0*Math.cos(lat*0.01745329252));
+              const metersLat=Math.max(1.0,dLat*111320.0);
+              const sx=dzdx/metersLon, sy=dzdy/metersLat;
+              const slopeDeg=Math.atan(Math.sqrt(sx*sx+sy*sy))*57.2957795;
+              const aspect=Math.atan2(-sx,sy);
+              verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect;
+            }
+            let ii=0; for(let j=0;j<s-1;j++) for(let i=0;i<s-1;i++){ const a=j*s+i,b=a+1,c=a+s,d=c+1; inds[ii++]=a;inds[ii++]=c;inds[ii++]=b;inds[ii++]=b;inds[ii++]=c;inds[ii++]=d; }
             const vb=gl.createBuffer(), ib=gl.createBuffer();
             gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STATIC_DRAW);
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,inds,gl.STATIC_DRAW);
@@ -2081,6 +2086,7 @@ const NIGHT_COLORS = {
   light:{anchor:'viewport',color:'#d9e7ff',intensity:0.18}
 };
 function setNightPalette(on) {
+  window.__pendingNightPalette = on;
   if (!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
   const c=on?NIGHT_COLORS:DAY_COLORS;
   try {
@@ -2101,7 +2107,10 @@ function setNightPalette(on) {
     if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',0);
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
-  } catch(err) { console.warn('gallery: night palette update failed',err); }
+  } catch(err) {
+    console.warn('gallery: night palette update failed',err);
+    if (terrainMapInstance) terrainMapInstance.once('idle', () => { if (nightModeOn === on) setNightPalette(on); });
+  }
 }
 
 let terrainMapInstance = null;

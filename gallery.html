@@ -231,6 +231,7 @@
       <button id="toggleLinesBtn" class="layerToggle">terrain lines</button>
       <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
       <button id="toggleContoursBtn" class="layerToggle">contours</button>
+      <button id="toggleNightBtn" class="layerToggle" aria-pressed="false">night</button>
     </div>
     <button id="backBtn" aria-label="back to overview">
       <svg viewBox="0 0 32 32" width="20" height="20">
@@ -346,7 +347,9 @@ const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
 const toggleLinesBtn = document.getElementById('toggleLinesBtn');
 const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
 const toggleContoursBtn = document.getElementById('toggleContoursBtn');
+const toggleNightBtn = document.getElementById('toggleNightBtn');
 let tonerLabelsOn = false;
+let nightModeOn = false;
 let terrainLinesOn = false;
 let bathymetryOn = false;
 let bathymetryContoursOn = false;
@@ -1034,6 +1037,12 @@ toggleContoursBtn.onclick = () => {
   toggleContoursBtn.classList.toggle('active', bathymetryContoursOn);
   applyLayerToggles();
 };
+toggleNightBtn.onclick = () => {
+  nightModeOn = !nightModeOn;
+  toggleNightBtn.classList.toggle('active', nightModeOn);
+  toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
+  setNightPalette(nightModeOn);
+};
 
 // ============================================================
 // FLAT-TO-3D HANDOFF
@@ -1232,6 +1241,76 @@ function addWeatherLayerIfReady() {
     });
   };
   if (terrainMapInstance.isStyleLoaded()) addIt(); else terrainMapInstance.once('load', addIt);
+}
+
+let nightProtocolInstalled = false;
+function installNightLightsProtocol() {
+  if (nightProtocolInstalled) return;
+  nightProtocolInstalled = true;
+  maplibregl.addProtocol('nightlights', async (params, abortController) => {
+    const [z, x, y] = params.url.replace('nightlights://', '').split('/').map(Number);
+    const safeZ = Math.min(z, 8);
+    const scale = Math.pow(2, z - safeZ);
+    const safeX = Math.floor(x / scale), safeY = Math.floor(y / scale);
+    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/${safeZ}/${safeY}/${safeX}.png`;
+    const res = await fetch(url, { signal: abortController && abortController.signal });
+    if (!res.ok) throw new Error(`NASA VIIRS night-light tile ${res.status}`);
+    const bitmap = await createImageBitmap(await res.blob());
+    const size = bitmap.width;
+    const srcCanvas = new OffscreenCanvas(size, size);
+    const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+    srcCtx.drawImage(bitmap, 0, 0, size, size);
+    if (bitmap.close) bitmap.close();
+    const src = srcCtx.getImageData(0, 0, size, size).data;
+    const core = new OffscreenCanvas(size, size);
+    const cctx = core.getContext('2d');
+    const img = cctx.createImageData(size, size);
+    for (let i = 0; i < src.length; i += 4) {
+      const lum = Math.max(src[i], src[i + 1], src[i + 2]);
+      const t = Math.max(0, Math.min(1, (lum - 8) / 90));
+      img.data[i] = 255;
+      img.data[i + 1] = Math.round(188 + 45 * t);
+      img.data[i + 2] = Math.round(92 + 105 * t);
+      img.data[i + 3] = Math.round(255 * Math.pow(t, 0.72));
+    }
+    cctx.putImageData(img, 0, 0);
+    const out = new OffscreenCanvas(size, size);
+    const octx = out.getContext('2d');
+    octx.globalCompositeOperation = 'lighter';
+    octx.globalAlpha = 0.42; octx.filter = 'blur(8px)'; octx.drawImage(core, 0, 0);
+    octx.globalAlpha = 0.62; octx.filter = 'blur(2px)'; octx.drawImage(core, 0, 0);
+    octx.globalAlpha = 0.78; octx.filter = 'none'; octx.drawImage(core, 0, 0);
+    const blob = await out.convertToBlob({ type: 'image/png' });
+    return { data: await blob.arrayBuffer() };
+  });
+}
+
+const DAY_COLORS = {
+  relief: ['interpolate',['linear'],['elevation'],-200,'#18BFFF',0,'#18BFFF',5,'#a9d089',300,'#7fb85c',1000,'#96c46e',1700,'#c2b57e',2400,'#8fae5c',3100,'#d9c68f',4200,'#f5ecd4'],
+  hillShadow:'#c9ad7a', hillHighlight:'#fdf6e3', hillAccent:'#e0c896', lake:'#18BFFF', river:'#8fc3d6',
+  sky:{'sky-color':'#18BFFF','sky-horizon-blend':0.28,'horizon-color':'#72D8FF','horizon-fog-blend':0.85,'fog-color':'#ebf2f7','fog-ground-blend':0.85},
+  light:{anchor:'viewport',color:'#fff4d6',intensity:0.55}
+};
+const NIGHT_COLORS = {
+  relief: ['interpolate',['linear'],['elevation'],-200,'#071a2b',0,'#071a2b',5,'#182b24',300,'#21382a',1000,'#2a4030',1700,'#403d32',2400,'#303a2e',3100,'#50483a',4200,'#73766d'],
+  hillShadow:'#030914', hillHighlight:'#aab6b7', hillAccent:'#41535a', lake:'#0a3048', river:'#315d72',
+  sky:{'sky-color':'#02050d','sky-horizon-blend':0.34,'horizon-color':'#17283c','horizon-fog-blend':0.72,'fog-color':'#08111d','fog-ground-blend':0.72},
+  light:{anchor:'viewport',color:'#dce9ff',intensity:0.18}
+};
+function setNightPalette(on) {
+  if (!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
+  const c=on?NIGHT_COLORS:DAY_COLORS;
+  try {
+    if(terrainMapInstance.getLayer('color-relief')) terrainMapInstance.setPaintProperty('color-relief','color-relief-color',c.relief);
+    if(terrainMapInstance.getLayer('hillshade')) { terrainMapInstance.setPaintProperty('hillshade','hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty('hillshade','hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty('hillshade','hillshade-accent-color',c.hillAccent); }
+    if(terrainMapInstance.getLayer('lakes')) terrainMapInstance.setPaintProperty('lakes','fill-color',c.lake);
+    if(terrainMapInstance.getLayer('rivers')) terrainMapInstance.setPaintProperty('rivers','line-color',c.river);
+    if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#031522':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#537f95':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#0d4c6b':'#18bfff'); }
+    if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#03121f',-4000,'#041624',-2000,'#051b2b',-1000,'#062134',-500,'#07273d',-200,'#082d46',-50,'#0a344d',-2,'#0b3a54',0,'rgba(7,26,43,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1000,'#1484bc',-500,'#1187be',-200,'#1291c9',-100,'#149ad4',-50,'#15a3df',-30,'#16abe8',-20,'#16b1ef',-10,'#17b7f6',-5,'#18bcfb',-2,'#18befe',0,'rgba(24,190,254,0)']);
+    terrainMapInstance.setSky(c.sky);
+    terrainMapInstance.setLight(c.light);
+    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'visible':'none');
+  } catch(err) { console.warn('gallery: night palette update failed',err); }
 }
 
 let terrainMapInstance = null;
@@ -1474,6 +1553,7 @@ function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   if (!DEBUG_DISABLE_ANTARCTIC) installAntarcticTerrainProtocol();
   if (!DEBUG_DISABLE_WEATHER) initWeatherProtocol();
+  installNightLightsProtocol();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
     // Restore continuous east/west wrapping. MapLibre natively repeats the
@@ -1552,6 +1632,7 @@ function initTerrainMap() {
           tileSize: 512,
         },
         bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
+        nightLights: { type: 'raster', tiles: ['nightlights://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 8, attribution: 'Night lights: NASA VIIRS Black Marble / GIBS' },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -1690,6 +1771,7 @@ function initTerrainMap() {
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 0 }
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
+        { id: 'night-lights', type: 'raster', source: 'nightLights', layout: { visibility: 'none' }, paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.
@@ -1733,6 +1815,7 @@ function initTerrainMap() {
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
     applyLayerToggles();
+    setNightPalette(nightModeOn);
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {
         if (terrainMapInstance.getLayer(id)) terrainMapInstance.removeLayer(id);

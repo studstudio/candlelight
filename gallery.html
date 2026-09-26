@@ -1805,10 +1805,6 @@ function installNightLightsProtocol() {
             float riverSignal=detail.g;
             float riverProximity=smoothstep(0.015,0.32,riverSignal);
             float riverLush=riverProximity*(0.46+0.54*smoothstep(0.20,0.76,waterBalance));
-            // Geology is a material driver, not a painted geology map.  The
-            // broad lithology proxy is deliberately allowed to influence rocky
-            // terrain more strongly than climate/cover, while native MapLibre
-            // relief and hillshade remain the actual structure.
             vec3 geology=vec3(detail.b);
             float geologyTone=0.5*(geology.r+geology.g);
             float bareRock=1.0-smoothstep(0.10,0.48,vegetation);
@@ -1949,11 +1945,6 @@ function installNightLightsProtocol() {
             // rainfall alone from making every rainy region look saturated.
             tone=mix(tone,vec3(0.64,0.48,0.28),heatDry*0.10);
             tone=mix(tone,vec3(0.32,0.55,0.43),waterBalance*0.08);
-            // Rocky regions gain a cooler grey/charcoal mineral character.
-            // Warm, dry, sparsely vegetated rock gets a restrained iron-oxide
-            // response, which creates the Arizona/Southwest-style red-rock
-            // family without pretending the broad geology proxy identifies a
-            // particular formation.
             vec3 greyRock=vec3(0.47,0.46,0.43);
             float redRock=rockSignal*heatDry*smoothstep(0.30,0.78,thermal)*(1.0-smoothstep(0.18,0.62,vegetation));
             tone=mix(tone,greyRock,rockSignal*0.34);
@@ -1966,9 +1957,6 @@ function installNightLightsProtocol() {
             // Artificial light is a material emission contribution, not a
             // colored raster painted above the terrain. It only exists in
             // night mode and remains warmer than the cool moonlight.
-            // VIIRS has a long low-luminance tail. Lift that tail instead of
-            // merely enlarging the brightest pixels, so smaller towns, roads
-            // and settled corridors read as a denser living night landscape.
             float lightLift=pow(max(artificial,0.0),0.52);
             float emit = u_night * smoothstep(0.002,0.30,lightLift) * 1.38;
             vec3 warmLight = vec3(1.0,0.34,0.055);
@@ -1997,6 +1985,12 @@ function installNightLightsProtocol() {
         gl.uniformMatrix4fv(uMat,false,matrix); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_radStrength'),1.30); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_wetStrength'),1.35); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_night'),nightModeOn?1:0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_materialZoom'),terrainMapInstance?terrainMapInstance.getZoom():0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_agricultureStrength'),0.85);
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._rad); gl.uniform1i(uRad,0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._wet); gl.uniform1i(uWet,1); gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._worldCover); gl.uniform1i(uWorldCover,2); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._canopy); gl.uniform1i(uCanopy,3); gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._climate); gl.uniform1i(uClimate,4); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._detail); gl.uniform1i(uDetail,5); gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._night); gl.uniform1i(uNight,6); gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._land); gl.uniform1i(uLand,7);
         gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
+        // Cache the static custom-layer mesh on each DEM tile. Rebuilding and deleting
+        // WebGL buffers every frame creates needless driver/GC pressure on iPhone.
+        if(!terrainMaterialLayer._glBuffers || terrainMaterialLayer._glBuffers.gl!==gl){
+          terrainMaterialLayer._glBuffers={gl,tiles:new WeakMap()};
+        }
+        const bufferCache=terrainMaterialLayer._glBuffers.tiles;
         for(const t of terrainMaterialTiles){
           const verts=new Float32Array(s*s*6), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
           for(let j=0;j<s;j++) for(let i=0;i<s;i++){
@@ -2012,12 +2006,23 @@ function installNightLightsProtocol() {
             verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect;
           }
           let ii=0; for(let j=0;j<s-1;j++) for(let i=0;i<s-1;i++){ const a=j*s+i,b=a+1,c=a+s,d=c+1; inds[ii++]=a;inds[ii++]=c;inds[ii++]=b;inds[ii++]=b;inds[ii++]=c;inds[ii++]=d; }
-          const vb=gl.createBuffer(), ib=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STREAM_DRAW); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,32,0); gl.enableVertexAttribArray(aUv); gl.vertexAttribPointer(aUv,2,gl.FLOAT,false,32,12); gl.enableVertexAttribArray(aEnv); gl.vertexAttribPointer(aEnv,1,gl.FLOAT,false,32,20); gl.enableVertexAttribArray(aSlope); gl.vertexAttribPointer(aSlope,1,gl.FLOAT,false,32,24); gl.enableVertexAttribArray(aAspect); gl.vertexAttribPointer(aAspect,1,gl.FLOAT,false,32,28); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,inds,gl.STREAM_DRAW); gl.drawElements(gl.TRIANGLES,inds.length,gl.UNSIGNED_SHORT,0); gl.deleteBuffer(vb); gl.deleteBuffer(ib);
+          let cached=bufferCache.get(t);
+          if(!cached){
+            const vb=gl.createBuffer(), ib=gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,inds,gl.STATIC_DRAW);
+            cached={vb,ib,count:inds.length}; bufferCache.set(t,cached);
+          }
+          gl.bindBuffer(gl.ARRAY_BUFFER,cached.vb); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,32,0); gl.enableVertexAttribArray(aUv); gl.vertexAttribPointer(aUv,2,gl.FLOAT,false,32,12); gl.enableVertexAttribArray(aEnv); gl.vertexAttribPointer(aEnv,1,gl.FLOAT,false,32,20); gl.enableVertexAttribArray(aSlope); gl.vertexAttribPointer(aSlope,1,gl.FLOAT,false,32,24); gl.enableVertexAttribArray(aAspect); gl.vertexAttribPointer(aAspect,1,gl.FLOAT,false,32,28); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,cached.ib); gl.drawElements(gl.TRIANGLES,cached.count,gl.UNSIGNED_SHORT,0);
           gl.disableVertexAttribArray(aPos); gl.disableVertexAttribArray(aUv); gl.disableVertexAttribArray(aEnv); if(aSlope>=0) gl.disableVertexAttribArray(aSlope); if(aAspect>=0) gl.disableVertexAttribArray(aAspect);
         }
         gl.depthMask(true); gl.disable(gl.BLEND);
       },
-      onRemove(map,gl){ if(terrainMaterialLayer._rad)gl.deleteTexture(terrainMaterialLayer._rad); if(terrainMaterialLayer._wet)gl.deleteTexture(terrainMaterialLayer._wet); if(terrainMaterialLayer._worldCover)gl.deleteTexture(terrainMaterialLayer._worldCover); if(terrainMaterialLayer._canopy)gl.deleteTexture(terrainMaterialLayer._canopy); if(terrainMaterialLayer._climate)gl.deleteTexture(terrainMaterialLayer._climate); if(terrainMaterialLayer._detail)gl.deleteTexture(terrainMaterialLayer._detail); if(terrainMaterialLayer._night)gl.deleteTexture(terrainMaterialLayer._night); if(terrainMaterialLayer._land)gl.deleteTexture(terrainMaterialLayer._land); if(terrainMaterialProgram)gl.deleteProgram(terrainMaterialProgram); terrainMaterialLayer._rad=null;terrainMaterialLayer._wet=null;terrainMaterialLayer._worldCover=null;terrainMaterialLayer._canopy=null;terrainMaterialLayer._climate=null;terrainMaterialLayer._detail=null;terrainMaterialLayer._night=null;terrainMaterialLayer._land=null;terrainMaterialProgram=null;terrainMaterialReady=false; }
+      onRemove(map,gl){ if(terrainMaterialLayer._rad)gl.deleteTexture(terrainMaterialLayer._rad); if(terrainMaterialLayer._wet)gl.deleteTexture(terrainMaterialLayer._wet); if(terrainMaterialLayer._worldCover)gl.deleteTexture(terrainMaterialLayer._worldCover); if(terrainMaterialLayer._canopy)gl.deleteTexture(terrainMaterialLayer._canopy); if(terrainMaterialLayer._climate)gl.deleteTexture(terrainMaterialLayer._climate); if(terrainMaterialLayer._detail)gl.deleteTexture(terrainMaterialLayer._detail); if(terrainMaterialLayer._night)gl.deleteTexture(terrainMaterialLayer._night); if(terrainMaterialLayer._land)gl.deleteTexture(terrainMaterialLayer._land); if(terrainMaterialProgram)gl.deleteProgram(terrainMaterialProgram); terrainMaterialLayer._rad=null;terrainMaterialLayer._wet=null;terrainMaterialLayer._worldCover=null;terrainMaterialLayer._canopy=null;terrainMaterialLayer._climate=null;terrainMaterialLayer._detail=null;terrainMaterialLayer._night=null;terrainMaterialLayer._land=null;
+          if(terrainMaterialLayer._glBuffers && terrainMaterialLayer._glBuffers.gl===gl){
+            terrainMaterialLayer._glBuffers.tiles && terrainMaterialTiles.forEach(t=>{ const b=terrainMaterialLayer._glBuffers.tiles.get(t); if(b){gl.deleteBuffer(b.vb);gl.deleteBuffer(b.ib);} });
+          }
+          terrainMaterialLayer._glBuffers=null; terrainMaterialProgram=null;terrainMaterialReady=false; }
     };
     return terrainMaterialLayer;
   }

@@ -1246,13 +1246,17 @@ function addWeatherLayerIfReady() {
 let nightProtocolInstalled = false;
 let environmentalProtocolInstalled = false;
 let snowTerrainProtocolInstalled = false;
+let climateProtocolInstalled = false;
 const ENVIRONMENT_RADIATION_Z = 6;
+const ENVIRONMENT_CLIMATE_Z = 5;
+const ENVIRONMENT_CLIMATE_TIME = '2020-07-01';
 const ENVIRONMENT_RADIATION_TIME = '2020-07-01';
 
 function installEnvironmentalProtocols() {
-  if (environmentalProtocolInstalled && snowTerrainProtocolInstalled) return;
+  if (environmentalProtocolInstalled && snowTerrainProtocolInstalled && climateProtocolInstalled) return;
   environmentalProtocolInstalled = true;
   snowTerrainProtocolInstalled = true;
+  climateProtocolInstalled = true;
 
   // NASA GIBS MERRA-2 incident shortwave over land. This is a real global
   // surface-radiation field, but we deliberately remap it to a very small
@@ -1291,6 +1295,42 @@ function installEnvironmentalProtocols() {
       d[i + 1] = Math.round(82 + 86 * (1 - Math.abs(signal - 0.5) * 1.25));
       d[i + 2] = Math.round(94 + 58 * (1 - signal));
       d[i + 3] = Math.round(255 * (0.055 + 0.095 * Math.abs(signal - 0.5) * 2));
+    }
+    ctx.putImageData(img, 0, 0);
+    return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
+  });
+
+  // NASA MERRA-2 total precipitation. This is the first climate field: it
+  // is deliberately rendered as a quiet material influence rather than a
+  // visible precipitation map. Wet regions get a slightly cooler/deeper
+  // material response; dry regions remain warmer/lighter.
+  maplibregl.addProtocol('terrain-climate', async (params, abortController) => {
+    const [z0, x0, y0] = params.url.replace('terrain-climate://', '').split('/').map(Number);
+    const z = Math.min(z0, ENVIRONMENT_CLIMATE_Z);
+    const scale = Math.pow(2, z0 - z);
+    const x = Math.floor(x0 / scale);
+    const y = Math.floor(y0 / scale);
+    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MERRA2_Precipitation_Bias_Corrected_Monthly/default/${ENVIRONMENT_CLIMATE_TIME}/GoogleMapsCompatible_Level${ENVIRONMENT_CLIMATE_Z}/${z}/${y}/${x}.png`;
+    const res = await fetch(url, { signal: abortController && abortController.signal });
+    if (!res.ok) throw new Error(`NASA precipitation tile ${res.status}`);
+    const bitmap = await createImageBitmap(await res.blob());
+    const size = bitmap.width;
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0);
+    if (bitmap.close) bitmap.close();
+    const img = ctx.getImageData(0, 0, size, size);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3];
+      if (a < 10) { d[i + 3] = 0; continue; }
+      const lum = (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      const wet = Math.max(0, Math.min(1, 1 - Math.pow(lum, 0.72)));
+      // Very low-amplitude cool mineral tint. No source colors survive.
+      d[i] = Math.round(64 + 34 * (1 - wet));
+      d[i + 1] = Math.round(92 + 32 * (1 - wet));
+      d[i + 2] = Math.round(82 + 34 * wet);
+      d[i + 3] = Math.round(255 * (0.035 + 0.065 * wet));
     }
     ctx.putImageData(img, 0, 0);
     return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
@@ -1371,11 +1411,6 @@ function installNightLightsProtocol() {
   nightProtocolInstalled = true;
   maplibregl.addProtocol('nightlights', async (params, abortController) => {
     const [z, x, y] = params.url.replace('nightlights://', '').split('/').map(Number);
-    // Keep the measured VIIRS field as a continuous luminance field.  Do not
-    // turn individual pixels into points: that is what made the previous
-    // version look like a blurry low-poly constellation when zoomed in.
-    // The source is ~500 m at the equator, so the visual treatment should
-    // read as diffuse light emitted by inhabited regions, not as light bulbs.
     const safeZ = Math.min(z, 8);
     const scale = Math.pow(2, z - safeZ);
     const safeX = Math.floor(x / scale), safeY = Math.floor(y / scale);
@@ -1386,53 +1421,48 @@ function installNightLightsProtocol() {
     const size = bitmap.width;
     const srcCanvas = new OffscreenCanvas(size, size);
     const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+    srcCtx.imageSmoothingEnabled = true;
     srcCtx.drawImage(bitmap, 0, 0, size, size);
     if (bitmap.close) bitmap.close();
     const src = srcCtx.getImageData(0, 0, size, size).data;
 
-    // Convert the measured radiance visualization into a restrained alpha
-    // field.  A soft threshold suppresses sensor/background noise while
-    // preserving the broad spatial structure of cities and lit corridors.
+    // Treat VIIRS as a luminance field, not as colored objects. The output
+    // pixels are nearly white/warm-white with very low alpha, so the terrain
+    // beneath remains visible and the light reads as brightness rather than
+    // painted yellow/gray spots. A gamma curve gives broad faint urban glow
+    // while compressing the brightest sources.
     const field = new OffscreenCanvas(size, size);
-    const fctx = field.getContext('2d');
+    const fctx = field.getContext('2d', { willReadFrequently: true });
     const img = fctx.createImageData(size, size);
     for (let i = 0; i < src.length; i += 4) {
       const lum = (0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2]) / 255;
-      // Much softer than the old peak detector.  The curve keeps strong
-      // sources visible but prevents the brightest cities from becoming
-      // giant painted spots.
-      const signal = Math.max(0, Math.min(1, (lum - 0.075) / 0.62));
-      const shaped = Math.pow(signal, 1.65);
+      const signal = Math.max(0, Math.min(1, (lum - 0.10) / 0.58));
+      const shaped = Math.pow(signal, 1.95);
+      // Artificial light is deliberately warmer than the cool moonlight
+      // used by MapLibre's global night lighting. Keep it restrained: this
+      // is an atmospheric luminance contribution, not a colored overlay.
       img.data[i] = 255;
-      img.data[i + 1] = 214;
-      img.data[i + 2] = 128;
-      img.data[i + 3] = Math.round(255 * shaped * 0.48);
+      img.data[i + 1] = 210;
+      img.data[i + 2] = 156;
+      img.data[i + 3] = Math.round(255 * shaped * 0.095);
     }
     fctx.putImageData(img, 0, 0);
 
-    // Two continuous glows: a very broad atmospheric luminance field and a
-    // tighter, much dimmer near-field.  There are deliberately NO hot cores
-    // or circular point lights.  This lets coastlines, cities and corridors
-    // emerge as luminous regions while the underlying terrain remains visible.
+    // Screen-like internal accumulation creates atmospheric luminance without
+    // discrete circles. The tight component is intentionally tiny.
     const out = new OffscreenCanvas(size, size);
     const octx = out.getContext('2d');
     octx.clearRect(0, 0, size, size);
-    octx.globalCompositeOperation = 'lighter';
-
-    octx.filter = 'blur(5px)';
-    octx.globalAlpha = 0.42;
+    octx.globalCompositeOperation = 'screen';
+    octx.filter = 'blur(8px)';
+    octx.globalAlpha = 0.46;
     octx.drawImage(field, 0, 0);
-
-    octx.filter = 'blur(1.4px)';
-    octx.globalAlpha = 0.24;
+    octx.filter = 'blur(3.4px)';
+    octx.globalAlpha = 0.18;
     octx.drawImage(field, 0, 0);
-
-    // A tiny amount of the source field is retained at low alpha so the
-    // luminance remains spatially faithful without becoming a visible raster.
     octx.filter = 'none';
-    octx.globalAlpha = 0.055;
+    octx.globalAlpha = 0.018;
     octx.drawImage(field, 0, 0);
-
     return { data: await (await out.convertToBlob({ type: 'image/png' })).arrayBuffer() };
   });
 }
@@ -1447,7 +1477,7 @@ const NIGHT_COLORS = {
   relief: ['interpolate',['linear'],['elevation'],-200,'#071a2b',0,'#071a2b',5,'#182b24',300,'#21382a',1000,'#2a4030',1700,'#403d32',2400,'#303a2e',3100,'#50483a',4200,'#73766d'],
   hillShadow:'#030914', hillHighlight:'#aab6b7', hillAccent:'#41535a', lake:'#0a3048', river:'#315d72',
   sky:{'sky-color':'#02050d','sky-horizon-blend':0.34,'horizon-color':'#17283c','horizon-fog-blend':0.72,'fog-color':'#08111d','fog-ground-blend':0.72},
-  light:{anchor:'viewport',color:'#dce9ff',intensity:0.18}
+  light:{anchor:'viewport',color:'#d9e7ff',intensity:0.18}
 };
 function setNightPalette(on) {
   if (!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
@@ -1457,12 +1487,14 @@ function setNightPalette(on) {
     if(terrainMapInstance.getLayer('hillshade')) { terrainMapInstance.setPaintProperty('hillshade','hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty('hillshade','hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty('hillshade','hillshade-accent-color',c.hillAccent); }
     if(terrainMapInstance.getLayer('lakes')) terrainMapInstance.setPaintProperty('lakes','fill-color',c.lake);
     if(terrainMapInstance.getLayer('rivers')) terrainMapInstance.setPaintProperty('rivers','line-color',c.river);
-    if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#04131d':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#739b9c':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#326975':'#18bfff'); }
-    if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#020b13',-4500,'#02101a',-3000,'#031721',-2000,'#041c27',-1200,'#062630',-700,'#0a3540',-450,'#154b57',-300,'#28636b',-220,'#4b8081',-160,'#659a98',-110,'#72a7a2',-70,'#669b99',-40,'#4e8587',-20,'#376c78',-8,'#215367',-2,'#123e59',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1000,'#1484bc',-500,'#1187be',-200,'#1291c9',-100,'#149ad4',-50,'#15a3df',-30,'#16abe8',-20,'#16b1ef',-10,'#17b7f6',-5,'#18bcfb',-2,'#18befe',0,'rgba(24,190,254,0)']);
+    if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#031522':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#75c4e3':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#167fa8':'#18bfff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-exaggeration',on?0.72:0.6); }
+    if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#031522',-4500,'#041b2b',-3000,'#05253a',-2000,'#07344f',-1200,'#08435f',-800,'#0a526f',-500,'#0d617f',-350,'#107393',-250,'#1484a8',-180,'#178fb8',-120,'#1a98c4',-80,'#1c9bc8',-50,'#1a93c0',-30,'#1686b0',-15,'#126f99',-5,'#0d5b83',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1000,'#1484bc',-500,'#1187be',-200,'#1291c9',-100,'#149ad4',-50,'#15a3df',-30,'#16abe8',-20,'#16b1ef',-10,'#17b7f6',-5,'#18bcfb',-2,'#18befe',0,'rgba(24,190,254,0)']);
     terrainMapInstance.setSky(c.sky);
     terrainMapInstance.setLight(c.light);
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'visible':'none');
-    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setPaintProperty('terrain-radiation','raster-opacity',on?0.075:0.21);
+    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setPaintProperty('terrain-radiation','raster-opacity',on?0.035:0.21);
+    if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setPaintProperty('terrain-climate','raster-opacity',on?0.018:0.08);
+    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',on?['interpolate',['linear'],['zoom'],0,0.42,5,0.34,7.5,0.22,8.5,0.07,9,0]:0);
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
   } catch(err) { console.warn('gallery: night palette update failed',err); }
 }
@@ -1789,6 +1821,7 @@ function initTerrainMap() {
         bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
         nightLights: { type: 'raster', tiles: ['nightlights://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 8, attribution: 'Night lights: NASA VIIRS Black Marble / GIBS' },
         terrainRadiation: { type: 'raster', tiles: ['terrain-radiation://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 10, attribution: 'Radiation: NASA MERRA-2 / GIBS' },
+        terrainClimate: { type: 'raster', tiles: ['terrain-climate://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 8, attribution: 'Climate: NASA MERRA-2 / GIBS' },
         snowTerrain: { type: 'raster', tiles: ['snow-terrain://{z}/{x}/{y}'], tileSize: 512, minzoom: 0, maxzoom: 10, attribution: 'Snow mask: Mapterhorn elevation / Copernicus DEM' },
       },
       layers: [
@@ -1820,6 +1853,12 @@ function initTerrainMap() {
           minzoom: 0, maxzoom: 10,
           paint: { 'raster-opacity': 0.21, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
+        {
+          id: 'terrain-climate', type: 'raster', source: 'terrainClimate',
+          minzoom: 0, maxzoom: 8,
+          paint: { 'raster-opacity': 0.08, 'raster-fade-duration': 500, 'raster-resampling': 'linear' }
+        },
+        { id: 'night-lights', type: 'raster', source: 'nightLights', layout: { visibility: 'none' }, paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' } },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
@@ -1931,7 +1970,6 @@ function initTerrainMap() {
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
-        { id: 'night-lights', type: 'raster', source: 'nightLights', layout: { visibility: 'none' }, paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.

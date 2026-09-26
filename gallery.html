@@ -1244,6 +1244,128 @@ function addWeatherLayerIfReady() {
 }
 
 let nightProtocolInstalled = false;
+let environmentalProtocolInstalled = false;
+let snowTerrainProtocolInstalled = false;
+const ENVIRONMENT_RADIATION_Z = 6;
+const ENVIRONMENT_RADIATION_TIME = '2020-07-01';
+
+function installEnvironmentalProtocols() {
+  if (environmentalProtocolInstalled && snowTerrainProtocolInstalled) return;
+  environmentalProtocolInstalled = true;
+  snowTerrainProtocolInstalled = true;
+
+  // NASA GIBS MERRA-2 incident shortwave over land. This is a real global
+  // surface-radiation field, but we deliberately remap it to a very small
+  // material shift instead of displaying the source palette as a heatmap.
+  maplibregl.addProtocol('terrain-radiation', async (params, abortController) => {
+    const [z0, x0, y0] = params.url.replace('terrain-radiation://', '').split('/').map(Number);
+    const z = Math.min(z0, ENVIRONMENT_RADIATION_Z);
+    const scale = Math.pow(2, z0 - z);
+    const x = Math.floor(x0 / scale);
+    const y = Math.floor(y0 / scale);
+    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MERRA2_Incident_Shortwave_Over_Land_Monthly/default/${ENVIRONMENT_RADIATION_TIME}/GoogleMapsCompatible_Level${ENVIRONMENT_RADIATION_Z}/${z}/${y}/${x}.png`;
+    const res = await fetch(url, { signal: abortController && abortController.signal });
+    if (!res.ok) throw new Error(`NASA radiation tile ${res.status}`);
+    const bitmap = await createImageBitmap(await res.blob());
+    const size = bitmap.width;
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0);
+    if (bitmap.close) bitmap.close();
+    const img = ctx.getImageData(0, 0, size, size);
+    const d = img.data;
+
+    // Convert the source visualization to a restrained material signal.
+    // The source is not shown directly: its luminance controls only the
+    // strength of a warm/cool shift in the existing terrain palette.
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3];
+      if (a < 10) { d[i + 3] = 0; continue; }
+      const lum = (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      const signal = Math.max(0, Math.min(1, (lum - 0.12) / 0.76));
+      // Low-radiation land gets a cool/quiet mineral cast; high-radiation
+      // land gets a barely warmer, sun-baked cast. Alpha is intentionally
+      // low so terrain relief and hillshade remain visually dominant.
+      const warm = signal * 0.72 + 0.14;
+      d[i] = Math.round(70 + 105 * warm);
+      d[i + 1] = Math.round(82 + 86 * (1 - Math.abs(signal - 0.5) * 1.25));
+      d[i + 2] = Math.round(94 + 58 * (1 - signal));
+      d[i + 3] = Math.round(255 * (0.055 + 0.095 * Math.abs(signal - 0.5) * 2));
+    }
+    ctx.putImageData(img, 0, 0);
+    return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
+  });
+
+  // Snow is derived from the SAME global Mapterhorn DEM already used for
+  // terrain. No second global white raster is needed. The mask combines
+  // latitude, elevation and a smooth snowline so permanent ice sheets and
+  // high mountain snow emerge from the terrain itself.
+  maplibregl.addProtocol('snow-terrain', async (params, abortController) => {
+    const [z, x, y] = params.url.replace('snow-terrain://', '').split('/').map(Number);
+    const size = 512;
+    const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
+    const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
+    if (!response.ok) {
+      const blank = new OffscreenCanvas(size, size);
+      const blob = await blank.convertToBlob({ type: 'image/png' });
+      return { data: await blob.arrayBuffer() };
+    }
+    const bitmap = await createImageBitmap(await response.blob());
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, size, size);
+    if (bitmap.close) bitmap.close();
+    const src = ctx.getImageData(0, 0, size, size).data;
+    const out = ctx.createImageData(size, size);
+    const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768;
+    const n = Math.pow(2, z);
+    const smoothstep = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+    const latForPixel = (py) => {
+      const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
+      return 180 / Math.PI * Math.atan(Math.sinh(q));
+    };
+
+    for (let py = 0; py < size; py++) {
+      const lat = latForPixel(py);
+      const absLat = Math.abs(lat);
+      // Permanent ice-sheet rule: Greenland/Antarctica remain snow/ice even
+      // where the generalized alpine snowline would otherwise be too high.
+      const iceCap = (lat <= -60 || lat >= 70);
+      // Generalized climatic snowline, falling with latitude. It is a soft
+      // threshold rather than a hard contour, so mountain snow feathers into
+      // the underlying terrain.
+      const snowline = absLat < 20 ? 4700 :
+                       absLat < 30 ? 4000 - (absLat - 20) * 45 :
+                       absLat < 40 ? 3550 - (absLat - 30) * 75 :
+                       absLat < 50 ? 2800 - (absLat - 40) * 105 :
+                       absLat < 60 ? 1750 - (absLat - 50) * 105 :
+                       absLat < 70 ? 700 - (absLat - 60) * 35 : 450;
+      for (let px = 0; px < size; px++) {
+        const si = (py * size + px) * 4;
+        const e = decode(si);
+        if (e <= 50) continue;
+        let snow = smoothstep(snowline - 450, snowline + 350, e);
+        if (iceCap) snow = Math.max(snow, 0.96);
+        if (snow < 0.035) continue;
+
+        // DEM-derived local shade, kept restrained so snow still reads white.
+        const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
+        const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
+        const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
+        const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
+        const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
+        const shade = Math.max(0.72, Math.min(1.10, 0.94 - dx * 0.010 + dy * 0.010));
+        const di = si;
+        out.data[di] = Math.round(244 * shade);
+        out.data[di + 1] = Math.round(248 * shade);
+        out.data[di + 2] = Math.round(250 * shade);
+        out.data[di + 3] = Math.round(255 * Math.min(0.92, snow));
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+    return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
+  });
+}
 function installNightLightsProtocol() {
   if (nightProtocolInstalled) return;
   nightProtocolInstalled = true;
@@ -1310,6 +1432,8 @@ function setNightPalette(on) {
     terrainMapInstance.setSky(c.sky);
     terrainMapInstance.setLight(c.light);
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'visible':'none');
+    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setPaintProperty('terrain-radiation','raster-opacity',on?0.055:0.14);
+    if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
   } catch(err) { console.warn('gallery: night palette update failed',err); }
 }
 
@@ -1554,6 +1678,7 @@ function initTerrainMap() {
   if (!DEBUG_DISABLE_ANTARCTIC) installAntarcticTerrainProtocol();
   if (!DEBUG_DISABLE_WEATHER) initWeatherProtocol();
   installNightLightsProtocol();
+  installEnvironmentalProtocols();
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
     // Restore continuous east/west wrapping. MapLibre natively repeats the
@@ -1633,6 +1758,8 @@ function initTerrainMap() {
         },
         bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
         nightLights: { type: 'raster', tiles: ['nightlights://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 8, attribution: 'Night lights: NASA VIIRS Black Marble / GIBS' },
+        terrainRadiation: { type: 'raster', tiles: ['terrain-radiation://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 10, attribution: 'Radiation: NASA MERRA-2 / GIBS' },
+        snowTerrain: { type: 'raster', tiles: ['snow-terrain://{z}/{x}/{y}'], tileSize: 512, minzoom: 0, maxzoom: 10, attribution: 'Snow mask: Mapterhorn elevation / Copernicus DEM' },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -1657,6 +1784,11 @@ function initTerrainMap() {
               4200, '#f5ecd4',   // peaks, lightest tone in the palette
             ],
           },
+        },
+        {
+          id: 'terrain-radiation', type: 'raster', source: 'terrainRadiation',
+          minzoom: 0, maxzoom: 10,
+          paint: { 'raster-opacity': 0.14, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
@@ -1760,15 +1892,13 @@ function initTerrainMap() {
             'raster-fade-duration': 0
           }
         },
-        // Real DEM-derived ice shading, draped directly onto the terrain
-        // surface — see installAntarcticTerrainProtocol() above.
+        // Snow/ice is derived from the same global DEM rather than a full-world
+        // white Antarctica raster. It is intentionally one compact procedural
+        // material layer: permanent ice sheets + latitude/elevation snowline.
         {
-          id: 'antarctic-relief',
-          type: 'raster',
-          source: 'antarcticRelief',
-          minzoom: 0,
-          maxzoom: 14,
-          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 0 }
+          id: 'snow-terrain', type: 'raster', source: 'snowTerrain',
+          minzoom: 0, maxzoom: 10,
+          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'night-lights', type: 'raster', source: 'nightLights', layout: { visibility: 'none' }, paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' } },
@@ -1826,8 +1956,6 @@ function initTerrainMap() {
       console.warn('gallery: DEBUG_DISABLE_BATHYMETRY — bathymetry sources/layers fully removed');
     }
     if (DEBUG_DISABLE_ANTARCTIC) {
-      if (terrainMapInstance.getLayer('antarctic-relief')) terrainMapInstance.removeLayer('antarctic-relief');
-      if (terrainMapInstance.getSource('antarcticRelief')) terrainMapInstance.removeSource('antarcticRelief');
       console.warn('gallery: DEBUG_DISABLE_ANTARCTIC — antarctic-relief layer/source fully removed');
     }
   });

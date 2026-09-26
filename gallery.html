@@ -1371,6 +1371,11 @@ function installNightLightsProtocol() {
   nightProtocolInstalled = true;
   maplibregl.addProtocol('nightlights', async (params, abortController) => {
     const [z, x, y] = params.url.replace('nightlights://', '').split('/').map(Number);
+    // VIIRS Black Marble / GIBS is a real ~15 arc-second product, but the
+    // display tile is still a relatively coarse raster.  Instead of blurring
+    // every bright pixel into a low-resolution painted patch, turn local
+    // radiance maxima into individual light sources and render those sources
+    // as smooth GPU-friendly radial glows on a 2x canvas.
     const safeZ = Math.min(z, 8);
     const scale = Math.pow(2, z - safeZ);
     const safeX = Math.floor(x / scale), safeY = Math.floor(y / scale);
@@ -1384,26 +1389,81 @@ function installNightLightsProtocol() {
     srcCtx.drawImage(bitmap, 0, 0, size, size);
     if (bitmap.close) bitmap.close();
     const src = srcCtx.getImageData(0, 0, size, size).data;
-    const core = new OffscreenCanvas(size, size);
-    const cctx = core.getContext('2d');
-    const img = cctx.createImageData(size, size);
-    for (let i = 0; i < src.length; i += 4) {
-      const lum = Math.max(src[i], src[i + 1], src[i + 2]);
-      const t = Math.max(0, Math.min(1, (lum - 8) / 90));
-      img.data[i] = 255;
-      img.data[i + 1] = Math.round(188 + 45 * t);
-      img.data[i + 2] = Math.round(92 + 105 * t);
-      img.data[i + 3] = Math.round(255 * Math.pow(t, 0.72));
-    }
-    cctx.putImageData(img, 0, 0);
-    const out = new OffscreenCanvas(size, size);
+
+    // Render at 2x resolution.  We only promote genuine local maxima to
+    // lights, which removes the old "painted raster" appearance while still
+    // preserving the spatial pattern of the measured VIIRS field.
+    const scaleOut = 2;
+    const outSize = size * scaleOut;
+    const out = new OffscreenCanvas(outSize, outSize);
     const octx = out.getContext('2d');
+    octx.clearRect(0, 0, outSize, outSize);
+
+    const lumAt = (px, py) => {
+      px = Math.max(0, Math.min(size - 1, px));
+      py = Math.max(0, Math.min(size - 1, py));
+      const i = (py * size + px) * 4;
+      // GIBS VIIRS_Night_Lights is rendered grayscale; use luminance anyway
+      // so this remains robust if the service changes its visualization.
+      return (0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2]);
+    };
+
+    // Collect peaks first so nearby pixels do not each become a giant blob.
+    const peaks = [];
+    for (let py = 2; py < size - 2; py += 1) {
+      for (let px = 2; px < size - 2; px += 1) {
+        const lum = lumAt(px, py);
+        const t = Math.max(0, Math.min(1, (lum - 16) / 82));
+        if (t < 0.035) continue;
+        let isPeak = true;
+        for (let oy = -2; oy <= 2 && isPeak; oy++) {
+          for (let ox = -2; ox <= 2; ox++) {
+            if (!ox && !oy) continue;
+            if (lumAt(px + ox, py + oy) > lum + 1) { isPeak = false; break; }
+          }
+        }
+        if (!isPeak) continue;
+        peaks.push({ px, py, t, lum });
+      }
+    }
+
+    // Draw the weakest diffuse glow first, then a tight colored halo and a
+    // tiny hot core.  This creates "light emitting from the ground" rather
+    // than a blurred copy of the satellite image.
     octx.globalCompositeOperation = 'lighter';
-    octx.globalAlpha = 0.42; octx.filter = 'blur(8px)'; octx.drawImage(core, 0, 0);
-    octx.globalAlpha = 0.62; octx.filter = 'blur(2px)'; octx.drawImage(core, 0, 0);
-    octx.globalAlpha = 0.78; octx.filter = 'none'; octx.drawImage(core, 0, 0);
-    const blob = await out.convertToBlob({ type: 'image/png' });
-    return { data: await blob.arrayBuffer() };
+    for (const p of peaks) {
+      const x2 = p.px * scaleOut + scaleOut * 0.5;
+      const y2 = p.py * scaleOut + scaleOut * 0.5;
+      const strength = Math.pow(p.t, 0.72);
+      const radius = 2.5 + 12 * strength;
+      const g = octx.createRadialGradient(x2, y2, 0, x2, y2, radius);
+      g.addColorStop(0, `rgba(255,246,202,${0.86 * strength})`);
+      g.addColorStop(0.12, `rgba(255,218,137,${0.62 * strength})`);
+      g.addColorStop(0.38, `rgba(255,177,72,${0.22 * strength})`);
+      g.addColorStop(1, 'rgba(255,150,50,0)');
+      octx.fillStyle = g;
+      octx.beginPath();
+      octx.arc(x2, y2, radius, 0, Math.PI * 2);
+      octx.fill();
+
+      // Extremely small white/yellow source point; never a square raster cell.
+      if (strength > 0.32) {
+        const r = 0.65 + 1.5 * Math.pow(strength, 1.4);
+        octx.fillStyle = `rgba(255,248,218,${0.75 + 0.22 * strength})`;
+        octx.beginPath();
+        octx.arc(x2, y2, r, 0, Math.PI * 2);
+        octx.fill();
+      }
+    }
+
+    // Downsample only after the lights have been rendered as continuous
+    // circles.  This gives MapLibre a normal 256px tile while retaining soft,
+    // sub-pixel light sources instead of enlarging the original raster cells.
+    const finalCanvas = new OffscreenCanvas(size, size);
+    const fctx = finalCanvas.getContext('2d');
+    fctx.imageSmoothingEnabled = true;
+    fctx.drawImage(out, 0, 0, size, size);
+    return { data: await (await finalCanvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
   });
 }
 
@@ -1427,12 +1487,12 @@ function setNightPalette(on) {
     if(terrainMapInstance.getLayer('hillshade')) { terrainMapInstance.setPaintProperty('hillshade','hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty('hillshade','hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty('hillshade','hillshade-accent-color',c.hillAccent); }
     if(terrainMapInstance.getLayer('lakes')) terrainMapInstance.setPaintProperty('lakes','fill-color',c.lake);
     if(terrainMapInstance.getLayer('rivers')) terrainMapInstance.setPaintProperty('rivers','line-color',c.river);
-    if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#031522':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#537f95':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#0d4c6b':'#18bfff'); }
-    if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#03121f',-4000,'#041624',-2000,'#051b2b',-1000,'#062134',-500,'#07273d',-200,'#082d46',-50,'#0a344d',-2,'#0b3a54',0,'rgba(7,26,43,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1000,'#1484bc',-500,'#1187be',-200,'#1291c9',-100,'#149ad4',-50,'#15a3df',-30,'#16abe8',-20,'#16b1ef',-10,'#17b7f6',-5,'#18bcfb',-2,'#18befe',0,'rgba(24,190,254,0)']);
+    if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#031522':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#bdeeed':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#4d9aa8':'#18bfff'); }
+    if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#020b13',-4000,'#02101a',-2000,'#031722',-1000,'#04202c',-600,'#062b39',-350,'#0d5263',-200,'#4b9eaa',-120,'#91d7d5',-70,'#b9eee8',-35,'#8ed9d8',-15,'#4a9fae',-5,'#174f65',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1000,'#1484bc',-500,'#1187be',-200,'#1291c9',-100,'#149ad4',-50,'#15a3df',-30,'#16abe8',-20,'#16b1ef',-10,'#17b7f6',-5,'#18bcfb',-2,'#18befe',0,'rgba(24,190,254,0)']);
     terrainMapInstance.setSky(c.sky);
     terrainMapInstance.setLight(c.light);
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'visible':'none');
-    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setPaintProperty('terrain-radiation','raster-opacity',on?0.055:0.14);
+    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setPaintProperty('terrain-radiation','raster-opacity',on?0.075:0.21);
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
   } catch(err) { console.warn('gallery: night palette update failed',err); }
 }
@@ -1788,7 +1848,7 @@ function initTerrainMap() {
         {
           id: 'terrain-radiation', type: 'raster', source: 'terrainRadiation',
           minzoom: 0, maxzoom: 10,
-          paint: { 'raster-opacity': 0.14, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
+          paint: { 'raster-opacity': 0.21, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',

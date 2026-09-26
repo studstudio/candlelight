@@ -1445,85 +1445,218 @@ function installNightLightsProtocol() {
   // broad and smooth; VIIRS is a regional radiance product, not a street
   // light dataset, so we do not turn individual pixels into dots.
   // ------------------------------------------------------------
-  let nightGpuLayer = null;
-  let nightGpuReady = false;
-  let nightGpuLoading = false;
-  let nightGpuTexture = null;
-  let nightGpuProgram = null;
-  let nightGpuBuffer = null;
-  const NIGHT_GPU_Z = 3; // 8x8 tiles: global, smooth, inexpensive on mobile
+  // -------------------------------------------------------------------------
+  // ENVIRONMENTAL TERRAIN MATERIAL — custom WebGL 3D drape
+  // -------------------------------------------------------------------------
+  // This is intentionally NOT a raster layer.  The environmental fields are
+  // uploaded as scalar textures and sampled by a custom fragment shader while
+  // the vertices are displaced from the same Mapterhorn DEM used by MapLibre's
+  // terrain.  The native MapLibre terrain remains underneath, preserving all
+  // camera/terrain mechanics; this layer contributes only material response.
+  let terrainMaterialLayer = null;
+  let terrainMaterialReady = false;
+  let terrainMaterialLoading = false;
+  let terrainMaterialProgram = null;
+  let terrainMaterialTiles = [];
+  let terrainMaterialTextures = null;
+  const MATERIAL_Z = 2; // 16 global tiles: deliberately broad environmental scale
+  const MATERIAL_SAMPLES = 32;
+  const MATERIAL_SIZE = 256;
+  const MATERIAL_EARTH_CIRC = 40075016.68557849;
 
-  async function loadNightGpuTexture(map) {
-    if (nightGpuReady || nightGpuLoading) return;
-    nightGpuLoading = true;
-    try {
-      const n = 1 << NIGHT_GPU_Z, tileSize = 256, size = n * tileSize;
-      const mosaic = new OffscreenCanvas(size,size);
-      const mctx = mosaic.getContext('2d',{willReadFrequently:true});
-      const jobs=[];
-      for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
-        const u=`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/${NIGHT_GPU_Z}/${y}/${x}.png`;
-        const r=await fetch(u); if(!r.ok) throw new Error(`VIIRS GPU tile ${r.status}`);
-        const b=await createImageBitmap(await r.blob());
-        mctx.drawImage(b,x*tileSize,y*tileSize,tileSize,tileSize); if(b.close)b.close();
-      })());
-      await Promise.all(jobs);
-
-      // Convert source radiance to a soft warm emission field. A broad blur
-      // removes the visual impression of tile/pixel shapes before upload.
-      const raw=mctx.getImageData(0,0,size,size), d=raw.data;
-      for(let i=0;i<d.length;i+=4){
-        const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-        const s=Math.pow(Math.max(0,Math.min(1,(lum-.055)/.68)),1.35);
-        d[i]=255; d[i+1]=145; d[i+2]=52; d[i+3]=Math.round(255*s*.42);
-      }
-      mctx.putImageData(raw,0,0);
-      const softened=new OffscreenCanvas(size,size), sctx=softened.getContext('2d');
-      sctx.globalCompositeOperation='source-over'; sctx.filter='blur(7px)'; sctx.drawImage(mosaic,0,0);
-      sctx.filter='blur(2px)'; sctx.globalAlpha=.48; sctx.drawImage(mosaic,0,0);
-
-      const blob=await softened.convertToBlob({type:'image/png'});
-      const bitmap=await createImageBitmap(blob);
-      const gl=map.painter.context.gl;
-      if(!nightGpuTexture) nightGpuTexture=gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D,nightGpuTexture);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bitmap);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-      if(bitmap.close) bitmap.close();
-      nightGpuReady=true;
-      if(terrainMapInstance) terrainMapInstance.triggerRepaint();
-    } catch(e){ console.warn('gallery: night GPU luminance failed',e); }
-    finally { nightGpuLoading=false; }
+  function materialDecodeDem(r,g,b){ return (r * 256 + g + b / 256) - 32768; }
+  function materialMercatorY(lat){
+    const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
+    const rad = clamped * Math.PI / 180;
+    return (180 - (180 / Math.PI * Math.log(Math.tan(Math.PI/4 + rad/2)))) / 360;
+  }
+  function materialLatFromY(y){
+    const q = Math.PI - 2 * Math.PI * y;
+    return 180 / Math.PI * Math.atan(Math.sinh(q));
+  }
+  function materialZFromElevation(m, lat){
+    const c = Math.max(0.087, Math.cos(lat * Math.PI / 180));
+    return m / (MATERIAL_EARTH_CIRC * c);
   }
 
-  nightGpuLayer={
-    id:'night-luminance-gpu', type:'custom', renderingMode:'2d',
-    onAdd(map,gl){
-      const vs=`attribute vec2 a_pos; uniform mat4 u_matrix; varying vec2 v_uv; void main(){v_uv=a_pos; gl_Position=u_matrix*vec4(a_pos.x, a_pos.y, 0.0, 1.0);}`;
-      const fs=`precision mediump float; uniform sampler2D u_tex; uniform float u_strength; varying vec2 v_uv; void main(){vec4 l=texture2D(u_tex,v_uv); gl_FragColor=vec4(l.rgb*l.a*u_strength,l.a*u_strength);}`;
-      const compile=(t,src)=>{const sh=gl.createShader(t);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
-      const p=gl.createProgram();gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));gl.linkProgram(p);nightGpuProgram=p;
-      nightGpuBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,nightGpuBuffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,1,1,0,1]),gl.STATIC_DRAW);
-      if(nightModeOn) loadNightGpuTexture(map);
-    },
-    render(gl,args){
-      if(!nightModeOn || !nightGpuReady || !nightGpuTexture || !nightGpuProgram) return;
-      const matrix=args.defaultProjectionData ? args.defaultProjectionData.mainMatrix : args.modelViewProjectionMatrix;
-      gl.useProgram(nightGpuProgram);
-      const loc=gl.getAttribLocation(nightGpuProgram,'a_pos'); gl.bindBuffer(gl.ARRAY_BUFFER,nightGpuBuffer); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
-      gl.uniformMatrix4fv(gl.getUniformLocation(nightGpuProgram,'u_matrix'),false,matrix);
-      gl.uniform1f(gl.getUniformLocation(nightGpuProgram,'u_strength'),1.25);
-      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,nightGpuTexture); gl.uniform1i(gl.getUniformLocation(nightGpuProgram,'u_tex'),0);
-      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE); gl.disable(gl.DEPTH_TEST); gl.drawArrays(gl.TRIANGLE_FAN,0,4); gl.enable(gl.DEPTH_TEST); gl.disableVertexAttribArray(loc);
-    },
-    onRemove(map,gl){if(nightGpuTexture)gl.deleteTexture(nightGpuTexture);if(nightGpuProgram)gl.deleteProgram(nightGpuProgram);if(nightGpuBuffer)gl.deleteBuffer(nightGpuBuffer);nightGpuTexture=null;nightGpuProgram=null;nightGpuBuffer=null;nightGpuReady=false;}
-  };
-  window.__nightGpuLayer = nightGpuLayer;
-  window.__loadNightGpuTexture = loadNightGpuTexture;
+  async function materialFetchBitmap(url, signal){
+    const r = await fetch(url, {signal});
+    if(!r.ok) throw new Error(`environment tile ${r.status}`);
+    return createImageBitmap(await r.blob());
+  }
+
+  async function materialBuildTexture(kind, time, signal){
+    const n = 1 << MATERIAL_Z;
+    const size = n * MATERIAL_SIZE;
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d', {willReadFrequently:true});
+    const jobs=[];
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
+      const isNight = kind === 'VIIRS_Night_Lights';
+      const url = isNight
+        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
+        : `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kind}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
+      const b=await materialFetchBitmap(url,signal);
+      ctx.drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE);
+      if(b.close)b.close();
+    })());
+    await Promise.all(jobs);
+    const img=ctx.getImageData(0,0,size,size), d=img.data;
+    // Store a normalized scalar in R. The GIBS image is a visualization, so
+    // this is a deliberately smooth proxy rather than pretending RGB is the
+    // scientific variable itself.  It is then interpreted only as a weak
+    // material coefficient by the shader.
+    for(let i=0;i<d.length;i+=4){
+      const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
+      const scalar = isNight ? Math.pow(Math.max(0, Math.min(1, (lum-0.06)/0.72)), 1.55) : lum;
+      d[i]=Math.round(scalar*255); d[i+1]=d[i]; d[i+2]=d[i]; d[i+3]=255;
+    }
+    ctx.putImageData(img,0,0);
+    return createImageBitmap(await canvas.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildDemTiles(signal){
+    const n=1<<MATERIAL_Z;
+    const tiles=[];
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++){
+      const url=`https://tiles.mapterhorn.com/${MATERIAL_Z}/${x}/${y}.webp`;
+      const b=await materialFetchBitmap(url,signal);
+      const c=new OffscreenCanvas(MATERIAL_SIZE,MATERIAL_SIZE);
+      const ctx=c.getContext('2d',{willReadFrequently:true});
+      ctx.drawImage(b,0,0,MATERIAL_SIZE,MATERIAL_SIZE); if(b.close)b.close();
+      const data=ctx.getImageData(0,0,MATERIAL_SIZE,MATERIAL_SIZE).data;
+      const s=MATERIAL_SAMPLES;
+      const dem=new Float32Array(s*s);
+      for(let j=0;j<s;j++) for(let i=0;i<s;i++){
+        const px=Math.min(MATERIAL_SIZE-1,Math.floor((i/(s-1))*(MATERIAL_SIZE-1)));
+        const py=Math.min(MATERIAL_SIZE-1,Math.floor((j/(s-1))*(MATERIAL_SIZE-1)));
+        const k=(py*MATERIAL_SIZE+px)*4;
+        dem[j*s+i]=materialDecodeDem(data[k],data[k+1],data[k+2]);
+      }
+      tiles.push({x,y,dem});
+    }
+    return tiles;
+  }
+
+  async function loadTerrainMaterial(map){
+    if(terrainMaterialLoading || terrainMaterialReady) return;
+    terrainMaterialLoading=true;
+    try{
+      const controller=new AbortController();
+      const [radiation, precipitation, demTiles] = await Promise.all([
+        materialBuildTexture('MERRA2_Incident_Shortwave_Over_Land_Monthly', ENVIRONMENT_RADIATION_TIME, controller.signal),
+        materialBuildTexture('MERRA2_Precipitation_Bias_Corrected_Monthly', ENVIRONMENT_CLIMATE_TIME, controller.signal),
+        materialBuildDemTiles(controller.signal)
+      ]);
+      terrainMaterialTextures={radiation,precipitation,night:null};
+      terrainMaterialTiles=demTiles;
+      terrainMaterialReady=true;
+      if(map) map.triggerRepaint();
+    }catch(e){ console.warn('gallery: custom terrain material failed',e); }
+    finally{ terrainMaterialLoading=false; }
+  }
+
+  async function loadTerrainNightTexture(){
+    if(terrainMaterialTextures && terrainMaterialTextures.night) return;
+    try{
+      const controller=new AbortController();
+      terrainMaterialTextures.night=await materialBuildTexture('VIIRS_Night_Lights','default',controller.signal);
+      if(terrainMapInstance) terrainMapInstance.triggerRepaint();
+    }catch(e){ console.warn('gallery: custom night luminance texture failed',e); }
+  }
+
+  function makeTerrainMaterialLayer(){
+    terrainMaterialLayer={
+      id:'environmental-terrain-material', type:'custom', renderingMode:'3d',
+      onAdd(map,gl){
+        const vs=`
+          attribute vec3 a_pos;
+          attribute vec2 a_uv;
+          attribute float a_env;
+          uniform mat4 u_matrix;
+          varying vec2 v_uv;
+          varying float v_env;
+          void main(){
+            v_uv=a_uv; v_env=a_env;
+            gl_Position=u_matrix*vec4(a_pos,1.0);
+          }`;
+        const fs=`
+          precision mediump float;
+          uniform sampler2D u_radiation;
+          uniform sampler2D u_precipitation;
+          uniform sampler2D u_nightLights;
+          uniform float u_radStrength;
+          uniform float u_wetStrength;
+          uniform float u_night;
+          varying vec2 v_uv;
+          varying float v_env;
+          void main(){
+            float rad=texture2D(u_radiation,v_uv).r;
+            float wet=texture2D(u_precipitation,v_uv).r;
+            float artificial=texture2D(u_nightLights,v_uv).r;
+            if(v_env < 0.5) discard;
+            // Broad, nonlinear response: this is material modulation, not a
+            // displayed heatmap.  The shader intentionally avoids saturated
+            // colors so native relief remains the visual structure.
+            float dry=1.0-smoothstep(.25,.78,wet);
+            float warm=smoothstep(.22,.78,rad);
+            vec3 dryTone=vec3(0.95,0.67,0.34);
+            vec3 wetTone=vec3(0.27,0.56,0.43);
+            vec3 tone=mix(vec3(0.55,0.62,0.50),mix(wetTone,dryTone,dry),0.72);
+            float amount=(0.12 + 0.16*abs(warm-.5)*2.0)*u_radStrength;
+            amount += (0.10 + 0.14*abs(dry-.5)*2.0)*u_wetStrength;
+            // Night keeps the climate material but suppresses the daytime
+            // chroma so the separate warm artificial-light field remains clear.
+            if(u_night>0.5){ tone=mix(vec3(0.48,0.58,0.60),tone,0.42); amount*=0.72; }
+            // Artificial light is a material emission contribution, not a
+            // colored raster painted above the terrain. It only exists in
+            // night mode and remains warmer than the cool moonlight.
+            float emit = u_night * smoothstep(0.025,0.70,artificial) * 0.22;
+            vec3 warmLight = vec3(1.0,0.48,0.12);
+            tone = mix(tone, warmLight, emit*0.42);
+            amount += emit;
+            gl_FragColor=vec4(tone,amount);
+          }`;
+        const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
+        const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,vs)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); terrainMaterialProgram=p;
+        terrainMaterialLayer._gl=gl;
+      },
+      render(gl,args){
+        if(!terrainMaterialReady || !terrainMaterialProgram || !terrainMaterialTextures) return;
+        if(nightModeOn && !terrainMaterialTextures.night) { if(window.__loadTerrainNightTexture) window.__loadTerrainNightTexture(); return; }
+        const matrix=args.defaultProjectionData ? args.defaultProjectionData.mainMatrix : args.modelViewProjectionMatrix;
+        const n=1<<MATERIAL_Z, s=MATERIAL_SAMPLES;
+        gl.useProgram(terrainMaterialProgram);
+        const radTex=terrainMaterialTextures.radiation, wetTex=terrainMaterialTextures.precipitation;
+        if(!terrainMaterialLayer._rad){ terrainMaterialLayer._rad=gl.createTexture(); terrainMaterialLayer._wet=gl.createTexture(); terrainMaterialLayer._night=gl.createTexture();
+          for(const [tex,bm] of [[terrainMaterialLayer._rad,radTex],[terrainMaterialLayer._wet,wetTex],[terrainMaterialLayer._night,terrainMaterialTextures.night]]){ gl.bindTexture(gl.TEXTURE_2D,tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bm); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); }
+        }
+        const aPos=gl.getAttribLocation(terrainMaterialProgram,'a_pos'), aUv=gl.getAttribLocation(terrainMaterialProgram,'a_uv'), aEnv=gl.getAttribLocation(terrainMaterialProgram,'a_env');
+        const uMat=gl.getUniformLocation(terrainMaterialProgram,'u_matrix'), uRad=gl.getUniformLocation(terrainMaterialProgram,'u_radiation'), uWet=gl.getUniformLocation(terrainMaterialProgram,'u_precipitation'), uNight=gl.getUniformLocation(terrainMaterialProgram,'u_nightLights');
+        gl.uniformMatrix4fv(uMat,false,matrix); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_radStrength'),1.15); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_wetStrength'),1.2); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_night'),nightModeOn?1:0);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._rad); gl.uniform1i(uRad,0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._wet); gl.uniform1i(uWet,1); gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._night); gl.uniform1i(uNight,2);
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
+        for(const t of terrainMaterialTiles){
+          const verts=new Float32Array(s*s*6), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
+          for(let j=0;j<s;j++) for(let i=0;i<s;i++){
+            const gx=t.x+(i/(s-1)), gy=t.y+(j/(s-1)); const wx=gx/n, wy=gy/n; const lat=materialLatFromY(wy); const z=materialZFromElevation(t.dem[j*s+i],lat);
+            verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0);
+          }
+          let ii=0; for(let j=0;j<s-1;j++) for(let i=0;i<s-1;i++){ const a=j*s+i,b=a+1,c=a+s,d=c+1; inds[ii++]=a;inds[ii++]=c;inds[ii++]=b;inds[ii++]=b;inds[ii++]=c;inds[ii++]=d; }
+          const vb=gl.createBuffer(), ib=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STREAM_DRAW); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,24,0); gl.enableVertexAttribArray(aUv); gl.vertexAttribPointer(aUv,2,gl.FLOAT,false,24,12); gl.enableVertexAttribArray(aEnv); gl.vertexAttribPointer(aEnv,1,gl.FLOAT,false,24,20); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,inds,gl.STREAM_DRAW); gl.drawElements(gl.TRIANGLES,inds.length,gl.UNSIGNED_SHORT,0); gl.deleteBuffer(vb); gl.deleteBuffer(ib);
+          gl.disableVertexAttribArray(aPos); gl.disableVertexAttribArray(aUv); gl.disableVertexAttribArray(aEnv);
+        }
+        gl.depthMask(true); gl.disable(gl.BLEND);
+      },
+      onRemove(map,gl){ if(terrainMaterialLayer._rad)gl.deleteTexture(terrainMaterialLayer._rad); if(terrainMaterialLayer._wet)gl.deleteTexture(terrainMaterialLayer._wet); if(terrainMaterialLayer._night)gl.deleteTexture(terrainMaterialLayer._night); if(terrainMaterialProgram)gl.deleteProgram(terrainMaterialProgram); terrainMaterialLayer._rad=null;terrainMaterialLayer._wet=null;terrainMaterialLayer._night=null;terrainMaterialProgram=null;terrainMaterialReady=false; }
+    };
+    return terrainMaterialLayer;
+  }
+
+  terrainMaterialLayer=makeTerrainMaterialLayer();
+  window.__terrainMaterialLayer=terrainMaterialLayer;
+  window.__loadTerrainMaterial=()=>loadTerrainMaterial(terrainMapInstance);
+  window.__loadTerrainNightTexture=()=>loadTerrainNightTexture();
 }
 
 const DAY_COLORS = {
@@ -1533,9 +1666,9 @@ const DAY_COLORS = {
   // instead of being buried beneath one saturated green material.
   relief: ['interpolate',['linear'],['elevation'],
     -200,'#18BFFF', 0,'#18BFFF',
-    5,'#b7c99a', 80,'#a9bd8b', 250,'#96ad7c', 500,'#8fa579',
-    850,'#98a679', 1200,'#a7a47b', 1550,'#b4a47c', 1900,'#a19b73',
-    2250,'#92936f', 2600,'#a39a78', 3000,'#b8a984', 3450,'#c8b998',
+    5,'#b5bd9c', 80,'#abb492', 250,'#a0aa88', 500,'#989f82',
+    850,'#9da281', 1200,'#a6a07d', 1550,'#ad9f7a', 1900,'#9e9876',
+    2250,'#929071', 2600,'#9f9879', 3000,'#b1a47f', 3450,'#c4b694',
     3900,'#ddd0b2', 4300,'#f5ecd4'],
   hillShadow:'#c9ad7a', hillHighlight:'#fdf6e3', hillAccent:'#e0c896', lake:'#18BFFF', river:'#8fc3d6',
   sky:{'sky-color':'#18BFFF','sky-horizon-blend':0.28,'horizon-color':'#72D8FF','horizon-fog-blend':0.85,'fog-color':'#ebf2f7','fog-ground-blend':0.85},
@@ -1567,11 +1700,12 @@ function setNightPalette(on) {
     terrainMapInstance.setSky(c.sky);
     terrainMapInstance.setLight(c.light);
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility','none');
-    const gpu=window.__nightGpuLayer;
-    if(gpu && !terrainMapInstance.getLayer('night-luminance-gpu')) terrainMapInstance.addLayer(gpu, terrainMapInstance.getLayer('lakes') ? 'lakes' : undefined);
-    if(gpu && on && terrainMapInstance.getLayer('night-luminance-gpu')) { if(window.__loadNightGpuTexture) window.__loadNightGpuTexture(terrainMapInstance); terrainMapInstance.triggerRepaint(); }
-    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setPaintProperty('terrain-radiation','raster-opacity',on?0.12:0.78);
-    if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setPaintProperty('terrain-climate','raster-opacity',on?0.09:0.62);
+    const material=window.__terrainMaterialLayer;
+    if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
+    if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
+    if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
+    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
+    if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',0);
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
   } catch(err) { console.warn('gallery: night palette update failed',err); }
@@ -2091,7 +2225,8 @@ function initTerrainMap() {
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
     applyLayerToggles();
-    if (window.__nightGpuLayer && !terrainMapInstance.getLayer('night-luminance-gpu')) terrainMapInstance.addLayer(window.__nightGpuLayer);
+    if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
+    if (window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     setNightPalette(nightModeOn);
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {

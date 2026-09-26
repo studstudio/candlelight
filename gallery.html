@@ -256,7 +256,7 @@
       <div id="locationWeather"></div>
     </div>
     <div id="zoomReadout">
-      <div class="zrRow" id="depthRow"><b id="depthVal">–</b> m depth</div>
+      <div class="zrRow"><b id="depthVal">–</b> m depth</div>
       <div class="zrRow"><b id="elevVal">–</b> m elev</div>
       <div class="zrRow"><b id="camAltVal">–</b> mi agl</div>
     </div>
@@ -337,7 +337,6 @@ const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const depthValEl = document.getElementById('depthVal');
-const depthRowEl = document.getElementById('depthRow');
 const elevValEl = document.getElementById('elevVal');
 const camAltValEl = document.getElementById('camAltVal');
 const emptyEl = document.getElementById('empty');
@@ -1973,7 +1972,6 @@ function estimateCameraAltitudeFt() {
 // the dashboard while tuning computeZoomFloor() above.
 function updateZoomElevReadout() {
   if (!in3D || !terrainMapInstance) {
-    depthRowEl.style.display = '';
     depthValEl.textContent = '–';
     elevValEl.textContent = '–';
     camAltValEl.textContent = '–';
@@ -1981,9 +1979,9 @@ function updateZoomElevReadout() {
   }
   const c = terrainMapInstance.getCenter();
   const depth = getOceanDepthMetersSync(c.lng, c.lat);
-  if (depth === undefined) { depthRowEl.style.display = ''; depthValEl.textContent = '…'; } // background fetch just kicked off, not resolved yet
-  else if (depth === null || depth >= 0) { depthRowEl.style.display = 'none'; } // no data, or on land — hide the whole row, not just the value
-  else { depthRowEl.style.display = ''; depthValEl.textContent = Math.round(depth); } // negative — shows as e.g. "-42", not flipped positive
+  if (depth === undefined) depthValEl.textContent = '…'; // background fetch just kicked off, not resolved yet
+  else if (depth === null || depth >= 0) depthValEl.textContent = ''; // no data, or on land — not a depth, leave blank
+  else depthValEl.textContent = Math.round(depth); // negative — shows as e.g. "-42", not flipped positive
   let elev = null;
   try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
   elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';

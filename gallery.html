@@ -1245,6 +1245,7 @@ function addWeatherLayerIfReady() {
 
 let nightProtocolInstalled = false;
 let environmentalProtocolInstalled = false;
+let snowTerrainProtocolInstalled = false;
 let climateProtocolInstalled = false;
 const ENVIRONMENT_RADIATION_Z = 6;
 const ENVIRONMENT_CLIMATE_Z = 5;
@@ -1272,8 +1273,9 @@ const ENVIRONMENT_SOIL_LAYER = 'MERRA2_Soil_Water_Root_Zone_Monthly';
 const ENVIRONMENT_VAPOR_LAYER = 'MERRA2_Total_Precipitable_Water_Vapor_Monthly';
 
 function installEnvironmentalProtocols() {
-  if (environmentalProtocolInstalled && climateProtocolInstalled) return;
+  if (environmentalProtocolInstalled && snowTerrainProtocolInstalled && climateProtocolInstalled) return;
   environmentalProtocolInstalled = true;
+  snowTerrainProtocolInstalled = true;
   climateProtocolInstalled = true;
 
   // NASA GIBS MERRA-2 incident shortwave over land. This is a real global
@@ -1354,8 +1356,76 @@ function installEnvironmentalProtocols() {
     return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
   });
 
-}
+  // Snow is derived from the SAME global Mapterhorn DEM already used for
+  // terrain. No second global white raster is needed. The mask combines
+  // latitude, elevation and a smooth snowline so permanent ice sheets and
+  // high mountain snow emerge from the terrain itself.
+  maplibregl.addProtocol('snow-terrain', async (params, abortController) => {
+    const [z, x, y] = params.url.replace('snow-terrain://', '').split('/').map(Number);
+    const size = 512;
+    const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
+    const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
+    if (!response.ok) {
+      const blank = new OffscreenCanvas(size, size);
+      const blob = await blank.convertToBlob({ type: 'image/png' });
+      return { data: await blob.arrayBuffer() };
+    }
+    const bitmap = await createImageBitmap(await response.blob());
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, size, size);
+    if (bitmap.close) bitmap.close();
+    const src = ctx.getImageData(0, 0, size, size).data;
+    const out = ctx.createImageData(size, size);
+    const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768;
+    const n = Math.pow(2, z);
+    const smoothstep = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+    const latForPixel = (py) => {
+      const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
+      return 180 / Math.PI * Math.atan(Math.sinh(q));
+    };
 
+    for (let py = 0; py < size; py++) {
+      const lat = latForPixel(py);
+      const absLat = Math.abs(lat);
+      // Permanent ice-sheet rule: Greenland/Antarctica remain snow/ice even
+      // where the generalized alpine snowline would otherwise be too high.
+      const iceCap = (lat <= -60 || lat >= 70);
+      // Generalized climatic snowline, falling with latitude. It is a soft
+      // threshold rather than a hard contour, so mountain snow feathers into
+      // the underlying terrain.
+      const snowline = absLat < 20 ? 4700 :
+                       absLat < 30 ? 4000 - (absLat - 20) * 45 :
+                       absLat < 40 ? 3550 - (absLat - 30) * 75 :
+                       absLat < 50 ? 2800 - (absLat - 40) * 105 :
+                       absLat < 60 ? 1750 - (absLat - 50) * 105 :
+                       absLat < 70 ? 700 - (absLat - 60) * 35 : 450;
+      for (let px = 0; px < size; px++) {
+        const si = (py * size + px) * 4;
+        const e = decode(si);
+        if (e <= 50) continue;
+        let snow = smoothstep(snowline - 450, snowline + 350, e);
+        if (iceCap) snow = Math.max(snow, 0.96);
+        if (snow < 0.035) continue;
+
+        // DEM-derived local shade, kept restrained so snow still reads white.
+        const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
+        const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
+        const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
+        const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
+        const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
+        const shade = Math.max(0.72, Math.min(1.10, 0.94 - dx * 0.010 + dy * 0.010));
+        const di = si;
+        out.data[di] = Math.round(244 * shade);
+        out.data[di + 1] = Math.round(248 * shade);
+        out.data[di + 2] = Math.round(250 * shade);
+        out.data[di + 3] = Math.round(255 * Math.min(0.92, snow));
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+    return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
+  });
+}
 function installNightLightsProtocol() {
   if (nightProtocolInstalled) return;
   nightProtocolInstalled = true;
@@ -1688,15 +1758,13 @@ function installNightLightsProtocol() {
           attribute float a_env;
           attribute float a_slope;
           attribute float a_aspect;
-          attribute float a_elevation;
           uniform mat4 u_matrix;
           varying vec2 v_uv;
           varying float v_env;
           varying float v_slope;
           varying float v_aspect;
-          varying float v_elevation;
           void main(){
-            v_uv=a_uv; v_env=a_env; v_slope=a_slope; v_aspect=a_aspect; v_elevation=a_elevation;
+            v_uv=a_uv; v_env=a_env; v_slope=a_slope; v_aspect=a_aspect;
             gl_Position=u_matrix*vec4(a_pos,1.0);
           }`;
         const fs=`
@@ -1718,7 +1786,6 @@ function installNightLightsProtocol() {
           varying float v_env;
           varying float v_slope;
           varying float v_aspect;
-          varying float v_elevation;
           void main(){
             float rad=texture2D(u_radiation,v_uv).r;
             float wet=texture2D(u_precipitation,v_uv).r;
@@ -1738,13 +1805,15 @@ function installNightLightsProtocol() {
             float riverSignal=detail.g;
             float riverProximity=smoothstep(0.015,0.32,riverSignal);
             float riverLush=riverProximity*(0.46+0.54*smoothstep(0.20,0.76,waterBalance));
-            // GLiM-derived geology signal. Treat it as a material/rockiness field,
-            // not a painted geology map. Higher values are allowed to push exposed
-            // terrain toward colder greys, darker rock shadows, and warm iron-rich
-            // tones where the climate/elevation combination is plausible.
-            float geologyTone=detail.b;
-            float rocky=clamp(geologyTone*0.72 + smoothstep(8.0,28.0,v_slope)*0.42 + smoothstep(700.0,2600.0,v_elevation)*0.16,0.0,1.0);
-            float redRock=rocky*smoothstep(0.48,0.82,rad)*smoothstep(0.42,0.82,aridity)*smoothstep(80.0,650.0,v_elevation)*(1.0-smoothstep(2200.0,3600.0,v_elevation));
+            // Geology is a material driver, not a painted geology map.  The
+            // broad lithology proxy is deliberately allowed to influence rocky
+            // terrain more strongly than climate/cover, while native MapLibre
+            // relief and hillshade remain the actual structure.
+            vec3 geology=vec3(detail.b);
+            float geologyTone=0.5*(geology.r+geology.g);
+            float bareRock=1.0-smoothstep(0.10,0.48,vegetation);
+            float steepRock=smoothstep(7.0,25.0,v_slope);
+            float rockSignal=clamp(smoothstep(0.48,0.76,geologyTone)*mix(0.58,1.0,bareRock)*mix(0.55,1.0,steepRock),0.0,1.0);
             // Convert Mercator Y to geographic latitude for the EPSG:4326
             // land-mask texture. Do not rely on the coarse DEM vertex flag:
             // that was the source of the square shoreline artifacts.
@@ -1753,28 +1822,6 @@ function installNightLightsProtocol() {
             float landV=(lat+90.0)/180.0;
             float land=texture2D(u_landMask,vec2(v_uv.x,1.0-landV)).a;
             if(land < 0.42) discard;
-            // Snow/ice is part of the terrain material itself. This replaces the
-            // former raster snow mask so Antarctica and alpine snow receive the
-            // same DEM-derived shading as the rest of this material.
-            float absLat=abs(lat);
-            float alpineSnowline = absLat < 20.0 ? 4700.0 :
-                                   absLat < 30.0 ? 4000.0 - (absLat-20.0)*45.0 :
-                                   absLat < 40.0 ? 3550.0 - (absLat-30.0)*75.0 :
-                                   absLat < 50.0 ? 2800.0 - (absLat-40.0)*105.0 :
-                                   absLat < 60.0 ? 1750.0 - (absLat-50.0)*105.0 :
-                                   absLat < 70.0 ? 700.0 - (absLat-60.0)*35.0 : 450.0;
-            float alpineSnow=smoothstep(alpineSnowline-450.0,alpineSnowline+350.0,v_elevation);
-            float antarctic=step(-60.0, -lat);
-            float antarcticSnow=antarctic*step(50.0,v_elevation);
-            float snowAmount=max(alpineSnow,antarcticSnow);
-            // A restrained directional shade from the DEM-derived slope/aspect
-            // keeps the ice sheet dimensional instead of becoming a flat white
-            // raster.
-            float slopeRad=v_slope*0.01745329252;
-            float lightAz=3.7;
-            float lightZen=0.72;
-            float hillLight=cos(slopeRad)*cos(lightZen)+sin(slopeRad)*sin(lightZen)*cos(v_aspect-lightAz);
-            hillLight=clamp(0.5+0.5*hillLight,0.0,1.0);
             // WorldCover is geographic EPSG:4326, so convert the Mercator
             // latitude/longitude into its own UV space. Outside the product
             // extent (-60..83) we simply leave the land-cover contribution off.
@@ -1884,7 +1931,7 @@ function installNightLightsProtocol() {
             // Keep the first pass intimate: field structure changes local
             // reflectance/tone rather than drawing bright outlines.
             float agriWeight=u_agricultureStrength*(flatField*0.55+terraceCandidate*0.75)*flatScale;
-            // Water is handled by native MapLibre bathymetry; snow is part of this material.
+            // Water/snow classes are handled by the existing water/snow systems.
             float coverStrength=(0.08+0.20*vegetation)*wcValid;
             coverTone*=mix(1.0,0.92+0.16*agriPattern,agriWeight);
             coverStrength += agriWeight*0.035;
@@ -1893,48 +1940,42 @@ function installNightLightsProtocol() {
             // colors so native relief remains the visual structure.
             float dry=1.0-smoothstep(.25,.78,wet);
             float warm=smoothstep(.22,.78,rad);
-            // Keep the original beige/earth relief as the dominant land family.
-            // Environmental variables tint it rather than replacing it.
-            vec3 dryTone=vec3(0.82,0.66,0.45);
-            vec3 wetTone=vec3(0.48,0.60,0.43);
-            vec3 tone=mix(vec3(0.68,0.64,0.50),mix(wetTone,dryTone,dry),0.34);
-            tone=mix(tone,coverTone,coverStrength*0.62);
-            // Rockier terrain gets substantially more room to express itself.
-            vec3 rockGrey=vec3(0.34,0.36,0.35);
-            tone=mix(tone,rockGrey,rocky*0.34);
-            vec3 ironRed=vec3(0.68,0.34,0.19);
-            tone=mix(tone,ironRed,redRock*0.42);
+            vec3 dryTone=vec3(0.95,0.67,0.34);
+            vec3 wetTone=vec3(0.27,0.56,0.43);
+            vec3 tone=mix(vec3(0.55,0.62,0.50),mix(wetTone,dryTone,dry),0.72);
+            tone=mix(tone,coverTone,coverStrength);
             // Climate base: warm/dry regions lean mineral/golden; humid/wet
             // regions retain cooler living tones. Soil moisture prevents
             // rainfall alone from making every rainy region look saturated.
             tone=mix(tone,vec3(0.64,0.48,0.28),heatDry*0.10);
             tone=mix(tone,vec3(0.32,0.55,0.43),waterBalance*0.08);
-            // Geology also controls how much of the material layer is allowed to
-            // speak: exposed rock gets a stronger presence without drawing outlines.
-            tone=mix(tone,vec3(0.39,0.40,0.39),rocky*0.18);
-            float amount=(0.055 + 0.085*abs(warm-.5)*2.0)*u_radStrength;
-            amount += (0.045 + 0.075*abs(dry-.5)*2.0)*u_wetStrength;
-            amount += rocky*0.10;
-            vec3 snowBright=vec3(0.97,0.985,1.0);
-            vec3 snowShadow=vec3(0.62,0.70,0.76);
-            vec3 snowTone=mix(snowShadow,snowBright,hillLight);
-            // Antarctica is deliberately white-only in hue; the blue/grey
-            // variation is illumination/shadow, not beige land coloring.
-            tone=mix(tone,snowTone,snowAmount);
-            amount=max(amount,snowAmount*0.92);
+            // Rocky regions gain a cooler grey/charcoal mineral character.
+            // Warm, dry, sparsely vegetated rock gets a restrained iron-oxide
+            // response, which creates the Arizona/Southwest-style red-rock
+            // family without pretending the broad geology proxy identifies a
+            // particular formation.
+            vec3 greyRock=vec3(0.47,0.46,0.43);
+            float redRock=rockSignal*heatDry*smoothstep(0.30,0.78,thermal)*(1.0-smoothstep(0.18,0.62,vegetation));
+            tone=mix(tone,greyRock,rockSignal*0.34);
+            tone=mix(tone,vec3(0.62,0.30,0.14),redRock*0.28);
+            float amount=(0.12 + 0.16*abs(warm-.5)*2.0)*u_radStrength;
+            amount += (0.10 + 0.14*abs(dry-.5)*2.0)*u_wetStrength;
             // Night keeps the climate material but suppresses the daytime
             // chroma so the separate warm artificial-light field remains clear.
             if(u_night>0.5){ tone=mix(vec3(0.48,0.58,0.60),tone,0.42); amount*=0.72; }
             // Artificial light is a material emission contribution, not a
             // colored raster painted above the terrain. It only exists in
             // night mode and remains warmer than the cool moonlight.
-            // Crank the population-light response: preserve the VIIRS spatial
-            // distribution, but lift the low/mid radiance range so towns and
-            // secondary corridors are actually visible on the phone.
-            float emit = u_night * smoothstep(0.004,0.30,artificial) * 1.55;
-            vec3 warmLight = vec3(1.0,0.30,0.045);
-            tone = mix(tone, warmLight, min(0.82,emit*0.48));
-            amount += emit*1.15;
+            // VIIRS has a long low-luminance tail. Lift that tail instead of
+            // merely enlarging the brightest pixels, so smaller towns, roads
+            // and settled corridors read as a denser living night landscape.
+            float lightLift=pow(max(artificial,0.0),0.52);
+            float emit = u_night * smoothstep(0.002,0.30,lightLift) * 1.38;
+            vec3 warmLight = vec3(1.0,0.34,0.055);
+            // Warm emission lifts luminance without turning the field into a
+            // yellow paint layer. The terrain's own color remains dominant.
+            tone = mix(tone, warmLight, min(0.72,emit*0.42));
+            amount += emit*0.82;
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -1951,13 +1992,13 @@ function installNightLightsProtocol() {
         if(!terrainMaterialLayer._rad){ terrainMaterialLayer._rad=gl.createTexture(); terrainMaterialLayer._wet=gl.createTexture(); terrainMaterialLayer._worldCover=gl.createTexture(); terrainMaterialLayer._canopy=gl.createTexture(); terrainMaterialLayer._climate=gl.createTexture(); terrainMaterialLayer._detail=gl.createTexture(); terrainMaterialLayer._night=gl.createTexture(); terrainMaterialLayer._land=gl.createTexture();
           for(const [tex,bm] of [[terrainMaterialLayer._rad,radTex],[terrainMaterialLayer._wet,wetTex],[terrainMaterialLayer._worldCover,terrainMaterialTextures.worldCover],[terrainMaterialLayer._canopy,terrainMaterialTextures.canopy],[terrainMaterialLayer._climate,terrainMaterialTextures.climate],[terrainMaterialLayer._detail,terrainMaterialTextures.detail],[terrainMaterialLayer._night,terrainMaterialTextures.night],[terrainMaterialLayer._land,terrainMaterialLandMask]]){ gl.bindTexture(gl.TEXTURE_2D,tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bm); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); }
         }
-        const aPos=gl.getAttribLocation(terrainMaterialProgram,'a_pos'), aUv=gl.getAttribLocation(terrainMaterialProgram,'a_uv'), aEnv=gl.getAttribLocation(terrainMaterialProgram,'a_env'), aSlope=gl.getAttribLocation(terrainMaterialProgram,'a_slope'), aAspect=gl.getAttribLocation(terrainMaterialProgram,'a_aspect'), aElevation=gl.getAttribLocation(terrainMaterialProgram,'a_elevation');
+        const aPos=gl.getAttribLocation(terrainMaterialProgram,'a_pos'), aUv=gl.getAttribLocation(terrainMaterialProgram,'a_uv'), aEnv=gl.getAttribLocation(terrainMaterialProgram,'a_env'), aSlope=gl.getAttribLocation(terrainMaterialProgram,'a_slope'), aAspect=gl.getAttribLocation(terrainMaterialProgram,'a_aspect');
         const uMat=gl.getUniformLocation(terrainMaterialProgram,'u_matrix'), uRad=gl.getUniformLocation(terrainMaterialProgram,'u_radiation'), uWet=gl.getUniformLocation(terrainMaterialProgram,'u_precipitation'), uWorldCover=gl.getUniformLocation(terrainMaterialProgram,'u_worldCover'), uCanopy=gl.getUniformLocation(terrainMaterialProgram,'u_canopy'), uClimate=gl.getUniformLocation(terrainMaterialProgram,'u_climate'), uDetail=gl.getUniformLocation(terrainMaterialProgram,'u_detail'), uNight=gl.getUniformLocation(terrainMaterialProgram,'u_nightLights'), uLand=gl.getUniformLocation(terrainMaterialProgram,'u_landMask');
         gl.uniformMatrix4fv(uMat,false,matrix); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_radStrength'),1.30); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_wetStrength'),1.35); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_night'),nightModeOn?1:0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_materialZoom'),terrainMapInstance?terrainMapInstance.getZoom():0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_agricultureStrength'),0.85);
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._rad); gl.uniform1i(uRad,0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._wet); gl.uniform1i(uWet,1); gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._worldCover); gl.uniform1i(uWorldCover,2); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._canopy); gl.uniform1i(uCanopy,3); gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._climate); gl.uniform1i(uClimate,4); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._detail); gl.uniform1i(uDetail,5); gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._night); gl.uniform1i(uNight,6); gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._land); gl.uniform1i(uLand,7);
         gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
         for(const t of terrainMaterialTiles){
-          const verts=new Float32Array(s*s*7), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
+          const verts=new Float32Array(s*s*6), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
           for(let j=0;j<s;j++) for(let i=0;i<s;i++){
             const gx=t.x+(i/(s-1)), gy=t.y+(j/(s-1)); const wx=gx/n, wy=gy/n; const lat=materialLatFromY(wy); const z=materialZFromElevation(t.dem[j*s+i],lat);
             const im=Math.max(0,i-1), ip=Math.min(s-1,i+1), jm=Math.max(0,j-1), jp=Math.min(s-1,j+1);
@@ -1968,11 +2009,11 @@ function installNightLightsProtocol() {
             const sx=dzdx/metersLon, sy=dzdy/metersLat;
             const slopeDeg=Math.atan(Math.sqrt(sx*sx+sy*sy))*57.2957795;
             const aspect=Math.atan2(-sx,sy);
-            verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect; verts[vi++]=t.dem[j*s+i];
+            verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect;
           }
           let ii=0; for(let j=0;j<s-1;j++) for(let i=0;i<s-1;i++){ const a=j*s+i,b=a+1,c=a+s,d=c+1; inds[ii++]=a;inds[ii++]=c;inds[ii++]=b;inds[ii++]=b;inds[ii++]=c;inds[ii++]=d; }
-          const vb=gl.createBuffer(), ib=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STREAM_DRAW); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,36,0); gl.enableVertexAttribArray(aUv); gl.vertexAttribPointer(aUv,2,gl.FLOAT,false,36,12); gl.enableVertexAttribArray(aEnv); gl.vertexAttribPointer(aEnv,1,gl.FLOAT,false,36,20); gl.enableVertexAttribArray(aSlope); gl.vertexAttribPointer(aSlope,1,gl.FLOAT,false,36,24); gl.enableVertexAttribArray(aAspect); gl.vertexAttribPointer(aAspect,1,gl.FLOAT,false,36,28); gl.enableVertexAttribArray(aElevation); gl.vertexAttribPointer(aElevation,1,gl.FLOAT,false,36,32); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,inds,gl.STREAM_DRAW); gl.drawElements(gl.TRIANGLES,inds.length,gl.UNSIGNED_SHORT,0); gl.deleteBuffer(vb); gl.deleteBuffer(ib);
-          gl.disableVertexAttribArray(aPos); gl.disableVertexAttribArray(aUv); gl.disableVertexAttribArray(aEnv); if(aSlope>=0) gl.disableVertexAttribArray(aSlope); if(aAspect>=0) gl.disableVertexAttribArray(aAspect); if(aElevation>=0) gl.disableVertexAttribArray(aElevation);
+          const vb=gl.createBuffer(), ib=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STREAM_DRAW); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,32,0); gl.enableVertexAttribArray(aUv); gl.vertexAttribPointer(aUv,2,gl.FLOAT,false,32,12); gl.enableVertexAttribArray(aEnv); gl.vertexAttribPointer(aEnv,1,gl.FLOAT,false,32,20); gl.enableVertexAttribArray(aSlope); gl.vertexAttribPointer(aSlope,1,gl.FLOAT,false,32,24); gl.enableVertexAttribArray(aAspect); gl.vertexAttribPointer(aAspect,1,gl.FLOAT,false,32,28); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,inds,gl.STREAM_DRAW); gl.drawElements(gl.TRIANGLES,inds.length,gl.UNSIGNED_SHORT,0); gl.deleteBuffer(vb); gl.deleteBuffer(ib);
+          gl.disableVertexAttribArray(aPos); gl.disableVertexAttribArray(aUv); gl.disableVertexAttribArray(aEnv); if(aSlope>=0) gl.disableVertexAttribArray(aSlope); if(aAspect>=0) gl.disableVertexAttribArray(aAspect);
         }
         gl.depthMask(true); gl.disable(gl.BLEND);
       },
@@ -2046,10 +2087,15 @@ function setNightPalette(on) {
     if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#020a12',-4500,'#03121d',-3000,'#041b29',-2000,'#052536',-1400,'#063143',-1000,'#073c50',-800,'#08465b',-650,'#0a5268',-500,'#0c6076',-400,'#0e6e84',-320,'#117d92',-260,'#168da1',-220,'#209eb0',-180,'#2aaebe',-150,'#35bac9',-120,'#42c4d2',-95,'#4fcbd8',-70,'#5bd0dc',-50,'#55cdd9',-35,'#4ac6d4',-22,'#3dbdce',-12,'#31b3c7',-5,'#25a7bd',-2,'#1b9bb2',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1200,'#1683bc',-900,'#1386bf',-700,'#1189c2',-500,'#118cc5',-350,'#128fc9',-250,'#1394ce',-180,'#1499d3',-130,'#159ed8',-100,'#15a3df',-75,'#16a8e4',-55,'#16ade9',-40,'#17b2ee',-28,'#17b6f3',-20,'#18b9f7',-14,'#18bcfa',-9,'#18bdfc',-5,'#18befe',-2,'#18bfff',0,'rgba(24,190,254,0)']);
     terrainMapInstance.setSky(c.sky);
     terrainMapInstance.setLight(c.light);
+    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility','none');
     const material=window.__terrainMaterialLayer;
-    if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material);
+    if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
     if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
+    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
+    if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
+    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',0);
+    if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
   } catch(err) { console.warn('gallery: night palette update failed',err); }
 }
 
@@ -2203,9 +2249,95 @@ function getOceanDepthMetersSync(lng, lat) {
   return (d[i] * 256 + d[i + 1] + d[i + 2] / 256) - 32768; // Terrarium encoding
 }
 
+function installAntarcticTerrainProtocol() {
+  if (antarcticProtocolInstalled) return;
+  antarcticProtocolInstalled = true;
+
+  maplibregl.addProtocol('antarctic-relief', async (params, abortController) => {
+    const parts = params.url.replace('antarctic-relief://', '').split('/').map(Number);
+    const z = parts[0], x = parts[1], y = parts[2];
+    const size = 512;
+    const sourceUrl = `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
+    const response = await fetch(sourceUrl, { signal: abortController && abortController.signal });
+    if (!response.ok) {
+      // Mapterhorn's coverage has real gaps (their own docs note it
+      // started with a European-DEM focus, not full global coverage) —
+      // a missing tile here just means "no ice-shading data available",
+      // not a fatal error. Hand back a fully transparent tile instead of
+      // throwing, so the ordinary color-relief ocean blue shows through
+      // underneath for that one tile instead of spamming the console.
+      const blankCanvas = new OffscreenCanvas(size, size);
+      blankCanvas.getContext('2d'); // required before convertToBlob will work, even though nothing gets drawn — stays fully transparent
+      const blankBlob = await blankCanvas.convertToBlob({ type: 'image/png' });
+      return { data: await blankBlob.arrayBuffer() };
+    }
+    const bitmap = await createImageBitmap(await response.blob());
+
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, size, size);
+    if (bitmap.close) bitmap.close();
+    const src = ctx.getImageData(0, 0, size, size).data;
+    const out = ctx.createImageData(size, size);
+
+    const decode = (i) => (src[i] * 256 + src[i + 1] + src[i + 2] / 256) - 32768; // Terrarium encoding
+    const n = Math.pow(2, z);
+    const latForPixel = (py) => {
+      const q = Math.PI - 2 * Math.PI * (y + py / size) / n;
+      return 180 / Math.PI * Math.atan(Math.sinh(q));
+    };
+
+    // Same global elevation bands as the existing color-relief, but the
+    // Antarctic land palette is cool/white. Ocean remains transparent so
+    // the existing vivid-blue native DEM color-relief remains visible.
+    const icePalette = (e) => {
+      if (e < 100) return [222, 236, 242];
+      if (e < 500) { const t = (e - 100) / 400; return [Math.round(222 + 25 * t), Math.round(236 + 17 * t), Math.round(242 + 13 * t)]; }
+      if (e < 1500) return [247, 253, 255];
+      if (e < 2500) { const t = (e - 1500) / 1000; return [Math.round(247 - 18 * t), Math.round(253 - 15 * t), Math.round(255 - 5 * t)]; }
+      return [245, 250, 255];
+    };
+
+    for (let py = 0; py < size; py++) {
+      const lat = latForPixel(py);
+      for (let px = 0; px < size; px++) {
+        const si = (py * size + px) * 4;
+        const e = decode(si);
+        const di = si;
+
+        // Geographic condition computed per DEM pixel. Elevation keeps
+        // ocean blue: only actual positive land/ice is recolored.
+        const isAntarctic = lat <= -60.0 && e > 0.0;
+        if (!isAntarctic) {
+          out.data[di] = 0; out.data[di + 1] = 0; out.data[di + 2] = 0; out.data[di + 3] = 0;
+          continue;
+        }
+
+        let rgb = icePalette(e);
+        // Real hillshade from the same DEM, using adjacent pixels — not a
+        // fake gradient, calculated from the DEM's own slope.
+        const px0 = Math.max(0, px - 1), px1 = Math.min(size - 1, px + 1);
+        const py0 = Math.max(0, py - 1), py1 = Math.min(size - 1, py + 1);
+        const ex0 = decode((py * size + px0) * 4), ex1 = decode((py * size + px1) * 4);
+        const ey0 = decode((py0 * size + px) * 4), ey1 = decode((py1 * size + px) * 4);
+        const dx = (ex1 - ex0) * 0.5, dy = (ey1 - ey0) * 0.5;
+        const shade = Math.max(0.68, Math.min(1.12, 0.94 - dx * 0.012 + dy * 0.012));
+        rgb = rgb.map(v => Math.max(0, Math.min(255, Math.round(v * shade))));
+        out.data[di] = rgb[0]; out.data[di + 1] = rgb[1]; out.data[di + 2] = rgb[2]; out.data[di + 3] = 255;
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+    return { data: await createImageBitmap(canvas) };
+  });
+}
+
+
+
 
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
+  if (!DEBUG_DISABLE_ANTARCTIC) installAntarcticTerrainProtocol();
   if (!DEBUG_DISABLE_WEATHER) initWeatherProtocol();
   installNightLightsProtocol();
   installEnvironmentalProtocols();
@@ -2232,6 +2364,18 @@ function initTerrainMap() {
         // fed to MapLibre as plain in-memory GeoJSON
         lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
         riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
+        // Real DEM-derived Antarctic ice shading — see
+        // installAntarcticTerrainProtocol() above. Same Mapterhorn tiles
+        // as terrainSource/hillshadeSource, recolored+hillshaded
+        // client-side and served back as an ordinary raster tile.
+        antarcticRelief: {
+          type: 'raster',
+          tiles: ['antarctic-relief://{z}/{x}/{y}'],
+          tileSize: 512,
+          minzoom: 0,
+          maxzoom: 14,
+          attribution: 'Elevation: <a href="https://mapterhorn.com/" target="_blank">Mapterhorn</a>'
+        },
         // Stadia Maps / Stamen Toner labels — transparent raster overlay
         // containing place names and road names. Use the raw 256px XYZ PNG
         // endpoint because MapLibre does not interpret the {r} retina
@@ -2275,6 +2419,10 @@ function initTerrainMap() {
           tileSize: 512,
         },
         bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
+        nightLights: { type: 'raster', tiles: ['nightlights://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 8, attribution: 'Night lights: NASA VIIRS Black Marble / GIBS' },
+        terrainRadiation: { type: 'raster', tiles: ['terrain-radiation://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 10, attribution: 'Radiation: NASA MERRA-2 / GIBS' },
+        terrainClimate: { type: 'raster', tiles: ['terrain-climate://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 8, attribution: 'Climate: NASA MERRA-2 / GIBS' },
+        snowTerrain: { type: 'raster', tiles: ['snow-terrain://{z}/{x}/{y}'], tileSize: 512, minzoom: 0, maxzoom: 10, attribution: 'Snow mask: Mapterhorn elevation / Copernicus DEM' },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -2300,7 +2448,75 @@ function initTerrainMap() {
             ],
           },
         },
-{
+        {
+          id: 'terrain-radiation', type: 'raster', source: 'terrainRadiation',
+          minzoom: 0, maxzoom: 10,
+          paint: { 'raster-opacity': 0.78, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
+        },
+        {
+          id: 'terrain-climate', type: 'raster', source: 'terrainClimate',
+          minzoom: 0, maxzoom: 8,
+          paint: { 'raster-opacity': 0.62, 'raster-fade-duration': 500, 'raster-resampling': 'linear' }
+        },
+        { id: 'night-lights', type: 'raster', source: 'nightLights', layout: { visibility: 'none' }, paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' } },
+        {
+          id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
+          paint: {
+            // lighter/creamier overall (matching our warm beige palette)
+            // while keeping real contrast between shadow and highlight —
+            // a lighter shadow tone still reads as relief as long as it's
+            // clearly darker than the highlight, it just isn't a deep brown
+            'hillshade-shadow-color': '#c9ad7a',
+            'hillshade-highlight-color': '#fdf6e3',
+            'hillshade-accent-color': '#e0c896',
+            'hillshade-exaggeration': 1.0,
+          },
+        },
+        // Depth-varying ocean tint from real bathymetry, replacing the
+        // flat single ocean-blue above for actual underwater elevation.
+        // Deep water (-6000 to -1000) is a lighter, more vibrant shade of
+        // the base ocean color — an earlier pass went too dark here, so
+        // this pulled it back up while keeping every stop's channel order
+        // (blue > green > red, same as the base #18BFFF itself) so it
+        // still reads as "our blue" rather than drifting toward navy or
+        // teal the way even-earlier attempts did. -500 and everything
+        // shallower is untouched from that same earlier pass (already
+        // considered good) — the new -1000 value joins smoothly into the
+        // unchanged -500 with no seam. Eased so most of the visible change
+        // happens in the shore zone: nine separate stops between -200 and
+        // -2 for real variance close to shore, converging seamlessly into
+        // the regular ocean color-relief with no visible seam. The
+        // interpolate's last stop sits at 0 (sea level) and is fully
+        // transparent — MapLibre clamps values beyond a stop's range to
+        // that boundary stop, so every positive (land) elevation also
+        // clamps to the same transparent value, meaning
+        // land is automatically left untouched with no separate branch.
+        {
+          id: 'bathymetry-color-relief',
+          type: 'color-relief',
+          source: 'bathymetryDem',
+          layout: { visibility: bathymetryOn ? 'visible' : 'none' },
+          paint: {
+            'color-relief-color': [
+              'interpolate', ['linear'], ['elevation'],
+              -6000, '#2378b2',  // abyssal — lightened/more vibrant, still deeper than shallow but no longer heavy-dark
+              -4000, '#1e7cb5',
+              -2000, '#1981b9',
+              -1000, '#1484bc',
+              -500, '#1187be',
+              -200, '#1291c9',
+              -100, '#149ad4',
+              -50, '#15a3df',
+              -30, '#16abe8',
+              -20, '#16b1ef',
+              -10, '#17b7f6',
+              -5, '#18bcfb',
+              -2, '#18befe',     // nearly identical to #18BFFF — the seamless handoff
+              0, 'rgba(24,190,254,0)', // sea level — fully transparent
+            ],
+          },
+        },
+        {
           id: 'bathymetry-hillshade',
           type: 'hillshade',
           source: 'bathymetryDem',
@@ -2348,6 +2564,11 @@ function initTerrainMap() {
         // Snow/ice is derived from the same global DEM rather than a full-world
         // white Antarctica raster. It is intentionally one compact procedural
         // material layer: permanent ice sheets + latitude/elevation snowline.
+        {
+          id: 'snow-terrain', type: 'raster', source: 'snowTerrain',
+          minzoom: 0, maxzoom: 10,
+          paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
+        },
         { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
         { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
         // Keep labels last so the transparent Toner label artwork stays
@@ -2392,7 +2613,7 @@ function initTerrainMap() {
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
     applyLayerToggles();
-    if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer);
+    if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
     if (window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     setNightPalette(nightModeOn);
     if (DEBUG_DISABLE_BATHYMETRY) {
@@ -2403,6 +2624,9 @@ function initTerrainMap() {
         if (terrainMapInstance.getSource(id)) terrainMapInstance.removeSource(id);
       }
       console.warn('gallery: DEBUG_DISABLE_BATHYMETRY — bathymetry sources/layers fully removed');
+    }
+    if (DEBUG_DISABLE_ANTARCTIC) {
+      console.warn('gallery: DEBUG_DISABLE_ANTARCTIC — antarctic-relief layer/source fully removed');
     }
   });
   terrainMapInstance.on('zoom', autoExitCheck);

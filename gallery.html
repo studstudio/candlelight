@@ -99,27 +99,15 @@
      it — that's what guarantees it can never end up covered by the map
      canvas or the 3D terrain view, unlike absolute positioning would */
   #dashboard {
-    /* FIXED height, not content-driven — this is the actual fix, not
-       min-height (which only sets a floor; content could still grow past
-       it) or nowrap alone (only blocks one specific growth mechanism).
-       `contain: layout size` is the browser's own purpose-built guarantee
-       that this element's box size is determined ENTIRELY by its own CSS
-       (the explicit height below), completely independent of whatever its
-       content does — text changing inside literally cannot affect the
-       outer box anymore, full stop. overflow:hidden is the backstop in
-       case any content ever exceeds this height regardless: clipped, not
-       expanding. This directly targets the resize loop: #dashboard's
-       fluctuating content-driven height was resizing main (flex:1 1 auto,
-       takes whatever's left over), which resized #terrainMap, which
-       MapLibre's own internal ResizeObserver was reacting to on every
-       single change — a fixed, contained #dashboard removes that
-       possibility at the source rather than trying to prevent every
-       individual way its content could have grown. */
-    height: calc(74px + env(safe-area-inset-bottom, 0px));
+    /* Protected bottom dashboard: weather/local time must remain visibly
+       inside the dashboard and below the location/coordinate readout.
+       Keep the box fixed so its content can never resize the MapLibre view. */
+    height: calc(92px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
     contain: layout size;
     overflow: hidden;
     flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; padding: 10px 16px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    gap: 12px; padding: 9px 16px calc(9px + env(safe-area-inset-bottom, 0px));
     background: var(--land); border-top: 1px solid var(--land-line); z-index: 10;
   }
   #legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4a3a22; }
@@ -130,7 +118,12 @@
     display: block; color: inherit; text-decoration: none;
   }
   #locationCoords:hover, #locationCoords:focus-visible { opacity: 1; text-decoration: underline; }
-  #locationWeather, #locationLocalTime { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
+  /* Weather + temperature + local time are the dedicated bottom readout.
+     They stay beneath the coordinates and cannot be displaced by the
+     terrain/elevation readout on the right. */
+  #locationWeather { font-size: 10px; font-weight: 400; letter-spacing: 0.035em; opacity: 0.78; margin-top: 4px; min-height: 12px; white-space: nowrap; }
+  #locationLocalTime { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.68; margin-top: 2px; min-height: 12px; white-space: nowrap; }
+  #locationWeather:empty, #locationLocalTime:empty { display: none; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   /* Debug/tuning readout — zoom/elevation only mean anything in 3D, so this
@@ -255,8 +248,8 @@
     <div id="location">
       <div id="locationCity"></div>
       <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
-      <div id="locationWeather"></div>
-      <div id="locationLocalTime"></div>
+      <div id="locationWeather" aria-label="current weather and temperature"></div>
+      <div id="locationLocalTime" aria-label="local time"></div>
     </div>
     <div id="zoomReadout">
       <div class="zrRow"><b id="terrainLevelVal">–</b> <span id="terrainLevelUnit">m elev</span></div>

@@ -121,12 +121,9 @@
   /* Weather + temperature + local time are the dedicated bottom readout.
      They stay beneath the coordinates and cannot be displaced by the
      terrain/elevation readout on the right. */
-  /* Weather/time are anchored independently at the bottom of the existing dashboard.
-     They are out of the #location flow so the original near/coordinates positioning cannot move. */
-  #locationWeather, #locationLocalTime { position:absolute; left:50%; transform:translateX(-50%); width:max-content; max-width:calc(100vw - 32px); text-align:center; white-space:nowrap; }
-  #locationWeather { bottom:17px; font-size:10px; font-weight:300; letter-spacing:.04em; opacity:.65; min-height:12px; }
-  #locationLocalTime { bottom:4px; font-size:10px; font-weight:300; letter-spacing:.04em; opacity:.65; min-height:12px; }
-  #locationWeather:empty, #locationLocalTime:empty { display:none; }
+  #locationWeather { font-size: 10px; font-weight: 400; letter-spacing: 0.035em; opacity: 0.78; margin-top: 4px; min-height: 12px; white-space: nowrap; }
+  #locationLocalTime { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.68; margin-top: 2px; min-height: 12px; white-space: nowrap; }
+  #locationWeather:empty, #locationLocalTime:empty { display: none; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   /* Debug/tuning readout — zoom/elevation only mean anything in 3D, so this
@@ -632,9 +629,8 @@ function updateLocationReadout() {
   // weather only at a "regional" zoom or closer — docked (the fixed home
   // view) and any wide zoomed-out view show nothing here
   let effectiveZoom = -Infinity;
-  if (docked) effectiveZoom = REGIONAL_ZOOM_THRESHOLD;
-  else if (in3D && terrainMapInstance) effectiveZoom = terrainMapInstance.getZoom();
-  else effectiveZoom = equivalentMapLibreZoom(lat);
+  if (in3D && terrainMapInstance) effectiveZoom = terrainMapInstance.getZoom();
+  else if (!docked) effectiveZoom = equivalentMapLibreZoom(lat);
   if (effectiveZoom >= REGIONAL_ZOOM_THRESHOLD) {
     maybeFetchLocationWeather(lat, lon);
   } else {

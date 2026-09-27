@@ -130,7 +130,7 @@
     display: block; color: inherit; text-decoration: none;
   }
   #locationCoords:hover, #locationCoords:focus-visible { opacity: 1; text-decoration: underline; }
-  #locationWeather, #locationLocalTime { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
+  #locationWeather { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   /* Debug/tuning readout — zoom/elevation only mean anything in 3D, so this
@@ -232,7 +232,6 @@
       <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
       <button id="toggleContoursBtn" class="layerToggle">contours</button>
       <button id="toggleNightBtn" class="layerToggle" aria-pressed="false">night</button>
-      <button id="toggleTimeAwareBtn" class="layerToggle" aria-pressed="false">time aware</button>
     </div>
     <button id="backBtn" aria-label="back to overview">
       <svg viewBox="0 0 32 32" width="20" height="20">
@@ -256,10 +255,10 @@
       <div id="locationCity"></div>
       <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
       <div id="locationWeather"></div>
-      <div id="locationLocalTime"></div>
     </div>
     <div id="zoomReadout">
-      <div class="zrRow"><b id="terrainLevelVal">–</b> <span id="terrainLevelUnit">m elev</span></div>
+      <div class="zrRow" id="depthRow"><b id="depthVal">–</b> m depth</div>
+      <div class="zrRow"><b id="elevVal">–</b> m elev</div>
       <div class="zrRow"><b id="camAltVal">–</b> mi agl</div>
     </div>
   </div>
@@ -338,9 +337,10 @@ const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_ce
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const terrainLevelValEl = document.getElementById('terrainLevelVal');
+const depthValEl = document.getElementById('depthVal');
+const depthRowEl = document.getElementById('depthRow');
+const elevValEl = document.getElementById('elevVal');
 const camAltValEl = document.getElementById('camAltVal');
-const terrainLevelUnitEl = document.getElementById('terrainLevelUnit');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
 const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
@@ -348,11 +348,8 @@ const toggleLinesBtn = document.getElementById('toggleLinesBtn');
 const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
 const toggleContoursBtn = document.getElementById('toggleContoursBtn');
 const toggleNightBtn = document.getElementById('toggleNightBtn');
-const toggleTimeAwareBtn = document.getElementById('toggleTimeAwareBtn');
 let tonerLabelsOn = false;
 let nightModeOn = false;
-let timeAwareOn = false;
-let timeAwareTimer = null;
 let terrainLinesOn = false;
 let bathymetryOn = true;
 let bathymetryContoursOn = false;
@@ -589,8 +586,7 @@ async function fetchLocationWeather(lat, lon) {
     const desc = weatherCodeDescription(cw.weathercode, cw.is_day === 1);
     const temp = Math.round(cw.temperature);
     const timeStr = formatOpenMeteoTime(cw.time);
-    document.getElementById('locationWeather').textContent = `${desc}, ${temp}°`;
-    document.getElementById('locationLocalTime').textContent = timeStr ? `local ${timeStr}` : '';
+    document.getElementById('locationWeather').textContent = `${desc}, ${temp}°, ${timeStr}`;
   } catch (err) {
     console.warn('gallery: location weather fetch failed —', err.message);
     // leave whatever was last shown rather than clearing it on a transient failure
@@ -642,7 +638,6 @@ function updateLocationReadout() {
     maybeFetchLocationWeather(lat, lon);
   } else {
     document.getElementById('locationWeather').textContent = '';
-    document.getElementById('locationLocalTime').textContent = '';
     weatherReadoutLat = null; weatherReadoutLon = null; // forget last fetch point so zooming back in always fetches fresh
   }
 }
@@ -1044,29 +1039,10 @@ toggleContoursBtn.onclick = () => {
 };
 toggleBathymetryBtn.classList.add('active');
 toggleNightBtn.onclick = () => {
-  // Manual night remains available. If time-aware mode was controlling the
-  // palette, tapping night hands control back to the manual toggle.
-  if (timeAwareOn) {
-    timeAwareOn = false;
-    stopTimeAwareMode();
-    toggleTimeAwareBtn.classList.remove('active');
-    toggleTimeAwareBtn.setAttribute('aria-pressed', 'false');
-  }
   nightModeOn = !nightModeOn;
   toggleNightBtn.classList.toggle('active', nightModeOn);
   toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
   setNightPalette(nightModeOn);
-};
-
-toggleTimeAwareBtn.onclick = () => {
-  timeAwareOn = !timeAwareOn;
-  toggleTimeAwareBtn.classList.toggle('active', timeAwareOn);
-  toggleTimeAwareBtn.setAttribute('aria-pressed', String(timeAwareOn));
-  if (timeAwareOn) {
-    startTimeAwareMode();
-  } else {
-    stopTimeAwareMode();
-  }
 };
 
 // ============================================================
@@ -1986,18 +1962,13 @@ function installNightLightsProtocol() {
             // Artificial light is a material emission contribution, not a
             // colored raster painted above the terrain. It only exists in
             // night mode and remains warmer than the cool moonlight.
-            // VIIRS is deliberately pushed hard here: preserve the real
-            // spatial distribution, but bring up the low/mid radiance so
-            // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.30);
-            float lightPresence=smoothstep(0.0008,0.085,lightLift);
-            float emit=u_night*lightPresence*4.80;
-            vec3 orangeLight=vec3(1.0,0.24,0.018);
-            vec3 pinkLight=vec3(1.0,0.035,0.30);
-            float pinkBias=smoothstep(0.10,0.62,lightLift);
-            vec3 artificialColor=mix(orangeLight,pinkLight,pinkBias);
-            tone=mix(tone,artificialColor,min(0.92,emit*0.30));
-            amount += emit*2.10;
+            float lightLift=pow(max(artificial,0.0),0.52);
+            float emit = u_night * smoothstep(0.002,0.30,lightLift) * 1.38;
+            vec3 warmLight = vec3(1.0,0.34,0.055);
+            // Warm emission lifts luminance without turning the field into a
+            // yellow paint layer. The terrain's own color remains dominant.
+            tone = mix(tone, warmLight, min(0.72,emit*0.42));
+            amount += emit*0.82;
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -2114,58 +2085,6 @@ const NIGHT_COLORS = {
   sky:{'sky-color':'#02050d','sky-horizon-blend':0.34,'horizon-color':'#17283c','horizon-fog-blend':0.72,'fog-color':'#08111d','fog-ground-blend':0.72},
   light:{anchor:'viewport',color:'#d9e7ff',intensity:0.18}
 };
-// Time-aware day/night mode. This uses the sun's actual apparent altitude at
-// the current map center, so it follows the region's local solar time without
-// needing a timezone service. The manual night toggle remains untouched when
-// time-aware mode is off.
-function solarAltitudeDegrees(lat, lon, date = new Date()) {
-  const rad = Math.PI / 180;
-  const dayOfYear = Math.floor((Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - Date.UTC(date.getUTCFullYear(), 0, 0)) / 86400000);
-  const hourUTC = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
-  const gamma = 2 * Math.PI / 365 * (dayOfYear - 1 + (hourUTC - 12) / 24);
-  const decl = 0.006918 - 0.399912*Math.cos(gamma) + 0.070257*Math.sin(gamma)
-    - 0.006758*Math.cos(2*gamma) + 0.000907*Math.sin(2*gamma)
-    - 0.002697*Math.cos(3*gamma) + 0.00148*Math.sin(3*gamma);
-  const eqTime = 229.18 * (0.000075 + 0.001868*Math.cos(gamma) - 0.032077*Math.sin(gamma)
-    - 0.014615*Math.cos(2*gamma) - 0.040849*Math.sin(2*gamma));
-  const trueSolarMinutes = (hourUTC * 60 + eqTime + 4 * lon) % 1440;
-  const solarHour = (trueSolarMinutes / 60 + 24) % 24;
-  const hourAngle = (solarHour - 12) * 15 * rad;
-  const latRad = lat * rad;
-  const cosZenith = Math.sin(latRad)*Math.sin(decl) + Math.cos(latRad)*Math.cos(decl)*Math.cos(hourAngle);
-  return 90 - Math.acos(Math.max(-1, Math.min(1, cosZenith))) / rad;
-}
-
-function currentTimeAwareTarget() {
-  if (!terrainMapInstance) return false;
-  const c = terrainMapInstance.getCenter();
-  return solarAltitudeDegrees(c.lat, c.lng) < -0.833;
-}
-
-function updateTimeAwareMode() {
-  if (!timeAwareOn || !terrainMapInstance) return;
-  const shouldBeNight = currentTimeAwareTarget();
-  if (shouldBeNight !== nightModeOn) {
-    nightModeOn = shouldBeNight;
-    setNightPalette(nightModeOn);
-    if (toggleNightBtn) toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
-    if (toggleNightBtn) toggleNightBtn.classList.toggle('active', nightModeOn);
-  }
-}
-
-function startTimeAwareMode() {
-  stopTimeAwareMode();
-  updateTimeAwareMode();
-  // Re-check periodically so a region naturally crosses sunset/sunrise while
-  // the map remains open. Thirty seconds is plenty for visual accuracy and
-  // keeps this effectively free on the phone.
-  timeAwareTimer = setInterval(updateTimeAwareMode, 30000);
-}
-
-function stopTimeAwareMode() {
-  if (timeAwareTimer) { clearInterval(timeAwareTimer); timeAwareTimer = null; }
-}
-
 function setNightPalette(on) {
   window.__pendingNightPalette = on;
   if (!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
@@ -2711,7 +2630,6 @@ function initTerrainMap() {
     if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
     if (window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     setNightPalette(nightModeOn);
-    if (timeAwareOn) updateTimeAwareMode();
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {
         if (terrainMapInstance.getLayer(id)) terrainMapInstance.removeLayer(id);
@@ -2744,8 +2662,6 @@ function initTerrainMap() {
   terrainMapInstance.on('move', updateLocationReadout);
   terrainMapInstance.on('move', () => updateZoomFloor(false));
   terrainMapInstance.on('move', updateZoomElevReadout);
-  terrainMapInstance.on('moveend', () => { if (timeAwareOn) updateTimeAwareMode(); });
-  terrainMapInstance.on('idle', () => { if (timeAwareOn) updateTimeAwareMode(); });
   return terrainMapInstance;
 }
 
@@ -2952,30 +2868,20 @@ function estimateCameraAltitudeFt() {
 // the dashboard while tuning computeZoomFloor() above.
 function updateZoomElevReadout() {
   if (!in3D || !terrainMapInstance) {
-    terrainLevelValEl.textContent = '–';
-    terrainLevelUnitEl.textContent = 'm elev';
+    depthRowEl.style.display = '';
+    depthValEl.textContent = '–';
+    elevValEl.textContent = '–';
     camAltValEl.textContent = '–';
     return;
   }
   const c = terrainMapInstance.getCenter();
   const depth = getOceanDepthMetersSync(c.lng, c.lat);
-
-  // One shared metric line: below sea level, show bathymetric depth;
-  // otherwise show terrain elevation. Ocean depth is negative by convention
-  // here, so there is never a redundant "0 m elev" while over water.
-  if (depth === undefined) {
-    terrainLevelValEl.textContent = '…';
-    terrainLevelUnitEl.textContent = 'm depth';
-  } else if (depth !== null && depth < 0) {
-    terrainLevelValEl.textContent = Math.round(depth);
-    terrainLevelUnitEl.textContent = 'm depth';
-  } else {
-    let elev = null;
-    try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
-    terrainLevelValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
-    terrainLevelUnitEl.textContent = 'm elev';
-  }
-
+  if (depth === undefined) { depthRowEl.style.display = ''; depthValEl.textContent = '…'; } // background fetch just kicked off, not resolved yet
+  else if (depth === null || depth >= 0) { depthRowEl.style.display = 'none'; } // no data, or on land — hide the whole row, not just the value
+  else { depthRowEl.style.display = ''; depthValEl.textContent = Math.round(depth); } // negative — shows as e.g. "-42", not flipped positive
+  let elev = null;
+  try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
+  elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
   const camAlt = estimateCameraAltitudeFt();
   camAltValEl.textContent = camAlt ? (camAlt.aboveTerrainFt / 5280).toFixed(2) : '–';
 }

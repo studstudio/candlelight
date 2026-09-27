@@ -99,27 +99,15 @@
      it — that's what guarantees it can never end up covered by the map
      canvas or the 3D terrain view, unlike absolute positioning would */
   #dashboard {
-    /* FIXED height, not content-driven — this is the actual fix, not
-       min-height (which only sets a floor; content could still grow past
-       it) or nowrap alone (only blocks one specific growth mechanism).
-       `contain: layout size` is the browser's own purpose-built guarantee
-       that this element's box size is determined ENTIRELY by its own CSS
-       (the explicit height below), completely independent of whatever its
-       content does — text changing inside literally cannot affect the
-       outer box anymore, full stop. overflow:hidden is the backstop in
-       case any content ever exceeds this height regardless: clipped, not
-       expanding. This directly targets the resize loop: #dashboard's
-       fluctuating content-driven height was resizing main (flex:1 1 auto,
-       takes whatever's left over), which resized #terrainMap, which
-       MapLibre's own internal ResizeObserver was reacting to on every
-       single change — a fixed, contained #dashboard removes that
-       possibility at the source rather than trying to prevent every
-       individual way its content could have grown. */
-    height: calc(74px + env(safe-area-inset-bottom, 0px));
+    /* Protected bottom dashboard: weather/local time must remain visibly
+       inside the dashboard and below the location/coordinate readout.
+       Keep the box fixed so its content can never resize the MapLibre view. */
+    height: calc(92px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
     contain: layout size;
     overflow: hidden;
     flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; padding: 10px 16px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    gap: 12px; padding: 9px 16px calc(9px + env(safe-area-inset-bottom, 0px));
     background: var(--land); border-top: 1px solid var(--land-line); z-index: 10;
   }
   #legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4a3a22; }
@@ -130,7 +118,15 @@
     display: block; color: inherit; text-decoration: none;
   }
   #locationCoords:hover, #locationCoords:focus-visible { opacity: 1; text-decoration: underline; }
-  #locationWeather { font-size: 10px; font-weight: 300; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; min-height: 12px; }
+  /* Weather + temperature + local time are the dedicated bottom readout.
+     They stay beneath the coordinates and cannot be displaced by the
+     terrain/elevation readout on the right. */
+  /* Weather/time are anchored independently at the bottom of the existing dashboard.
+     They are out of the #location flow so the original near/coordinates positioning cannot move. */
+  #locationWeather, #locationLocalTime { position:absolute; left:50%; transform:translateX(-50%); width:max-content; max-width:calc(100vw - 32px); text-align:center; white-space:nowrap; }
+  #locationWeather { bottom:17px; font-size:10px; font-weight:300; letter-spacing:.04em; opacity:.65; min-height:12px; }
+  #locationLocalTime { bottom:4px; font-size:10px; font-weight:300; letter-spacing:.04em; opacity:.65; min-height:12px; }
+  #locationWeather:empty, #locationLocalTime:empty { display:none; }
   #legend .row { display: flex; align-items: center; gap: 7px; }
   #legend .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   /* Debug/tuning readout — zoom/elevation only mean anything in 3D, so this
@@ -232,6 +228,7 @@
       <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
       <button id="toggleContoursBtn" class="layerToggle">contours</button>
       <button id="toggleNightBtn" class="layerToggle" aria-pressed="false">night</button>
+      <button id="toggleTimeAwareBtn" class="layerToggle" aria-pressed="false">time aware</button>
     </div>
     <button id="backBtn" aria-label="back to overview">
       <svg viewBox="0 0 32 32" width="20" height="20">
@@ -254,7 +251,8 @@
     <div id="location">
       <div id="locationCity"></div>
       <a id="locationCoords" href="#" target="_blank" rel="noopener noreferrer"></a>
-      <div id="locationWeather"></div>
+      <div id="locationWeather" aria-label="current weather and temperature"></div>
+      <div id="locationLocalTime" aria-label="local time"></div>
     </div>
     <div id="zoomReadout">
       <div class="zrRow"><b id="terrainLevelVal">–</b> <span id="terrainLevelUnit">m elev</span></div>
@@ -346,8 +344,11 @@ const toggleLinesBtn = document.getElementById('toggleLinesBtn');
 const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
 const toggleContoursBtn = document.getElementById('toggleContoursBtn');
 const toggleNightBtn = document.getElementById('toggleNightBtn');
+const toggleTimeAwareBtn = document.getElementById('toggleTimeAwareBtn');
 let tonerLabelsOn = false;
 let nightModeOn = false;
+let timeAwareOn = false;
+let timeAwareTimer = null;
 let terrainLinesOn = false;
 let bathymetryOn = true;
 let bathymetryContoursOn = false;
@@ -584,7 +585,8 @@ async function fetchLocationWeather(lat, lon) {
     const desc = weatherCodeDescription(cw.weathercode, cw.is_day === 1);
     const temp = Math.round(cw.temperature);
     const timeStr = formatOpenMeteoTime(cw.time);
-    document.getElementById('locationWeather').textContent = `${desc}, ${temp}°, ${timeStr}`;
+    document.getElementById('locationWeather').textContent = `${desc}, ${temp}°`;
+    document.getElementById('locationLocalTime').textContent = timeStr ? `local ${timeStr}` : '';
   } catch (err) {
     console.warn('gallery: location weather fetch failed —', err.message);
     // leave whatever was last shown rather than clearing it on a transient failure
@@ -630,12 +632,14 @@ function updateLocationReadout() {
   // weather only at a "regional" zoom or closer — docked (the fixed home
   // view) and any wide zoomed-out view show nothing here
   let effectiveZoom = -Infinity;
-  if (in3D && terrainMapInstance) effectiveZoom = terrainMapInstance.getZoom();
-  else if (!docked) effectiveZoom = equivalentMapLibreZoom(lat);
+  if (docked) effectiveZoom = REGIONAL_ZOOM_THRESHOLD;
+  else if (in3D && terrainMapInstance) effectiveZoom = terrainMapInstance.getZoom();
+  else effectiveZoom = equivalentMapLibreZoom(lat);
   if (effectiveZoom >= REGIONAL_ZOOM_THRESHOLD) {
     maybeFetchLocationWeather(lat, lon);
   } else {
     document.getElementById('locationWeather').textContent = '';
+    document.getElementById('locationLocalTime').textContent = '';
     weatherReadoutLat = null; weatherReadoutLon = null; // forget last fetch point so zooming back in always fetches fresh
   }
 }
@@ -1037,10 +1041,29 @@ toggleContoursBtn.onclick = () => {
 };
 toggleBathymetryBtn.classList.add('active');
 toggleNightBtn.onclick = () => {
+  // Manual night remains available. If time-aware mode was controlling the
+  // palette, tapping night hands control back to the manual toggle.
+  if (timeAwareOn) {
+    timeAwareOn = false;
+    stopTimeAwareMode();
+    toggleTimeAwareBtn.classList.remove('active');
+    toggleTimeAwareBtn.setAttribute('aria-pressed', 'false');
+  }
   nightModeOn = !nightModeOn;
   toggleNightBtn.classList.toggle('active', nightModeOn);
   toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
   setNightPalette(nightModeOn);
+};
+
+toggleTimeAwareBtn.onclick = () => {
+  timeAwareOn = !timeAwareOn;
+  toggleTimeAwareBtn.classList.toggle('active', timeAwareOn);
+  toggleTimeAwareBtn.setAttribute('aria-pressed', String(timeAwareOn));
+  if (timeAwareOn) {
+    startTimeAwareMode();
+  } else {
+    stopTimeAwareMode();
+  }
 };
 
 // ============================================================
@@ -2088,6 +2111,58 @@ const NIGHT_COLORS = {
   sky:{'sky-color':'#02050d','sky-horizon-blend':0.34,'horizon-color':'#17283c','horizon-fog-blend':0.72,'fog-color':'#08111d','fog-ground-blend':0.72},
   light:{anchor:'viewport',color:'#d9e7ff',intensity:0.18}
 };
+// Time-aware day/night mode. This uses the sun's actual apparent altitude at
+// the current map center, so it follows the region's local solar time without
+// needing a timezone service. The manual night toggle remains untouched when
+// time-aware mode is off.
+function solarAltitudeDegrees(lat, lon, date = new Date()) {
+  const rad = Math.PI / 180;
+  const dayOfYear = Math.floor((Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - Date.UTC(date.getUTCFullYear(), 0, 0)) / 86400000);
+  const hourUTC = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
+  const gamma = 2 * Math.PI / 365 * (dayOfYear - 1 + (hourUTC - 12) / 24);
+  const decl = 0.006918 - 0.399912*Math.cos(gamma) + 0.070257*Math.sin(gamma)
+    - 0.006758*Math.cos(2*gamma) + 0.000907*Math.sin(2*gamma)
+    - 0.002697*Math.cos(3*gamma) + 0.00148*Math.sin(3*gamma);
+  const eqTime = 229.18 * (0.000075 + 0.001868*Math.cos(gamma) - 0.032077*Math.sin(gamma)
+    - 0.014615*Math.cos(2*gamma) - 0.040849*Math.sin(2*gamma));
+  const trueSolarMinutes = (hourUTC * 60 + eqTime + 4 * lon) % 1440;
+  const solarHour = (trueSolarMinutes / 60 + 24) % 24;
+  const hourAngle = (solarHour - 12) * 15 * rad;
+  const latRad = lat * rad;
+  const cosZenith = Math.sin(latRad)*Math.sin(decl) + Math.cos(latRad)*Math.cos(decl)*Math.cos(hourAngle);
+  return 90 - Math.acos(Math.max(-1, Math.min(1, cosZenith))) / rad;
+}
+
+function currentTimeAwareTarget() {
+  if (!terrainMapInstance) return false;
+  const c = terrainMapInstance.getCenter();
+  return solarAltitudeDegrees(c.lat, c.lng) < -0.833;
+}
+
+function updateTimeAwareMode() {
+  if (!timeAwareOn || !terrainMapInstance) return;
+  const shouldBeNight = currentTimeAwareTarget();
+  if (shouldBeNight !== nightModeOn) {
+    nightModeOn = shouldBeNight;
+    setNightPalette(nightModeOn);
+    if (toggleNightBtn) toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
+    if (toggleNightBtn) toggleNightBtn.classList.toggle('active', nightModeOn);
+  }
+}
+
+function startTimeAwareMode() {
+  stopTimeAwareMode();
+  updateTimeAwareMode();
+  // Re-check periodically so a region naturally crosses sunset/sunrise while
+  // the map remains open. Thirty seconds is plenty for visual accuracy and
+  // keeps this effectively free on the phone.
+  timeAwareTimer = setInterval(updateTimeAwareMode, 30000);
+}
+
+function stopTimeAwareMode() {
+  if (timeAwareTimer) { clearInterval(timeAwareTimer); timeAwareTimer = null; }
+}
+
 function setNightPalette(on) {
   window.__pendingNightPalette = on;
   if (!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
@@ -2633,6 +2708,7 @@ function initTerrainMap() {
     if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
     if (window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     setNightPalette(nightModeOn);
+    if (timeAwareOn) updateTimeAwareMode();
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {
         if (terrainMapInstance.getLayer(id)) terrainMapInstance.removeLayer(id);
@@ -2665,6 +2741,8 @@ function initTerrainMap() {
   terrainMapInstance.on('move', updateLocationReadout);
   terrainMapInstance.on('move', () => updateZoomFloor(false));
   terrainMapInstance.on('move', updateZoomElevReadout);
+  terrainMapInstance.on('moveend', () => { if (timeAwareOn) updateTimeAwareMode(); });
+  terrainMapInstance.on('idle', () => { if (timeAwareOn) updateTimeAwareMode(); });
   return terrainMapInstance;
 }
 

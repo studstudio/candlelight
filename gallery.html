@@ -257,8 +257,7 @@
       <div id="locationWeather"></div>
     </div>
     <div id="zoomReadout">
-      <div class="zrRow" id="depthRow"><b id="depthVal">–</b> m depth</div>
-      <div class="zrRow"><b id="elevVal">–</b> m elev</div>
+      <div class="zrRow"><b id="terrainLevelVal">–</b> <span id="terrainLevelUnit">m elev</span></div>
       <div class="zrRow"><b id="camAltVal">–</b> mi agl</div>
     </div>
   </div>
@@ -337,10 +336,9 @@ const RIVERS_URL = "https://ne.freemap.online/50m/physical/ne_50m_rivers_lake_ce
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const depthValEl = document.getElementById('depthVal');
-const depthRowEl = document.getElementById('depthRow');
-const elevValEl = document.getElementById('elevVal');
+const terrainLevelValEl = document.getElementById('terrainLevelVal');
 const camAltValEl = document.getElementById('camAltVal');
+const terrainLevelUnitEl = document.getElementById('terrainLevelUnit');
 const emptyEl = document.getElementById('empty');
 const tooltipEl = document.getElementById('tooltip');
 const toggleLabelsBtn = document.getElementById('toggleLabelsBtn');
@@ -1962,13 +1960,18 @@ function installNightLightsProtocol() {
             // Artificial light is a material emission contribution, not a
             // colored raster painted above the terrain. It only exists in
             // night mode and remains warmer than the cool moonlight.
-            float lightLift=pow(max(artificial,0.0),0.52);
-            float emit = u_night * smoothstep(0.002,0.30,lightLift) * 1.38;
-            vec3 warmLight = vec3(1.0,0.34,0.055);
-            // Warm emission lifts luminance without turning the field into a
-            // yellow paint layer. The terrain's own color remains dominant.
-            tone = mix(tone, warmLight, min(0.72,emit*0.42));
-            amount += emit*0.82;
+            // VIIRS is deliberately pushed hard here: preserve the real
+            // spatial distribution, but bring up the low/mid radiance so
+            // populated regions read clearly on a phone-sized screen.
+            float lightLift=pow(max(artificial,0.0),0.30);
+            float lightPresence=smoothstep(0.0008,0.085,lightLift);
+            float emit=u_night*lightPresence*4.80;
+            vec3 orangeLight=vec3(1.0,0.24,0.018);
+            vec3 pinkLight=vec3(1.0,0.035,0.30);
+            float pinkBias=smoothstep(0.10,0.62,lightLift);
+            vec3 artificialColor=mix(orangeLight,pinkLight,pinkBias);
+            tone=mix(tone,artificialColor,min(0.92,emit*0.30));
+            amount += emit*2.10;
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -2868,20 +2871,30 @@ function estimateCameraAltitudeFt() {
 // the dashboard while tuning computeZoomFloor() above.
 function updateZoomElevReadout() {
   if (!in3D || !terrainMapInstance) {
-    depthRowEl.style.display = '';
-    depthValEl.textContent = '–';
-    elevValEl.textContent = '–';
+    terrainLevelValEl.textContent = '–';
+    terrainLevelUnitEl.textContent = 'm elev';
     camAltValEl.textContent = '–';
     return;
   }
   const c = terrainMapInstance.getCenter();
   const depth = getOceanDepthMetersSync(c.lng, c.lat);
-  if (depth === undefined) { depthRowEl.style.display = ''; depthValEl.textContent = '…'; } // background fetch just kicked off, not resolved yet
-  else if (depth === null || depth >= 0) { depthRowEl.style.display = 'none'; } // no data, or on land — hide the whole row, not just the value
-  else { depthRowEl.style.display = ''; depthValEl.textContent = Math.round(depth); } // negative — shows as e.g. "-42", not flipped positive
-  let elev = null;
-  try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
-  elevValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
+
+  // One shared metric line: below sea level, show bathymetric depth;
+  // otherwise show terrain elevation. Ocean depth is negative by convention
+  // here, so there is never a redundant "0 m elev" while over water.
+  if (depth === undefined) {
+    terrainLevelValEl.textContent = '…';
+    terrainLevelUnitEl.textContent = 'm depth';
+  } else if (depth !== null && depth < 0) {
+    terrainLevelValEl.textContent = Math.round(depth);
+    terrainLevelUnitEl.textContent = 'm depth';
+  } else {
+    let elev = null;
+    try { elev = terrainMapInstance.queryTerrainElevation([c.lng, c.lat]); } catch {}
+    terrainLevelValEl.textContent = (typeof elev === 'number' && !isNaN(elev)) ? Math.round(elev) : '–';
+    terrainLevelUnitEl.textContent = 'm elev';
+  }
+
   const camAlt = estimateCameraAltitudeFt();
   camAltValEl.textContent = camAlt ? (camAlt.aboveTerrainFt / 5280).toFixed(2) : '–';
 }

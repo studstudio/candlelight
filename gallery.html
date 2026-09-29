@@ -1268,7 +1268,7 @@ const ENVIRONMENT_FLOW_SIZE = 1024;
 // supplied by WorldCereal as the higher-resolution agricultural data path is
 // wired in.
 const AGRICULTURE_BASE_VERSION = 2;
-const WORLDCEREAL_WMS = 'https://mapproxy.terrascope.be/mapproxy/service';
+const WORLDCEREAL_WMS = 'https://titiler.terrascope.be/wms';
 const WORLDCEREAL_CROP_LAYER = 'esa-worldcereal-temporarycrops-10m-2021-v1_classification';
 const WORLDCEREAL_MAIZE_LAYER = 'esa-worldcereal-maize-10m-2021-v1_classification';
 const WORLDCEREAL_WINTER_CEREALS_LAYER = 'esa-worldcereal-wintercereals-10m-2021-v1_classification';
@@ -1679,6 +1679,8 @@ function installTerrainMaterialProtocols() {
       terrainMaterialReady=true;
       window.__terrainMaterialStatus='ready';
       window.__environmentDataStatus={night:window.__nightTextureStatus,worldCereal:window.__worldCerealStatus,glim:window.__glimStatus};
+      console.info('gallery: environmental material READY',window.__environmentDataStatus);
+      console.info('gallery: environmental material READY', window.__environmentDataStatus);
       if(map) map.triggerRepaint();
     }catch(e){
       window.__terrainMaterialStatus='FAILED: '+(e&&e.message?e.message:e);
@@ -1695,15 +1697,19 @@ function installTerrainMaterialProtocols() {
   window.__glimStatus='not loaded';
   window.__glimLoaded=false;
   async function loadTerrainNightTexture(){
-    if(terrainMaterialNightTexture || (terrainMaterialTextures && terrainMaterialTextures.night)) return;
+    if(terrainMaterialNightTexture) return;
     if(terrainMaterialNightLoading) return;
     terrainMaterialNightLoading=true;
     try{
       const controller=new AbortController();
       window.__nightTextureRequestCount++;
+      // The night field is independent of the main environmental bundle.
+      // Never dereference terrainMaterialTextures here: night mode can be
+      // entered before the daytime material has finished initializing.
       const nightBitmap=await materialBuildTexture('VIIRS_Night_Lights','2016-01-01',controller.signal);
       terrainMaterialNightTexture=nightBitmap;
-      if(terrainMaterialTextures) terrainMaterialTextures.night=nightBitmap;
+      if(!terrainMaterialTextures) terrainMaterialTextures={};
+      terrainMaterialTextures.night=nightBitmap;
       if(terrainMaterialLayer) terrainMaterialLayer._nightUploaded=false;
       window.__nightTextureStatus='VIIRS Black Marble WMS loaded';
       if(terrainMapInstance) terrainMapInstance.triggerRepaint();
@@ -1929,21 +1935,18 @@ function installTerrainMaterialProtocols() {
             // VIIRS is deliberately pushed hard here: preserve the real
             // spatial distribution, but bring up the low/mid radiance so
             // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.22);
-            // Broad, soft regional presence: VIIRS is sampled as a material
-            // coefficient, not converted into visible pixels or raised alpha.
-            float lightPresence=smoothstep(0.0005,0.035,lightLift);
-            float emit=u_night*lightPresence*6.0;
-            vec3 orangeLight=vec3(1.0,0.0,0.55);
+            float lightLift=pow(max(artificial,0.0),0.18);
+            // Diagnostic emission: if VIIRS reaches this shader, populated
+            // areas become unmistakably hot pink. This is still emitted by
+            // the terrain material, never a separate raster layer.
+            float lightPresence=smoothstep(0.00001,0.012,lightLift);
+            float emit=u_night*lightPresence*18.0;
+            vec3 orangeLight=vec3(1.0,0.0,0.35);
             vec3 warmCore=vec3(1.0,0.0,1.0);
-            float core=smoothstep(0.12,0.48,lightLift);
+            float core=smoothstep(0.08,0.36,lightLift);
             vec3 artificialColor=mix(orangeLight,warmCore,core);
-            // This is actual terrain-material emission. The existing tone and
-            // alpha remain intact, so the relief never becomes a painted
-            // night-light raster sitting above it.
-            tone = mix(tone, artificialColor, min(0.98, emit*0.45));
-            tone += artificialColor*emit*0.55;
-            tone=clamp(tone,0.0,1.0);
+            tone=mix(tone,artificialColor,min(1.0,emit*0.85));
+            amount=mix(amount,1.0,lightPresence*u_night);
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -1970,6 +1973,7 @@ function installTerrainMaterialProtocols() {
           gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
           gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
           terrainMaterialLayer._nightUploaded = true;
+          console.info('gallery: VIIRS texture uploaded to WebGL');
         }
         const aPos=gl.getAttribLocation(terrainMaterialProgram,'a_pos'), aUv=gl.getAttribLocation(terrainMaterialProgram,'a_uv'), aEnv=gl.getAttribLocation(terrainMaterialProgram,'a_env'), aSlope=gl.getAttribLocation(terrainMaterialProgram,'a_slope'), aAspect=gl.getAttribLocation(terrainMaterialProgram,'a_aspect');
         const uMat=gl.getUniformLocation(terrainMaterialProgram,'u_matrix'), uRad=gl.getUniformLocation(terrainMaterialProgram,'u_radiation'), uWet=gl.getUniformLocation(terrainMaterialProgram,'u_precipitation'), uWorldCover=gl.getUniformLocation(terrainMaterialProgram,'u_worldCover'), uCanopy=gl.getUniformLocation(terrainMaterialProgram,'u_canopy'), uClimate=gl.getUniformLocation(terrainMaterialProgram,'u_climate'), uDetail=gl.getUniformLocation(terrainMaterialProgram,'u_detail'), uNight=gl.getUniformLocation(terrainMaterialProgram,'u_nightLights'), uLand=gl.getUniformLocation(terrainMaterialProgram,'u_landMask');
@@ -1996,7 +2000,7 @@ function installTerrainMaterialProtocols() {
               const sx=dzdx/metersLon, sy=dzdy/metersLat;
               const slopeDeg=Math.atan(Math.sqrt(sx*sx+sy*sy))*57.2957795;
               const aspect=Math.atan2(-sx,sy);
-              verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect;
+              verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect;
             }
             let ii=0; for(let j=0;j<s-1;j++) for(let i=0;i<s-1;i++){ const a=j*s+i,b=a+1,c=a+s,d=c+1; inds[ii++]=a;inds[ii++]=c;inds[ii++]=b;inds[ii++]=b;inds[ii++]=c;inds[ii++]=d; }
             const vb=gl.createBuffer(), ib=gl.createBuffer();
@@ -2022,6 +2026,7 @@ function installTerrainMaterialProtocols() {
   window.__terrainMaterialLayer=terrainMaterialLayer;
   window.__loadTerrainMaterial=()=>loadTerrainMaterial(terrainMapInstance);
   window.__loadTerrainNightTexture=()=>loadTerrainNightTexture();
+  window.__environmentDiagnostics=()=>({material:window.__terrainMaterialStatus,night:window.__nightTextureStatus,worldCereal:window.__worldCerealStatus,worldCerealLoaded:window.__worldCerealLoaded,glim:window.__glimStatus,glimLoaded:window.__glimLoaded,nightRequests:window.__nightTextureRequestCount});
 }
 
 // Agriculture roadmap / base morphology:

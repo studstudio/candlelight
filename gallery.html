@@ -1445,7 +1445,7 @@ function installNightLightsProtocol() {
     const safeZ = Math.min(z, 8);
     const scale = Math.pow(2, z - safeZ);
     const safeX = Math.floor(x / scale), safeY = Math.floor(y / scale);
-    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/${safeZ}/${safeY}/${safeX}.png`;
+    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/2016-01-01/GoogleMapsCompatible_Level8/${safeZ}/${safeY}/${safeX}.png`;
     const res = await fetch(url, { signal: abortController && abortController.signal });
     if (!res.ok) throw new Error(`NASA VIIRS night-light tile ${res.status}`);
     const bitmap = await createImageBitmap(await res.blob());
@@ -1526,7 +1526,7 @@ function installNightLightsProtocol() {
     for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
       const isNight = kind === 'VIIRS_Night_Lights';
       const url = isNight
-        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
+        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/2016-01-01/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
         : `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kind}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
       const b=await materialFetchBitmap(url,signal);
       ctx.drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE);
@@ -1972,15 +1972,15 @@ function installNightLightsProtocol() {
             // VIIRS is deliberately pushed hard here: preserve the real
             // spatial distribution, but bring up the low/mid radiance so
             // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.20);
-            float lightPresence=smoothstep(0.0004,0.060,lightLift);
-            float emit=u_night*lightPresence*7.50;
+            float lightLift=pow(max(artificial,0.0),0.12);
+            float lightPresence=smoothstep(0.00008,0.025,lightLift);
+            float emit=u_night*lightPresence*9.50;
             vec3 orangeLight=vec3(1.0,0.24,0.018);
             vec3 pinkLight=vec3(1.0,0.035,0.30);
             float pinkBias=smoothstep(0.10,0.62,lightLift);
             vec3 artificialColor=mix(orangeLight,pinkLight,pinkBias);
             tone=mix(tone,artificialColor,min(0.92,emit*0.30));
-            amount += emit*3.00;
+            amount += emit*4.50;
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -2141,19 +2141,20 @@ function setNightPalette(on) {
       if (terrainMapInstance.getLayer('stamen-toner-labels')) {
         terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-opacity',1.0);
         terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-min',0.0);
-        terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-max',on?0.62:1.0);
+        terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-max',0.62);
       }
       if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
         terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-opacity',1.0);
         terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-brightness-min',0.0);
         terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-brightness-max',on?0.68:1.0);
+        terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-contrast',-0.18);
       }
 
       if(terrainMapInstance.getLayer('night-lights')) {
         terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'none':'none');
       }
       const material=window.__terrainMaterialLayer;
-      if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
+      if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('stamen-toner-labels') ? 'stamen-toner-labels' : undefined);
       if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
       if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
       if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
@@ -2631,6 +2632,7 @@ function initTerrainMap() {
             'raster-opacity': 1.0,
             'raster-brightness-min': 0.0,
             'raster-brightness-max': 1.0,
+            'raster-contrast': -0.18,
             'raster-fade-duration': 0
           }
         },

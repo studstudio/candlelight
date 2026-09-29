@@ -1396,6 +1396,7 @@ function installTerrainMaterialProtocols() {
   const MATERIAL_Z = 2; // 16 global tiles: deliberately broad environmental scale
   const MATERIAL_SAMPLES = 32;
   const MATERIAL_SIZE = 256;
+  const NIGHT_TEXTURE_SIZE = 2048;
   const MATERIAL_EARTH_CIRC = 40075016.68557849;
   const WORLDCOVER_WIDTH = 1536;
   const WORLDCOVER_HEIGHT = 612; // EPSG:4326 bbox -180,-60,180,83
@@ -1435,15 +1436,16 @@ function installTerrainMaterialProtocols() {
       SERVICE:'WMS', VERSION:'1.1.1', REQUEST:'GetMap',
       LAYERS:kind, STYLES:'default', SRS:'EPSG:3857',
       BBOX:`-${world},-${world},${world},${world}`,
-      WIDTH:'1024', HEIGHT:'1024', FORMAT:'image/png', TRANSPARENT:'FALSE'
+      WIDTH:(isNight?NIGHT_TEXTURE_SIZE:1024), HEIGHT:(isNight?NIGHT_TEXTURE_SIZE:1024), FORMAT:'image/png', TRANSPARENT:'FALSE'
     });
     if(isNight) params.set('TIME','2016-01-01');
     else if(time && time !== 'default') params.set('TIME',time);
     const url=`https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?${params.toString()}`;
     const b=await materialFetchBitmap(url,signal);
-    const canvas=new OffscreenCanvas(1024,1024),ctx=canvas.getContext('2d',{willReadFrequently:true});
-    ctx.drawImage(b,0,0,1024,1024); if(b.close)b.close();
-    const img=ctx.getImageData(0,0,1024,1024), d=img.data;
+    const texSize=isNight?NIGHT_TEXTURE_SIZE:1024;
+    const canvas=new OffscreenCanvas(texSize,texSize),ctx=canvas.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(b,0,0,texSize,texSize); if(b.close)b.close();
+    const img=ctx.getImageData(0,0,texSize,texSize), d=img.data;
     if(isNight){
       let maxLum=0, sumLum=0, nonzero=0, count=d.length/4;
       for(let i=0;i<d.length;i+=4){
@@ -1769,6 +1771,7 @@ function installTerrainMaterialProtocols() {
           uniform sampler2D u_radiation;
           uniform sampler2D u_precipitation;
           uniform sampler2D u_nightLights;
+          uniform vec2 u_nightTexel;
           uniform sampler2D u_landMask;
           uniform sampler2D u_worldCover;
           uniform sampler2D u_canopy;
@@ -1786,7 +1789,11 @@ function installTerrainMaterialProtocols() {
           void main(){
             float rad=texture2D(u_radiation,v_uv).r;
             float wet=texture2D(u_precipitation,v_uv).r;
-            float artificial=texture2D(u_nightLights,v_uv).r;
+            float artificial=texture2D(u_nightLights,v_uv).r*0.40;
+            artificial+=texture2D(u_nightLights,v_uv+vec2(u_nightTexel.x,0.0)).r*0.15;
+            artificial+=texture2D(u_nightLights,v_uv-vec2(u_nightTexel.x,0.0)).r*0.15;
+            artificial+=texture2D(u_nightLights,v_uv+vec2(0.0,u_nightTexel.y)).r*0.15;
+            artificial+=texture2D(u_nightLights,v_uv-vec2(0.0,u_nightTexel.y)).r*0.15;
             vec4 climate=texture2D(u_climate,v_uv);
             float temp=climate.r;
             float evap=climate.g;
@@ -1850,7 +1857,7 @@ function installTerrainMaterialProtocols() {
             float canopy=smoothstep(0.06,0.78,canopyRaw);
             canopy*=smoothstep(0.02,0.22,vegetation);
             float canopyTall=smoothstep(0.28,0.82,canopy);
-            vec3 coverTone=vec3(0.55,0.64,0.46);
+            vec3 coverTone=vec3(0.56,0.57,0.50);
             coverTone=mix(coverTone,vec3(0.20,0.38,0.25),isTree*wcValid);
             coverTone=mix(coverTone,vec3(0.42,0.50,0.29),isShrub*wcValid);
             coverTone=mix(coverTone,vec3(0.56,0.63,0.34),isGrass*wcValid);
@@ -1930,9 +1937,9 @@ function installTerrainMaterialProtocols() {
             // reflectance/tone rather than drawing bright outlines.
             float agriWeight=u_agricultureStrength*(flatField*0.55+terraceCandidate*0.75)*flatScale;
             // Water/snow classes are handled by the existing water/snow systems.
-            float coverStrength=(0.08+0.20*vegetation)*wcValid;
+            float coverStrength=(0.025+0.075*vegetation)*wcValid;
             coverTone*=mix(1.0,0.92+0.16*agriPattern,agriWeight);
-            coverStrength += agriWeight*0.035;
+            coverStrength += agriWeight*0.012;
             // Broad, nonlinear response: this is material modulation, not a
             // displayed heatmap.  The shader intentionally avoids saturated
             // colors so native relief remains the visual structure.
@@ -1945,14 +1952,14 @@ function installTerrainMaterialProtocols() {
             // Climate base: warm/dry regions lean mineral/golden; humid/wet
             // regions retain cooler living tones. Soil moisture prevents
             // rainfall alone from making every rainy region look saturated.
-            tone=mix(tone,vec3(0.64,0.48,0.28),heatDry*0.10);
-            tone=mix(tone,vec3(0.32,0.55,0.43),waterBalance*0.08);
+            tone=mix(tone,vec3(0.64,0.48,0.28),heatDry*0.045);
+            tone=mix(tone,vec3(0.32,0.55,0.43),waterBalance*0.035);
             vec3 greyRock=vec3(0.47,0.46,0.43);
             float redRock=rockSignal*heatDry*smoothstep(0.30,0.78,thermal)*(1.0-smoothstep(0.18,0.62,vegetation));
-            tone=mix(tone,greyRock,rockSignal*0.34);
-            tone=mix(tone,vec3(0.62,0.30,0.14),redRock*0.28);
-            float amount=(0.07 + 0.10*abs(warm-.5)*2.0)*u_radStrength;
-            amount += (0.06 + 0.09*abs(dry-.5)*2.0)*u_wetStrength;
+            tone=mix(tone,greyRock,rockSignal*0.16);
+            tone=mix(tone,vec3(0.62,0.30,0.14),redRock*0.13);
+            float amount=(0.028 + 0.040*abs(warm-.5)*2.0)*u_radStrength;
+            amount += (0.024 + 0.036*abs(dry-.5)*2.0)*u_wetStrength;
             // Night keeps the climate material but suppresses the daytime
             // chroma so the separate warm artificial-light field remains clear.
             if(u_night>0.5){ tone=mix(vec3(0.48,0.58,0.60),tone,0.42); amount*=0.72; }
@@ -1962,18 +1969,18 @@ function installTerrainMaterialProtocols() {
             // VIIRS is deliberately pushed hard here: preserve the real
             // spatial distribution, but bring up the low/mid radiance so
             // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.18);
+            float lightLift=pow(max(artificial,0.0),0.55);
             // Diagnostic emission: if VIIRS reaches this shader, populated
             // areas become unmistakably hot pink. This is still emitted by
             // the terrain material, never a separate raster layer.
-            float lightPresence=smoothstep(0.000001,0.004,lightLift);
-            float emit=u_night*lightPresence*24.0;
-            vec3 orangeLight=vec3(1.0,0.0,0.35);
-            vec3 warmCore=vec3(1.0,0.0,1.0);
-            float core=smoothstep(0.08,0.36,lightLift);
+            float lightPresence=smoothstep(0.035,0.20,lightLift);
+            float emit=u_night*lightPresence*1.35;
+            vec3 orangeLight=vec3(1.0,0.55,0.18);
+            vec3 warmCore=vec3(1.0,0.86,0.46);
+            float core=smoothstep(0.16,0.48,lightLift);
             vec3 artificialColor=mix(orangeLight,warmCore,core);
-            tone=mix(tone,artificialColor,min(1.0,emit*0.85));
-            amount=max(amount,lightPresence*u_night);
+            tone=mix(tone,artificialColor,min(0.72,emit*0.42));
+            amount=max(amount,lightPresence*u_night*0.10);
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){const info=gl.getShaderInfoLog(sh)||'unknown GLSL compile error'; console.error('gallery: environmental shader compile FAILED',info); throw new Error(info);}return sh;};
@@ -2011,12 +2018,13 @@ function installTerrainMaterialProtocols() {
           console.info('gallery: VIIRS texture uploaded to WebGL');
         }
         const aPos=gl.getAttribLocation(terrainMaterialProgram,'a_pos'), aUv=gl.getAttribLocation(terrainMaterialProgram,'a_uv'), aEnv=gl.getAttribLocation(terrainMaterialProgram,'a_env'), aSlope=gl.getAttribLocation(terrainMaterialProgram,'a_slope'), aAspect=gl.getAttribLocation(terrainMaterialProgram,'a_aspect');
-        const uMat=gl.getUniformLocation(terrainMaterialProgram,'u_matrix'), uRad=gl.getUniformLocation(terrainMaterialProgram,'u_radiation'), uWet=gl.getUniformLocation(terrainMaterialProgram,'u_precipitation'), uWorldCover=gl.getUniformLocation(terrainMaterialProgram,'u_worldCover'), uCanopy=gl.getUniformLocation(terrainMaterialProgram,'u_canopy'), uClimate=gl.getUniformLocation(terrainMaterialProgram,'u_climate'), uDetail=gl.getUniformLocation(terrainMaterialProgram,'u_detail'), uNight=gl.getUniformLocation(terrainMaterialProgram,'u_nightLights'), uLand=gl.getUniformLocation(terrainMaterialProgram,'u_landMask');
-        gl.uniformMatrix4fv(uMat,false,matrix); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_radStrength'),1.30); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_wetStrength'),1.35); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_night'),nightModeOn?1:0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_materialZoom'),terrainMapInstance?terrainMapInstance.getZoom():0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_agricultureStrength'),0.85);
+        const uNightTexel=gl.getUniformLocation(terrainMaterialProgram,'u_nightTexel'), uMat=gl.getUniformLocation(terrainMaterialProgram,'u_matrix'), uRad=gl.getUniformLocation(terrainMaterialProgram,'u_radiation'), uWet=gl.getUniformLocation(terrainMaterialProgram,'u_precipitation'), uWorldCover=gl.getUniformLocation(terrainMaterialProgram,'u_worldCover'), uCanopy=gl.getUniformLocation(terrainMaterialProgram,'u_canopy'), uClimate=gl.getUniformLocation(terrainMaterialProgram,'u_climate'), uDetail=gl.getUniformLocation(terrainMaterialProgram,'u_detail'), uNight=gl.getUniformLocation(terrainMaterialProgram,'u_nightLights'), uLand=gl.getUniformLocation(terrainMaterialProgram,'u_landMask');
+        gl.uniform2f(uNightTexel,1.0/NIGHT_TEXTURE_SIZE,1.0/NIGHT_TEXTURE_SIZE); gl.uniformMatrix4fv(uMat,false,matrix); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_radStrength'),1.30); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_wetStrength'),1.35); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_night'),nightModeOn?1:0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_materialZoom'),terrainMapInstance?terrainMapInstance.getZoom():0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_agricultureStrength'),0.85);
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._rad); gl.uniform1i(uRad,0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._wet); gl.uniform1i(uWet,1); gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._worldCover); gl.uniform1i(uWorldCover,2); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._canopy); gl.uniform1i(uCanopy,3); gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._climate); gl.uniform1i(uClimate,4); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._detail); gl.uniform1i(uDetail,5); gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._night); gl.uniform1i(uNight,6); gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._land); gl.uniform1i(uLand,7);
         gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
-        // The custom mesh sits a few metres above the MapLibre terrain DEM so
-        // the shared terrain depth buffer cannot completely occlude it.
+        // Keep the custom surface on the DEM itself; do not artificially lift the
+        // environmental material above the terrain. The shared depth buffer
+        // should keep the material visually attached to the native relief.
         if(!terrainMaterialLayer._loggedRender){ terrainMaterialLayer._loggedRender=true; console.info('gallery: environmental material render pass ACTIVE', {tiles:terrainMaterialTiles.length, night:!!terrainMaterialTextures.night}); }
         // Cache the static custom-layer mesh on each DEM tile. Rebuilding and deleting
         // WebGL buffers every frame creates needless driver/GC pressure on iPhone.
@@ -2029,7 +2037,7 @@ function installTerrainMaterialProtocols() {
           if(!cached){
             const verts=new Float32Array(s*s*8), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
             for(let j=0;j<s;j++) for(let i=0;i<s;i++){
-              const gx=t.x+(i/(s-1)), gy=t.y+(j/(s-1)); const wx=gx/n, wy=gy/n; const lat=materialLatFromY(wy); const z=materialZFromElevation(t.dem[j*s+i],lat) + materialZFromElevation(3.0,lat);
+              const gx=t.x+(i/(s-1)), gy=t.y+(j/(s-1)); const wx=gx/n, wy=gy/n; const lat=materialLatFromY(wy); const z=materialZFromElevation(t.dem[j*s+i],lat);
               const im=Math.max(0,i-1), ip=Math.min(s-1,i+1), jm=Math.max(0,j-1), jp=Math.min(s-1,j+1);
               const dzdx=t.dem[j*s+ip]-t.dem[j*s+im], dzdy=t.dem[jp*s+i]-t.dem[jm*s+i];
               const dLon=(2/n/(s-1))*360.0, dLat=(2/n/(s-1))*180.0;

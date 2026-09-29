@@ -1026,6 +1026,9 @@ function applyLayerToggles() {
     if (terrainMapInstance.getLayer('color-relief')) {
       terrainMapInstance.setLayoutProperty('color-relief', 'visibility', maptilerSatelliteOn ? 'none' : 'visible');
     }
+    if (terrainMapInstance.getLayer('classic-hillshade')) {
+      terrainMapInstance.setLayoutProperty('classic-hillshade', 'visibility', maptilerSatelliteOn ? 'none' : 'visible');
+    }
     if (terrainMapInstance.getLayer('maptiler-hillshade')) {
       terrainMapInstance.setLayoutProperty('maptiler-hillshade', 'visibility', maptilerSatelliteOn ? 'visible' : 'none');
     }
@@ -2118,9 +2121,7 @@ function setNightPalette(on) {
   const c=on?NIGHT_COLORS:DAY_COLORS;
   try {
     if(terrainMapInstance.getLayer('color-relief')) terrainMapInstance.setPaintProperty('color-relief','color-relief-color',c.relief);
-    for (const id of ['hillshade','maptiler-hillshade']) { if(terrainMapInstance.getLayer(id)) { terrainMapInstance.setPaintProperty(id,'hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty(id,'hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty(id,'hillshade-accent-color',c.hillAccent); } }
-    if(terrainMapInstance.getLayer('lakes')) terrainMapInstance.setPaintProperty('lakes','fill-color',c.lake);
-    if(terrainMapInstance.getLayer('rivers')) terrainMapInstance.setPaintProperty('rivers','line-color',c.river);
+    for (const id of ['hillshade','maptiler-hillshade','classic-hillshade']) { if(terrainMapInstance.getLayer(id)) { terrainMapInstance.setPaintProperty(id,'hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty(id,'hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty(id,'hillshade-accent-color',c.hillAccent); } }
     if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#04304a':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#63cfe3':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#159fc0':'#18bfff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-exaggeration',on?0.60:0.6); }
     if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#020a12',-4500,'#03121d',-3000,'#041b29',-2000,'#052536',-1400,'#063143',-1000,'#073c50',-800,'#08465b',-650,'#0a5268',-500,'#0c6076',-400,'#0e6e84',-320,'#117d92',-260,'#168da1',-220,'#209eb0',-180,'#2aaebe',-150,'#35bac9',-120,'#42c4d2',-95,'#4fcbd8',-70,'#5bd0dc',-50,'#55cdd9',-35,'#4ac6d4',-22,'#3dbdce',-12,'#31b3c7',-5,'#25a7bd',-2,'#1b9bb2',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1200,'#1683bc',-900,'#1386bf',-700,'#1189c2',-500,'#118cc5',-350,'#128fc9',-250,'#1394ce',-180,'#1499d3',-130,'#159ed8',-100,'#15a3df',-75,'#16a8e4',-55,'#16ade9',-40,'#17b2ee',-28,'#17b6f3',-20,'#18b9f7',-14,'#18bcfa',-9,'#18bdfc',-5,'#18befe',-2,'#18bfff',0,'rgba(24,190,254,0)']);
     terrainMapInstance.setSky(c.sky);
@@ -2409,6 +2410,19 @@ function initTerrainMap() {
           tileSize: 512,
           maxzoom: 14
         },
+        // Classic mode deliberately keeps the original Mapterhorn DEM pair.
+        // This preserves the original day/night relief resolution and shading
+        // instead of forcing the classic palette through the MapTiler RGB DEM.
+        classicTerrainSource: {
+          type: 'raster-dem',
+          url: 'https://tiles.mapterhorn.com/tilejson.json',
+          tileSize: 512
+        },
+        classicHillshadeSource: {
+          type: 'raster-dem',
+          url: 'https://tiles.mapterhorn.com/tilejson.json',
+          tileSize: 512
+        },
         // Existing bathymetry is intentionally preserved; it is independent
         // of the MapTiler land imagery/DEM and remains available as before.
         bathymetryDem: {
@@ -2455,9 +2469,22 @@ function initTerrainMap() {
         // Same MapTiler DEM underneath, so switching modes does not change
         // the terrain geometry or camera — only the surface treatment.
         {
-          id: 'color-relief', type: 'color-relief', source: 'terrainSource',
+          id: 'color-relief', type: 'color-relief', source: 'classicTerrainSource',
           layout: { visibility: 'none' },
           paint: { 'color-relief-color': DAY_COLORS.relief },
+        },
+        {
+          id: 'classic-hillshade', type: 'hillshade', source: 'classicHillshadeSource',
+          layout: { visibility: 'none' },
+          paint: {
+            'hillshade-method': 'standard',
+            'hillshade-shadow-color': DAY_COLORS.hillShadow,
+            'hillshade-highlight-color': DAY_COLORS.hillHighlight,
+            'hillshade-accent-color': DAY_COLORS.hillAccent,
+            'hillshade-exaggeration': 0.55,
+            'hillshade-illumination-direction': 315,
+            'hillshade-illumination-altitude': 45
+          },
         },
         {
           id: 'bathymetry-color-relief', type: 'color-relief', source: 'bathymetryDem',
@@ -2513,6 +2540,7 @@ function initTerrainMap() {
     minZoom: DEBUG_DISABLE_ZOOM_FLOOR ? undefined : ZOOM_FLOOR_CURVE[0][1],
   });
   terrainMapInstance.on('load', () => {
+    addWeatherLayerIfReady();
     applyLayerToggles();
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {

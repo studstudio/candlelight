@@ -1813,8 +1813,8 @@ function installTerrainMaterialProtocols() {
             // same Web-Mercator UV space as the custom mesh. The DEM land flag
             // is retained as a fallback so a provider-side mask encoding change
             // can never make the entire custom material disappear.
-            float q=3.14159265-6.28318530*v_uv.y;
-            float lat=degrees(atan(sinh(q)));
+            float mercatorY=3.14159265-6.28318530*v_uv.y;
+            float lat=degrees(atan(sinh(mercatorY)));
             float maskLand=texture2D(u_landMask,v_uv).a;
             float land=max(maskLand,smoothstep(0.0,0.02,v_env));
             if(land < 0.42) discard;
@@ -1903,23 +1903,23 @@ function installTerrainMaterialProtocols() {
             regionHash=fract(regionHash);
             float orientation=(regionHash-0.5)*0.90 + v_aspect*0.35;
             float co=cos(orientation), si=sin(orientation);
-            vec2 q=meters*mat2(co,-si,si,co);
+            vec2 fieldQ=meters*mat2(co,-si,si,co);
 
             // Large, long rectangles: a restrained Midwest/Great Plains-style
             // field cadence. It only becomes visible as the map gets closer.
             float flatScale=smoothstep(3.8,6.5,u_materialZoom);
-            vec2 flatCell=q/vec2(900.0,2600.0);
+            vec2 flatCell=fieldQ/vec2(900.0,2600.0);
             vec2 flatFrac=abs(fract(flatCell)-0.5);
             float flatEdges=1.0-smoothstep(0.015,0.075,max(flatFrac.x,flatFrac.y));
-            float flatRows=0.5+0.5*sin(q.y*0.0041);
+            float flatRows=0.5+0.5*sin(fieldQ.y*0.0041);
             float flatTexture=mix(0.72+0.28*flatRows,1.0-flatEdges*0.52,0.55);
 
             // Contour-following bands for steep cultivated terrain. Instead of
             // perfect horizontal stripes, aspect and a low-frequency warp make
             // the bands bend with terrain orientation.
-            vec2 tq=q/vec2(180.0,180.0);
-            float warp=0.22*sin(q.x*0.0017)+0.17*sin(q.y*0.0023);
-            float contour=0.5+0.5*sin((q.x*0.010 + q.y*0.004)*0.55 + warp + v_aspect*2.2);
+            vec2 tq=fieldQ/vec2(180.0,180.0);
+            float warp=0.22*sin(fieldQ.x*0.0017)+0.17*sin(fieldQ.y*0.0023);
+            float contour=0.5+0.5*sin((fieldQ.x*0.010 + fieldQ.y*0.004)*0.55 + warp + v_aspect*2.2);
             contour=smoothstep(0.28,0.72,contour);
             float terraceEdges=1.0-smoothstep(0.08,0.24,abs(contour-0.5));
             float terraceTexture=mix(0.78,1.0-terraceEdges*0.34,0.72);
@@ -1976,8 +1976,11 @@ function installTerrainMaterialProtocols() {
             amount=max(amount,lightPresence*u_night);
             gl_FragColor=vec4(tone,amount);
           }`;
-        const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
-        const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,vs)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); terrainMaterialProgram=p;
+        const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){const info=gl.getShaderInfoLog(sh)||'unknown GLSL compile error'; console.error('gallery: environmental shader compile FAILED',info); throw new Error(info);}return sh;};
+        try {
+          const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,vs)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)){const info=gl.getProgramInfoLog(p)||'unknown GLSL link error'; console.error('gallery: environmental shader link FAILED',info); throw new Error(info);} terrainMaterialProgram=p;
+          console.info('gallery: environmental shader program READY');
+        } catch(e) { terrainMaterialProgram=null; console.error('gallery: environmental custom layer program creation FAILED',e); }
         terrainMaterialLayer._gl=gl;
       },
       render(gl,args){

@@ -232,6 +232,7 @@
       <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
       <button id="toggleContoursBtn" class="layerToggle">contours</button>
       <button id="toggleNightBtn" class="layerToggle" aria-pressed="false">night</button>
+      <button id="toggleSatelliteBtn" class="layerToggle active" aria-pressed="true">satellite</button>
     </div>
     <button id="backBtn" aria-label="back to overview">
       <svg viewBox="0 0 32 32" width="20" height="20">
@@ -350,11 +351,13 @@ const toggleLinesBtn = document.getElementById('toggleLinesBtn');
 const toggleBathymetryBtn = document.getElementById('toggleBathymetryBtn');
 const toggleContoursBtn = document.getElementById('toggleContoursBtn');
 const toggleNightBtn = document.getElementById('toggleNightBtn');
+const toggleSatelliteBtn = document.getElementById('toggleSatelliteBtn');
 let tonerLabelsOn = false;
 let nightModeOn = false;
 let terrainLinesOn = false;
 let bathymetryOn = true;
 let bathymetryContoursOn = false;
+let maptilerSatelliteOn = true;
 
 // Azimuthal equidistant, polar aspect (North Pole at center) — true
 // distance-from-center in every direction. Base scale fits the WHOLE disc
@@ -1014,6 +1017,18 @@ function applyLayerToggles() {
     if (terrainMapInstance.getLayer('bathymetry-contours')) {
       terrainMapInstance.setLayoutProperty('bathymetry-contours', 'visibility', bathymetryContoursOn ? 'visible' : 'none');
     }
+    // Satellite mode owns the photographic surface. Classic mode restores the
+    // original beige/charcoal MapLibre relief. In 3D, water is supplied by
+    // the real bathymetry layers below — never the flat-map GeoJSON lakes/rivers.
+    if (terrainMapInstance.getLayer('maptiler-satellite')) {
+      terrainMapInstance.setLayoutProperty('maptiler-satellite', 'visibility', maptilerSatelliteOn ? 'visible' : 'none');
+    }
+    if (terrainMapInstance.getLayer('color-relief')) {
+      terrainMapInstance.setLayoutProperty('color-relief', 'visibility', maptilerSatelliteOn ? 'none' : 'visible');
+    }
+    if (terrainMapInstance.getLayer('maptiler-hillshade')) {
+      terrainMapInstance.setLayoutProperty('maptiler-hillshade', 'visibility', maptilerSatelliteOn ? 'visible' : 'none');
+    }
   } catch (err) {
     console.warn('gallery: layer toggle failed', err);
   }
@@ -1045,6 +1060,12 @@ toggleNightBtn.onclick = () => {
   toggleNightBtn.classList.toggle('active', nightModeOn);
   toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
   setNightPalette(nightModeOn);
+};
+toggleSatelliteBtn.onclick = () => {
+  maptilerSatelliteOn = !maptilerSatelliteOn;
+  toggleSatelliteBtn.classList.toggle('active', maptilerSatelliteOn);
+  toggleSatelliteBtn.setAttribute('aria-pressed', String(maptilerSatelliteOn));
+  applyLayerToggles();
 };
 
 // ============================================================
@@ -2097,7 +2118,7 @@ function setNightPalette(on) {
   const c=on?NIGHT_COLORS:DAY_COLORS;
   try {
     if(terrainMapInstance.getLayer('color-relief')) terrainMapInstance.setPaintProperty('color-relief','color-relief-color',c.relief);
-    if(terrainMapInstance.getLayer('hillshade')) { terrainMapInstance.setPaintProperty('hillshade','hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty('hillshade','hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty('hillshade','hillshade-accent-color',c.hillAccent); }
+    for (const id of ['hillshade','maptiler-hillshade']) { if(terrainMapInstance.getLayer(id)) { terrainMapInstance.setPaintProperty(id,'hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty(id,'hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty(id,'hillshade-accent-color',c.hillAccent); } }
     if(terrainMapInstance.getLayer('lakes')) terrainMapInstance.setPaintProperty('lakes','fill-color',c.lake);
     if(terrainMapInstance.getLayer('rivers')) terrainMapInstance.setPaintProperty('rivers','line-color',c.river);
     if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#04304a':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#63cfe3':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#159fc0':'#18bfff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-exaggeration',on?0.60:0.6); }
@@ -2388,8 +2409,6 @@ function initTerrainMap() {
           tileSize: 512,
           maxzoom: 14
         },
-        lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
-        riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
         // Existing bathymetry is intentionally preserved; it is independent
         // of the MapTiler land imagery/DEM and remains available as before.
         bathymetryDem: {
@@ -2418,10 +2437,12 @@ function initTerrainMap() {
       layers: [
         // THE SURFACE: MapTiler satellite imagery, full opacity.
         { id: 'maptiler-satellite', type: 'raster', source: 'maptilerSatellite', paint: { 'raster-opacity': 1, 'raster-fade-duration': 0, 'raster-resampling': 'linear' } },
-        // Subtle native MapLibre hillshade from the same MapTiler DEM. This
-        // only adds real relief lighting; it does not recolor the imagery.
+        // Satellite mode: subtle native MapLibre hillshade from the same
+        // MapTiler DEM. It follows the actual 3D terrain; it is not another
+        // surface or mesh.
         {
-          id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
+          id: 'maptiler-hillshade', type: 'hillshade', source: 'hillshadeSource',
+          layout: { visibility: 'visible' },
           paint: {
             'hillshade-shadow-color': '#000000',
             'hillshade-highlight-color': '#ffffff',
@@ -2429,6 +2450,14 @@ function initTerrainMap() {
             'hillshade-exaggeration': 0.22,
             'hillshade-illumination-direction': 315,
           },
+        },
+        // Classic mode: restore the original elevation-colored beige map.
+        // Same MapTiler DEM underneath, so switching modes does not change
+        // the terrain geometry or camera — only the surface treatment.
+        {
+          id: 'color-relief', type: 'color-relief', source: 'terrainSource',
+          layout: { visibility: 'none' },
+          paint: { 'color-relief-color': DAY_COLORS.relief },
         },
         {
           id: 'bathymetry-color-relief', type: 'color-relief', source: 'bathymetryDem',
@@ -2463,8 +2492,6 @@ function initTerrainMap() {
           layout: { visibility: terrainLinesOn ? 'visible' : 'none' },
           paint: { 'raster-opacity': 0.6, 'raster-fade-duration': 0 }
         },
-        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
-        { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
         {
           id: 'stamen-toner-labels', type: 'raster', source: 'stamenTonerLabels',
           layout: { visibility: tonerLabelsOn ? 'visible' : 'none' },

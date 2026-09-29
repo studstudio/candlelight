@@ -1260,20 +1260,20 @@ const ENVIRONMENT_CLIMATE_TIME = '2020-07-01';
 const ENVIRONMENT_RADIATION_TIME = '2020-07-01';
 const ENVIRONMENT_CANOPY_LAYER = 'GEDI_ISS_L3_Canopy_Height_Mean_RH100_201904-202303';
 const ENVIRONMENT_GEOLOGY_SERVICE = 'https://tiles.arcgis.com/tiles/tV7nu2LqSErotsj3/arcgis/rest/services/Orix_World_Experience_3D_WTL1/MapServer/export';
-const ENVIRONMENT_GEOLOGY_SIZE = 2048;
-const ENVIRONMENT_FLOW_SIZE = 2048;
+const ENVIRONMENT_GEOLOGY_SIZE = 1024;
+const ENVIRONMENT_FLOW_SIZE = 1024;
 // Agriculture is intentionally a material function, not a painted GIS layer.
 // The first pass uses real WorldCover cropland extent plus terrain/climate to
 // create field-scale *candidates*. Exact crop identity/field edges will be
 // supplied by WorldCereal as the higher-resolution agricultural data path is
 // wired in.
 const AGRICULTURE_BASE_VERSION = 2;
-const WORLDCEREAL_WMS = 'https://ewoc-rdm-api.iiasa.ac.at/geoserver/ows';
-const WORLDCEREAL_CROP_LAYER = 'worldcereal_temporarycrops_2021';
-const WORLDCEREAL_MAIZE_LAYER = 'worldcereal_maize_2021';
-const WORLDCEREAL_WINTER_CEREALS_LAYER = 'worldcereal_wintercereals_2021';
-const WORLDCEREAL_SPRING_CEREALS_LAYER = 'worldcereal_springcereals_2021';
-const WORLDCEREAL_IRRIGATION_LAYER = 'worldcereal_activeirrigation_2021';
+const WORLDCEREAL_WMS = 'https://titiler.terrascope.be/wms';
+const WORLDCEREAL_CROP_LAYER = 'esa-worldcereal-temporarycrops-10m-2021-v1_classification';
+const WORLDCEREAL_MAIZE_LAYER = 'esa-worldcereal-maize-10m-2021-v1_classification';
+const WORLDCEREAL_WINTER_CEREALS_LAYER = 'esa-worldcereal-wintercereals-10m-2021-v1_classification';
+const WORLDCEREAL_SPRING_CEREALS_LAYER = 'esa-worldcereal-springcereals-10m-2021-v1_classification';
+const WORLDCEREAL_IRRIGATION_LAYER = 'esa-worldcereal-irrigation-10m-2021-v1_classification';
 const ENVIRONMENT_TEMPERATURE_LAYER = 'MERRA2_2m_Air_Temperature_Monthly';
 const ENVIRONMENT_EVAPORATION_LAYER = 'MERRA2_Evaporation_Land_Monthly';
 const ENVIRONMENT_SOIL_LAYER = 'MERRA2_Soil_Water_Root_Zone_Monthly';
@@ -1285,83 +1285,10 @@ function installEnvironmentalProtocols() {
   snowTerrainProtocolInstalled = true;
   climateProtocolInstalled = true;
 
-  // NASA GIBS MERRA-2 incident shortwave over land. This is a real global
-  // surface-radiation field, but we deliberately remap it to a very small
-  // material shift instead of displaying the source palette as a heatmap.
-  maplibregl.addProtocol('terrain-radiation', async (params, abortController) => {
-    const [z0, x0, y0] = params.url.replace('terrain-radiation://', '').split('/').map(Number);
-    const z = Math.min(z0, ENVIRONMENT_RADIATION_Z);
-    const scale = Math.pow(2, z0 - z);
-    const x = Math.floor(x0 / scale);
-    const y = Math.floor(y0 / scale);
-    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MERRA2_Incident_Shortwave_Over_Land_Monthly/default/${ENVIRONMENT_RADIATION_TIME}/GoogleMapsCompatible_Level${ENVIRONMENT_RADIATION_Z}/${z}/${y}/${x}.png`;
-    const res = await fetch(url, { signal: abortController && abortController.signal });
-    if (!res.ok) throw new Error(`NASA radiation tile ${res.status}`);
-    const bitmap = await createImageBitmap(await res.blob());
-    const size = bitmap.width;
-    const canvas = new OffscreenCanvas(size, size);
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(bitmap, 0, 0);
-    if (bitmap.close) bitmap.close();
-    const img = ctx.getImageData(0, 0, size, size);
-    const d = img.data;
-
-    // Convert the source visualization to a restrained material signal.
-    // The source is not shown directly: its luminance controls only the
-    // strength of a warm/cool shift in the existing terrain palette.
-    for (let i = 0; i < d.length; i += 4) {
-      const a = d[i + 3];
-      if (a < 10) { d[i + 3] = 0; continue; }
-      const lum = (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
-      const signal = Math.max(0, Math.min(1, (lum - 0.12) / 0.76));
-      // Low-radiation land gets a cool/quiet mineral cast; high-radiation
-      // land gets a barely warmer, sun-baked cast. Alpha is intentionally
-      // low so terrain relief and hillshade remain visually dominant.
-      const warm = signal * 0.72 + 0.14;
-      d[i] = Math.round(70 + 105 * warm);
-      d[i + 1] = Math.round(82 + 86 * (1 - Math.abs(signal - 0.5) * 1.25));
-      d[i + 2] = Math.round(94 + 58 * (1 - signal));
-      d[i + 3] = Math.round(255 * (0.095 + 0.16 * Math.abs(signal - 0.5) * 2));
-    }
-    ctx.putImageData(img, 0, 0);
-    return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
-  });
-
-  // NASA MERRA-2 total precipitation. This is the first climate field: it
-  // is deliberately rendered as a quiet material influence rather than a
-  // visible precipitation map. Wet regions get a slightly cooler/deeper
-  // material response; dry regions remain warmer/lighter.
-  maplibregl.addProtocol('terrain-climate', async (params, abortController) => {
-    const [z0, x0, y0] = params.url.replace('terrain-climate://', '').split('/').map(Number);
-    const z = Math.min(z0, ENVIRONMENT_CLIMATE_Z);
-    const scale = Math.pow(2, z0 - z);
-    const x = Math.floor(x0 / scale);
-    const y = Math.floor(y0 / scale);
-    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MERRA2_Precipitation_Bias_Corrected_Monthly/default/${ENVIRONMENT_CLIMATE_TIME}/GoogleMapsCompatible_Level${ENVIRONMENT_CLIMATE_Z}/${z}/${y}/${x}.png`;
-    const res = await fetch(url, { signal: abortController && abortController.signal });
-    if (!res.ok) throw new Error(`NASA precipitation tile ${res.status}`);
-    const bitmap = await createImageBitmap(await res.blob());
-    const size = bitmap.width;
-    const canvas = new OffscreenCanvas(size, size);
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(bitmap, 0, 0);
-    if (bitmap.close) bitmap.close();
-    const img = ctx.getImageData(0, 0, size, size);
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const a = d[i + 3];
-      if (a < 10) { d[i + 3] = 0; continue; }
-      const lum = (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
-      const wet = Math.max(0, Math.min(1, 1 - Math.pow(lum, 0.72)));
-      // Very low-amplitude cool mineral tint. No source colors survive.
-      d[i] = Math.round(64 + 34 * (1 - wet));
-      d[i + 1] = Math.round(92 + 32 * (1 - wet));
-      d[i + 2] = Math.round(82 + 34 * wet);
-      d[i + 3] = Math.round(255 * (0.07 + 0.13 * wet));
-    }
-    ctx.putImageData(img, 0, 0);
-    return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
-  });
+  // MERRA-2 radiation and precipitation are consumed directly by the custom
+  // WebGL material through global WMS images; no MapLibre raster protocol is
+  // registered for them, so unsupported WMTS tile matrices cannot generate
+  // stray 400 errors.
 
   // Snow is derived from the SAME global Mapterhorn DEM already used for
   // terrain. No second global white raster is needed. The mask combines
@@ -1496,60 +1423,59 @@ function installTerrainMaterialProtocols() {
   }
 
   async function materialBuildTexture(kind, time, signal){
-    // Night lights are loaded as ONE global GIBS WMS image instead of a
-    // low-zoom WMTS mosaic.  The old implementation requested Level2 tiles;
-    // that was the weak link because the Black Marble layer's published
-    // tiling/availability is not guaranteed at that matrix level.  A global
-    // EPSG:3857 image also matches the shader's world UVs directly.
-    if(kind === 'VIIRS_Night_Lights'){
-      const world=20037508.342789244;
-      const url = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi'
-        + '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap'
-        + '&LAYERS=VIIRS_Night_Lights'
-        + '&STYLES=default'
-        + '&CRS=EPSG:3857'
-        + `&BBOX=-${world},-${world},${world},${world}`
-        + '&WIDTH=2048&HEIGHT=1024'
-        + '&FORMAT=image/png&TRANSPARENT=TRUE'
-        + '&TIME=2016';
-      const b=await materialFetchBitmap(url,signal);
-      // Convert the WMS visualization to a single normalized luminance
-      // channel.  Keep the global image 2:1 so v_uv.x/v_uv.y stay geographic.
-      const canvas=new OffscreenCanvas(2048,1024);
-      const ctx=canvas.getContext('2d',{willReadFrequently:true});
-      ctx.drawImage(b,0,0,2048,1024); if(b.close)b.close();
-      const img=ctx.getImageData(0,0,2048,1024), d=img.data;
-      for(let i=0;i<d.length;i+=4){
-        const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-        // Very permissive lift for the diagnostic pass: even weak Black
-        // Marble pixels become visible to the shader.
-        const scalar=Math.pow(Math.max(0,Math.min(1,lum)),0.42);
-        d[i]=Math.round(scalar*255); d[i+1]=d[i]; d[i+2]=d[i]; d[i+3]=255;
-      }
-      ctx.putImageData(img,0,0);
-      window.__nightTextureStatus='VIIRS WMS loaded';
-      return createImageBitmap(await canvas.convertToBlob({type:'image/png'}));
-    }
-
-    const n = 1 << MATERIAL_Z;
-    const size = n * MATERIAL_SIZE;
-    const canvas = new OffscreenCanvas(size, size);
-    const ctx = canvas.getContext('2d', {willReadFrequently:true});
-    const jobs=[];
-    for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
-      const url=`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kind}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
-      const b=await materialFetchBitmap(url,signal);
-      ctx.drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE);
-      if(b.close)b.close();
-    })());
-    await Promise.all(jobs);
-    const img=ctx.getImageData(0,0,size,size), d=img.data;
+    // Use one server-rendered global GIBS image per field instead of assuming
+    // every dataset exposes the same WMTS zoom matrix. This avoids the 400s
+    // caused by requesting unsupported Level-2 tiles and keeps each field
+    // independent. The material UVs are Web-Mercator world coordinates, so
+    // request the global image in EPSG:3857 as well.
+    const isNight = kind === 'VIIRS_Night_Lights';
+    const world=20037508.342789244;
+    const params=new URLSearchParams({
+      SERVICE:'WMS', VERSION:'1.3.0', REQUEST:'GetMap',
+      LAYERS:kind, STYLES:'', CRS:'EPSG:3857',
+      BBOX:`-${world},-${world},${world},${world}`,
+      WIDTH:'1024', HEIGHT:'1024', FORMAT:'image/png', TRANSPARENT:'TRUE'
+    });
+    if(isNight) params.set('TIME','2016-01-01');
+    else if(time && time !== 'default') params.set('TIME',time);
+    const url=`https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?${params.toString()}`;
+    const b=await materialFetchBitmap(url,signal);
+    const canvas=new OffscreenCanvas(1024,1024),ctx=canvas.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(b,0,0,1024,1024); if(b.close)b.close();
+    const img=ctx.getImageData(0,0,1024,1024), d=img.data;
     for(let i=0;i<d.length;i+=4){
       const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-      d[i]=Math.round(lum*255); d[i+1]=d[i]; d[i+2]=d[i]; d[i+3]=255;
+      const scalar=isNight
+        ? Math.pow(Math.max(0,Math.min(1,(lum-0.015)/0.62)),0.72)
+        : lum;
+      d[i]=Math.round(scalar*255); d[i+1]=d[i]; d[i+2]=d[i]; d[i+3]=255;
     }
     ctx.putImageData(img,0,0);
+    if(isNight) window.__nightTextureStatus='VIIRS Black Marble WMS loaded';
     return createImageBitmap(await canvas.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildDemTiles(signal){
+    const n=1<<MATERIAL_Z;
+    const tiles=[];
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++){
+      const url=`https://tiles.mapterhorn.com/${MATERIAL_Z}/${x}/${y}.webp`;
+      const b=await materialFetchBitmap(url,signal);
+      const c=new OffscreenCanvas(MATERIAL_SIZE,MATERIAL_SIZE);
+      const ctx=c.getContext('2d',{willReadFrequently:true});
+      ctx.drawImage(b,0,0,MATERIAL_SIZE,MATERIAL_SIZE); if(b.close)b.close();
+      const data=ctx.getImageData(0,0,MATERIAL_SIZE,MATERIAL_SIZE).data;
+      const s=MATERIAL_SAMPLES;
+      const dem=new Float32Array(s*s);
+      for(let j=0;j<s;j++) for(let i=0;i<s;i++){
+        const px=Math.min(MATERIAL_SIZE-1,Math.floor((i/(s-1))*(MATERIAL_SIZE-1)));
+        const py=Math.min(MATERIAL_SIZE-1,Math.floor((j/(s-1))*(MATERIAL_SIZE-1)));
+        const k=(py*MATERIAL_SIZE+px)*4;
+        dem[j*s+i]=materialDecodeDem(data[k],data[k+1],data[k+2]);
+      }
+      tiles.push({x,y,dem});
+    }
+    return tiles;
   }
 
   async function materialBuildLandMask(signal){
@@ -1558,8 +1484,8 @@ function installTerrainMaterialProtocols() {
     // vertices, which allowed shoreline triangles to survive as rectangular
     // patches.  OSM_Land_Mask is a dedicated coastline mask, so use it to
     // decide where the environmental material is allowed to exist.
-    const width=1536, height=768;
-    const url='https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?version=1.1.1&service=WMS&request=GetMap&format=image/png&layers=OSM_Land_Mask&styles=&srs=EPSG:4326&bbox=-180,-90,180,90&width='+width+'&height='+height+'&transparent=true';
+    const width=1024, height=1024, world=20037508.342789244;
+    const url='https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?version=1.3.0&service=WMS&request=GetMap&format=image/png&layers=OSM_Land_Mask&styles=&crs=EPSG:3857&bbox=-'+world+',-'+world+','+world+','+world+'&width='+width+'&height='+height+'&transparent=true';
     const b=await materialFetchBitmap(url,signal);
     const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true});
     ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
@@ -1580,7 +1506,8 @@ function installTerrainMaterialProtocols() {
     // We request one server-rendered geographic image and immediately reduce
     // it to a categorical scalar texture. It is never displayed as its
     // original bright classification palette.
-    const url='https://services.terrascope.be/wms/v2?service=WMS&version=1.1.1&request=GetMap&layers=WORLDCOVER_2021_MAP&styles=&format=image/png&transparent=true&srs=EPSG:4326&bbox=-180,-60,180,83&width='+WORLDCOVER_WIDTH+'&height='+WORLDCOVER_HEIGHT;
+    const world=20037508.342789244;
+    const url='https://titiler.terrascope.be/wms?service=WMS&version=1.3.0&request=GetMap&layers=esa-worldcover-map-10m-2021-v2_map&styles=&format=image/png&transparent=true&crs=EPSG:3857&bbox=-'+world+',-'+world+','+world+','+world+'&width='+WORLDCOVER_WIDTH+'&height='+WORLDCOVER_HEIGHT;
     const b=await materialFetchBitmap(url,signal);
     const c=new OffscreenCanvas(WORLDCOVER_WIDTH,WORLDCOVER_HEIGHT);
     const ctx=c.getContext('2d',{willReadFrequently:true});
@@ -1615,30 +1542,19 @@ function installTerrainMaterialProtocols() {
   }
 
   async function materialBuildClimateTexture(time, signal){
-    // Pack several slow climate fields into RGBA so the shader does not need
-    // one WebGL texture unit per variable. Channels are normalized proxies
-    // derived from the official GIBS visualization ramps: R temperature,
-    // G evaporation, B root-zone soil water, A precipitable water vapour.
     const kinds=[ENVIRONMENT_TEMPERATURE_LAYER,ENVIRONMENT_EVAPORATION_LAYER,ENVIRONMENT_SOIL_LAYER,ENVIRONMENT_VAPOR_LAYER];
-    const n=1<<MATERIAL_Z, size=n*MATERIAL_SIZE;
-    const canvases=kinds.map(()=>new OffscreenCanvas(size,size));
-    const ctxs=canvases.map(c=>c.getContext('2d',{willReadFrequently:true}));
-    const jobs=[];
-    for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
-      for(let k=0;k<kinds.length;k++){
-        const url=`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kinds[k]}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
-        const b=await materialFetchBitmap(url,signal); ctxs[k].drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE); if(b.close)b.close();
-      }
-    })());
-    await Promise.all(jobs);
-    const out=new OffscreenCanvas(size,size), oc=out.getContext('2d',{willReadFrequently:true});
-    const imgs=ctxs.map(c=>c.getImageData(0,0,size,size));
-    const od=oc.createImageData(size,size), d=od.data;
+    const size=768, world=20037508.342789244;
+    const canvases=[];
+    for(const kind of kinds){
+      const params=new URLSearchParams({SERVICE:'WMS',VERSION:'1.3.0',REQUEST:'GetMap',LAYERS:kind,STYLES:'',CRS:'EPSG:3857',BBOX:`-${world},-${world},${world},${world}`,WIDTH:String(size),HEIGHT:String(size),FORMAT:'image/png',TRANSPARENT:'TRUE',TIME:time});
+      const b=await materialFetchBitmap(`https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?${params.toString()}`,signal);
+      const c=new OffscreenCanvas(size,size),ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(b,0,0,size,size); if(b.close)b.close();
+      canvases.push(ctx.getImageData(0,0,size,size));
+    }
+    const out=new OffscreenCanvas(size,size),oc=out.getContext('2d',{willReadFrequently:true}),od=oc.createImageData(size,size),d=od.data;
     for(let i=0;i<d.length;i+=4){
-      // The GIBS rendered ramps are intentionally reduced to broad normalized
-      // environmental coefficients; we do not present these as raw units.
       for(let k=0;k<4;k++){
-        const a=imgs[k].data;
+        const a=canvases[k].data;
         const lum=(0.2126*a[i]+0.7152*a[i+1]+0.0722*a[i+2])/255;
         d[i+k]=Math.round(Math.max(0,Math.min(1,lum))*255);
       }
@@ -1660,13 +1576,28 @@ function installTerrainMaterialProtocols() {
   }
 
   async function materialBuildGeologyTexture(signal){
-    const width=ENVIRONMENT_GEOLOGY_SIZE,height=width/2,params=new URLSearchParams({bbox:'-180,-85.05112878,180,85.05112878',bboxSR:'4326',imageSR:'4326',size:`${width},${height}`,format:'png32',transparent:'false',f:'image'});
-    const b=await materialFetchBitmap(`${ENVIRONMENT_GEOLOGY_SERVICE}?${params.toString()}`,signal),c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(b,0,0,width,height);if(b.close)b.close();
-    const img=ctx.getImageData(0,0,width,height),d=img.data;for(let i=0;i<d.length;i+=4){const r=d[i]/255,g=d[i+1]/255,bv=d[i+2]/255,lum=.2126*r+.7152*g+.0722*bv;d[i]=(0.40+0.60*lum)*255;d[i+1]=(0.43+0.57*lum)*255;d[i+2]=(0.38+0.62*lum)*255;d[i+3]=255;}ctx.putImageData(img,0,0);return createImageBitmap(await c.convertToBlob({type:'image/png'}));
+    // ArcGIS export is requested in the service's native Web-Mercator CRS.
+    // The previous 4326 export parameters were unnecessarily forcing a
+    // reprojection and were one source of brittle/failed requests.
+    const width=1024,height=1024,world=20037508.342789244;
+    const params=new URLSearchParams({
+      bbox:`-${world},-${world},${world},${world}`,
+      bboxSR:'102100', imageSR:'102100', size:`${width},${height}`,
+      format:'png32', transparent:'false', f:'image'
+    });
+    const b=await materialFetchBitmap(`${ENVIRONMENT_GEOLOGY_SERVICE}?${params.toString()}`,signal);
+    const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
+    const img=ctx.getImageData(0,0,width,height),d=img.data;
+    for(let i=0;i<d.length;i+=4){
+      const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
+      d[i]=(0.40+0.60*lum)*255; d[i+1]=(0.43+0.57*lum)*255; d[i+2]=(0.38+0.62*lum)*255; d[i+3]=255;
+    }
+    ctx.putImageData(img,0,0);
+    return createImageBitmap(await c.convertToBlob({type:'image/png'}));
   }
 
   async function materialBuildEnvironmentalDetailTexture(cropBitmap,riverBitmap,geologyBitmap){
-    const width=2048,height=1024,out=new OffscreenCanvas(width,height),ctx=out.getContext('2d',{willReadFrequently:true});
+    const width=1024,height=1024,out=new OffscreenCanvas(width,height),ctx=out.getContext('2d',{willReadFrequently:true});
     const crop=new OffscreenCanvas(width,height),cc=crop.getContext('2d'); cc.drawImage(cropBitmap,0,0,width,height);
     const river=new OffscreenCanvas(width,height),rc=river.getContext('2d'); rc.drawImage(riverBitmap,0,0,width,height);
     const geo=new OffscreenCanvas(width,height),gc=geo.getContext('2d'); gc.drawImage(geologyBitmap,0,0,width,height);
@@ -1677,27 +1608,32 @@ function installTerrainMaterialProtocols() {
   }
 
   async function materialBuildWorldCerealTexture(signal){
-    // WorldCereal publishes 2021 10 m products as COGs/archives and exposes
-    // them through its visualization stack. This lightweight browser path
-    // uses the public EWOC GeoServer WMS for the global temporary-crop product.
-    // If that service is unavailable, agriculture cleanly falls back to the
-    // WorldCover cropland class instead of breaking the terrain material.
-    const width=2048, height=1024;
-    const params=new URLSearchParams({service:'WMS',version:'1.1.1',request:'GetMap',layers:WORLDCEREAL_CROP_LAYER,styles:'',format:'image/png',transparent:'true',srs:'EPSG:4326',bbox:'-180,-90,180,90',width:String(width),height:String(height)});
+    // Current public Terrascope WMS/WMTS exposes the ESA WorldCereal 2021
+    // products directly. Use the documented current layer identifier rather
+    // than the retired IIASA GeoServer layer names.
+    const width=1024,height=1024,world=20037508.342789244;
+    const params=new URLSearchParams({service:'WMS',version:'1.3.0',request:'GetMap',layers:WORLDCEREAL_CROP_LAYER,styles:'',crs:'EPSG:3857',bbox:`-${world},-${world},${world},${world}`,width:String(width),height:String(height),format:'image/png',transparent:'true'});
     const b=await materialFetchBitmap(`${WORLDCEREAL_WMS}?${params.toString()}`,signal);
-    const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true});
-    ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
+    const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
     const img=ctx.getImageData(0,0,width,height),d=img.data;
-    // Preserve luminance as a fractional crop-extent proxy. The server's
-    // rendered WMS palette is not treated as a numeric measurement; it is
-    // only a confidence/extent cue that strengthens or weakens the procedural
-    // morphology. Exact crop fractions can later come from direct COG values.
     for(let i=0;i<d.length;i+=4){
       const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
       d[i]=Math.round(lum*255); d[i+1]=0; d[i+2]=0; d[i+3]=255;
     }
     ctx.putImageData(img,0,0);
+    window.__worldCerealStatus='WorldCereal WMS loaded';
     return createImageBitmap(await c.convertToBlob({type:'image/png'}));
+  }
+
+  function materialNeutralTexture(value=0){
+    const c=new OffscreenCanvas(2,2),ctx=c.getContext('2d');
+    const v=Math.round(Math.max(0,Math.min(1,value))*255); ctx.fillStyle=`rgb(${v},${v},${v})`; ctx.fillRect(0,0,2,2);
+    return c.convertToBlob({type:'image/png'}).then(createImageBitmap);
+  }
+
+  async function materialOptional(label, factory, fallback=0){
+    try { return await factory(); }
+    catch(e){ console.warn(`gallery: ${label} unavailable; using neutral material fallback`, e); return materialNeutralTexture(fallback); }
   }
 
   async function loadTerrainMaterial(map){
@@ -1705,41 +1641,51 @@ function installTerrainMaterialProtocols() {
     terrainMaterialLoading=true;
     try{
       const controller=new AbortController();
-      const results = await Promise.all([
-        materialBuildTexture('MERRA2_Incident_Shortwave_Over_Land_Monthly', ENVIRONMENT_RADIATION_TIME, controller.signal),
-        materialBuildTexture('MERRA2_Precipitation_Bias_Corrected_Monthly', ENVIRONMENT_CLIMATE_TIME, controller.signal),
-        materialBuildWorldCoverTexture(controller.signal),
-        materialBuildTexture(ENVIRONMENT_CANOPY_LAYER, 'default', controller.signal),
-        materialBuildClimateTexture(ENVIRONMENT_CLIMATE_TIME, controller.signal),
-        materialBuildWorldCerealTexture(controller.signal).catch(e=>{ console.warn('gallery: WorldCereal WMS unavailable; falling back to WorldCover agriculture mask',e); return null; }),
-        materialBuildRiverInfluenceTexture(controller.signal),
-        materialBuildGeologyTexture(controller.signal).catch(e=>{ console.warn('gallery: GLiM geology image unavailable; using neutral geology base',e); return null; }),
+      // The DEM and coastline mask are structural. Environmental fields are
+      // independent: one provider failure must never abort the entire material.
+      const [demTiles,landMask]=await Promise.all([
         materialBuildDemTiles(controller.signal),
         materialBuildLandMask(controller.signal)
       ]);
-      const [radiation, precipitation, worldCover, canopy, climate, worldCereal, riverInfluence, geology, demTiles, landMask] = results;
+      const radiation=await materialOptional('NASA radiation',()=>materialBuildTexture('MERRA2_Incident_Shortwave_Over_Land_Monthly',ENVIRONMENT_RADIATION_TIME,controller.signal),0.5);
+      const precipitation=await materialOptional('NASA precipitation',()=>materialBuildTexture('MERRA2_Precipitation_Bias_Corrected_Monthly',ENVIRONMENT_CLIMATE_TIME,controller.signal),0.5);
+      const worldCover=await materialOptional('ESA WorldCover',()=>materialBuildWorldCoverTexture(controller.signal),0);
+      const canopy=await materialOptional('GEDI canopy',()=>materialBuildTexture(ENVIRONMENT_CANOPY_LAYER,'default',controller.signal),0);
+      const climate=await materialOptional('NASA climate fields',()=>materialBuildClimateTexture(ENVIRONMENT_CLIMATE_TIME,controller.signal),0.5);
+      const worldCereal=await materialOptional('ESA WorldCereal',()=>materialBuildWorldCerealTexture(controller.signal),0);
+      const riverInfluence=await materialBuildRiverInfluenceTexture(controller.signal);
+      const geology=await materialOptional('GLiM geology',()=>materialBuildGeologyTexture(controller.signal),0.5);
       const detail=await materialBuildEnvironmentalDetailTexture(worldCereal || worldCover,riverInfluence,geology || worldCover);
       terrainMaterialTextures={radiation,precipitation,worldCover,canopy,climate,detail,night:null};
       terrainMaterialTiles=demTiles;
       terrainMaterialLandMask=landMask;
       terrainMaterialReady=true;
+      window.__terrainMaterialStatus='ready';
       if(map) map.triggerRepaint();
-    }catch(e){ console.warn('gallery: custom terrain material failed',e); }
-    finally{ terrainMaterialLoading=false; }
+    }catch(e){
+      window.__terrainMaterialStatus='FAILED: '+(e&&e.message?e.message:e);
+      console.warn('gallery: custom terrain material failed',e);
+    }finally{ terrainMaterialLoading=false; }
   }
 
   let terrainMaterialNightLoading=false;
+  window.__terrainMaterialStatus='loading';
+  window.__nightTextureStatus='not loaded';
+  window.__worldCerealStatus='not loaded';
   async function loadTerrainNightTexture(){
     if(terrainMaterialTextures && terrainMaterialTextures.night) return;
     if(terrainMaterialNightLoading) return;
     terrainMaterialNightLoading=true;
     try{
       const controller=new AbortController();
-      terrainMaterialTextures.night=await materialBuildTexture('VIIRS_Night_Lights','default',controller.signal);
-      if(terrainMaterialLayer) terrainMaterialLayer._nightUploaded = false;
+      terrainMaterialTextures.night=await materialBuildTexture('VIIRS_Night_Lights','2016-01-01',controller.signal);
+      if(terrainMaterialLayer) terrainMaterialLayer._nightUploaded=false;
+      window.__nightTextureStatus='VIIRS Black Marble WMS loaded';
       if(terrainMapInstance) terrainMapInstance.triggerRepaint();
-    }catch(e){ window.__nightTextureStatus='VIIRS WMS FAILED: '+(e&&e.message?e.message:e); console.warn('gallery: custom night luminance texture failed',e); }
-    finally{ terrainMaterialNightLoading=false; }
+    }catch(e){
+      window.__nightTextureStatus='VIIRS FAILED: '+(e&&e.message?e.message:e);
+      console.warn('gallery: custom night luminance texture failed',e);
+    }finally{ terrainMaterialNightLoading=false; }
   }
 
   function makeTerrainMaterialLayer(){
@@ -1954,15 +1900,18 @@ function installTerrainMaterialProtocols() {
             // VIIRS is deliberately pushed hard here: preserve the real
             // spatial distribution, but bring up the low/mid radiance so
             // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.18);
-            // DEBUG PASS: make every nonzero VIIRS signal brutally obvious.
-            // If this is working, populated areas will be unmistakably hot pink.
-            float lightPresence=smoothstep(0.0005,0.012,lightLift);
-            float emit=u_night*lightPresence*3.2;
-            vec3 hotPink=vec3(1.0,0.0,0.82);
-            vec3 whiteHot=vec3(1.0,0.82,1.0);
-            float core=smoothstep(0.16,0.72,lightLift);
-            vec3 artificialColor=mix(hotPink,whiteHot,core);
+            float lightLift=pow(max(artificial,0.0),0.34);
+            // Broad, soft regional presence: VIIRS is sampled as a material
+            // coefficient, not converted into visible pixels or raised alpha.
+            float lightPresence=smoothstep(0.012,0.085,lightLift);
+            float emit=u_night*lightPresence*1.35;
+            vec3 orangeLight=vec3(1.0,0.18,0.035);
+            vec3 warmCore=vec3(1.0,0.08,0.34);
+            float core=smoothstep(0.12,0.48,lightLift);
+            vec3 artificialColor=mix(orangeLight,warmCore,core);
+            // This is actual terrain-material emission. The existing tone and
+            // alpha remain intact, so the relief never becomes a painted
+            // night-light raster sitting above it.
             tone += artificialColor*emit;
             tone=clamp(tone,0.0,1.0);
             gl_FragColor=vec4(tone,amount);
@@ -2138,8 +2087,6 @@ function setNightPalette(on) {
       if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('stamen-toner-labels') ? 'stamen-toner-labels' : undefined);
       if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
       if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
-      if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
-      if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
       if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
       terrainMapInstance.triggerRepaint();
       requestAnimationFrame(() => { if (terrainMapInstance && request === nightPaletteRequest) terrainMapInstance.triggerRepaint(); });
@@ -2472,8 +2419,6 @@ function initTerrainMap() {
           tileSize: 512,
         },
         bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
-        terrainRadiation: { type: 'raster', tiles: ['terrain-radiation://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 10, attribution: 'Radiation: NASA MERRA-2 / GIBS' },
-        terrainClimate: { type: 'raster', tiles: ['terrain-climate://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 8, attribution: 'Climate: NASA MERRA-2 / GIBS' },
         snowTerrain: { type: 'raster', tiles: ['snow-terrain://{z}/{x}/{y}'], tileSize: 512, minzoom: 0, maxzoom: 10, attribution: 'Snow mask: Mapterhorn elevation / Copernicus DEM' },
       },
       layers: [
@@ -2499,16 +2444,6 @@ function initTerrainMap() {
               4200, '#f5ecd4',   // peaks, lightest tone in the palette
             ],
           },
-        },
-        {
-          id: 'terrain-radiation', type: 'raster', source: 'terrainRadiation',
-          minzoom: 0, maxzoom: 10,
-          paint: { 'raster-opacity': 0.78, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
-        },
-        {
-          id: 'terrain-climate', type: 'raster', source: 'terrainClimate',
-          minzoom: 0, maxzoom: 8,
-          paint: { 'raster-opacity': 0.62, 'raster-fade-duration': 500, 'raster-resampling': 'linear' }
         },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',

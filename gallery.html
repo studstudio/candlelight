@@ -1690,7 +1690,23 @@ function installTerrainMaterialProtocols() {
       window.__environmentDataStatus={night:window.__nightTextureStatus,worldCereal:window.__worldCerealStatus,glim:window.__glimStatus};
       console.info('gallery: environmental material READY',window.__environmentDataStatus);
       console.info('gallery: environmental material READY', window.__environmentDataStatus);
-      if(map) map.triggerRepaint();
+      if(map){
+        map.triggerRepaint();
+        // MapLibre can complete the asynchronous material build between render
+        // frames. Keep requesting a short burst of frames so the custom layer
+        // gets a render pass after its textures become ready; this avoids the
+        // first pre-ready callback being the only callback observed on iOS.
+        if(terrainMaterialLayer && !terrainMaterialLayer._readyRepaintLoop){
+          terrainMaterialLayer._readyRepaintLoop=true;
+          let frames=0;
+          const pump=()=>{
+            if(!terrainMaterialLayer || frames++>24){ terrainMaterialLayer._readyRepaintLoop=false; return; }
+            if(terrainMapInstance) terrainMapInstance.triggerRepaint();
+            requestAnimationFrame(pump);
+          };
+          requestAnimationFrame(pump);
+        }
+      }
     }catch(e){
       window.__terrainMaterialStatus='FAILED: '+(e&&e.message?e.message:e);
       console.warn('gallery: custom terrain material failed',e);
@@ -1965,9 +1981,10 @@ function installTerrainMaterialProtocols() {
         terrainMaterialLayer._gl=gl;
       },
       render(gl,args){
-        if(!terrainMaterialLayer._firstRenderProbe){
-          terrainMaterialLayer._firstRenderProbe=true;
-          console.info('gallery: environmental custom layer render callback ACTIVE', {ready:terrainMaterialReady, program:!!terrainMaterialProgram, textures:!!terrainMaterialTextures, night:!!terrainMaterialNightTexture, nightMode:!!nightModeOn});
+        const renderState=`ready=${terrainMaterialReady};program=${!!terrainMaterialProgram};textures=${!!terrainMaterialTextures};night=${!!terrainMaterialNightTexture};nightMode=${!!nightModeOn}`;
+        if(renderState!==terrainMaterialLayer._lastRenderState){
+          terrainMaterialLayer._lastRenderState=renderState;
+          console.info('gallery: environmental custom layer render state', {ready:terrainMaterialReady, program:!!terrainMaterialProgram, textures:!!terrainMaterialTextures, night:!!terrainMaterialNightTexture, nightMode:!!nightModeOn});
         }
         if(!terrainMaterialReady || !terrainMaterialProgram || !terrainMaterialTextures) return;
         if(nightModeOn && !(terrainMaterialNightTexture || terrainMaterialTextures.night)) { if(window.__loadTerrainNightTexture) window.__loadTerrainNightTexture(); return; }

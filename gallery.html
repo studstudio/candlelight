@@ -1003,6 +1003,18 @@ function dockMap() { dockWithFade(); } // initial-load call sites — same mecha
 function applyLayerToggles() {
   if (!terrainMapInstance) return;
   try {
+    // Keep Classic on the original Mapterhorn terrain geometry and Satellite
+    // on MapTiler Terrain RGB. This is important for both responsiveness and
+    // preserving the original Classic rendering: changing only the paint
+    // layers while leaving MapTiler DEM active still makes Classic download
+    // and process the newer terrain pyramid.
+    if (terrainMapInstance.setTerrain) {
+      const desiredTerrainSource = maptilerSatelliteOn ? 'terrainSource' : 'classicTerrainSource';
+      const currentTerrain = terrainMapInstance.getTerrain && terrainMapInstance.getTerrain();
+      if (!currentTerrain || currentTerrain.source !== desiredTerrainSource) {
+        terrainMapInstance.setTerrain({ source: desiredTerrainSource, exaggeration: 1 });
+      }
+    }
     if (terrainMapInstance.getLayer('stamen-toner-labels')) {
       terrainMapInstance.setLayoutProperty('stamen-toner-labels', 'visibility', tonerLabelsOn ? 'visible' : 'none');
     }
@@ -1022,6 +1034,9 @@ function applyLayerToggles() {
     // the real bathymetry layers below — never the flat-map GeoJSON lakes/rivers.
     if (terrainMapInstance.getLayer('maptiler-satellite')) {
       terrainMapInstance.setLayoutProperty('maptiler-satellite', 'visibility', maptilerSatelliteOn ? 'visible' : 'none');
+    }
+    if (terrainMapInstance.getLayer('maptiler-3d-buildings')) {
+      terrainMapInstance.setLayoutProperty('maptiler-3d-buildings', 'visibility', maptilerSatelliteOn ? 'visible' : 'none');
     }
     if (terrainMapInstance.getLayer('color-relief')) {
       terrainMapInstance.setLayoutProperty('color-relief', 'visibility', maptilerSatelliteOn ? 'none' : 'visible');
@@ -2394,6 +2409,15 @@ function initTerrainMap() {
           maxzoom: 22,
           attribution: '© <a href="https://www.maptiler.com/" target="_blank">MapTiler</a> © MapTiler Satellite'
         },
+        // MapTiler/OpenMapTiles vector data supplies real OSM building footprints
+        // and height attributes independently of the photographic satellite surface.
+        // Keeping this as a separate vector source lets the satellite imagery remain
+        // untouched while buildings are rendered natively as 3D extrusions.
+        maptilerBuildings: {
+          type: 'vector',
+          url: `https://api.maptiler.com/tiles/v3-openmaptiles/tiles.json?key=${MAPTILER_API_KEY}`,
+          attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors'
+        },
         // MapTiler Terrain RGB v2 is the real 3D geometry source. It is a
         // high-resolution global DEM (30 m globally, with 5 m data in
         // specific areas) and is consumed directly by MapLibre's terrain
@@ -2451,6 +2475,27 @@ function initTerrainMap() {
       layers: [
         // THE SURFACE: MapTiler satellite imagery, full opacity.
         { id: 'maptiler-satellite', type: 'raster', source: 'maptilerSatellite', paint: { 'raster-opacity': 1, 'raster-fade-duration': 0, 'raster-resampling': 'linear' } },
+        // Satellite mode: real building footprints/heights from the
+        // MapTiler/OpenMapTiles vector dataset. This is deliberately visible
+        // only in satellite mode so classic mode remains exactly the relief
+        // presentation. MapTiler's building example uses the same
+        // fill-extrusion mechanism and the building height/min_height fields.
+        {
+          id: 'maptiler-3d-buildings',
+          type: 'fill-extrusion',
+          source: 'maptilerBuildings',
+          'source-layer': 'building',
+          minzoom: 15,
+          filter: ['==', ['get', 'extrude'], true],
+          layout: { visibility: 'visible' },
+          paint: {
+            'fill-extrusion-color': '#d9d2c5',
+            'fill-extrusion-height': ['coalesce', ['get', 'height'], 0],
+            'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
+            'fill-extrusion-opacity': 0.78,
+            'fill-extrusion-vertical-gradient': true
+          }
+        },
         // Satellite mode: subtle native MapLibre hillshade from the same
         // MapTiler DEM. It follows the actual 3D terrain; it is not another
         // surface or mesh.
@@ -2525,7 +2570,7 @@ function initTerrainMap() {
           paint: { 'raster-opacity': 1, 'raster-contrast': -0.6, 'raster-fade-duration': 0 }
         },
       ],
-      terrain: { source: 'terrainSource', exaggeration: 1 },
+      terrain: { source: maptilerSatelliteOn ? 'terrainSource' : 'classicTerrainSource', exaggeration: 1 },
       sky: {
         'sky-color': '#18BFFF',
         'sky-horizon-blend': 0.28,
@@ -2809,6 +2854,10 @@ async function enter3D(lon, lat) {
   if (in3D) return;
   in3D = true;
   await loadMapLibre();
+  // RainViewer is initialized only when 3D is actually entered. This keeps
+  // the flat map fast while restoring the original live precipitation layer
+  // and its MapLibre attribution in the 3D view.
+  if (!DEBUG_DISABLE_WEATHER) initWeatherProtocol();
   const map3d = initTerrainMap();
   const zoom = Math.max(3, equivalentMapLibreZoom(lat)); // matches where you actually were on the flat map — no artificial floor
   zoomHistory = [{ t: performance.now(), z: zoom }];

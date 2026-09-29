@@ -1259,7 +1259,7 @@ const ENVIRONMENT_CLIMATE_Z = 5;
 const ENVIRONMENT_CLIMATE_TIME = '2020-07-01';
 const ENVIRONMENT_RADIATION_TIME = '2020-07-01';
 const ENVIRONMENT_CANOPY_LAYER = 'GEDI_ISS_L3_Canopy_Height_Mean_RH100_201904-202303';
-const ENVIRONMENT_GEOLOGY_SERVICE = 'https://tiles.arcgis.com/tiles/tV7nu2LqSErotsj3/arcgis/rest/services/Orix_World_Experience_3D_WTL1/MapServer/export';
+const ENVIRONMENT_GEOLOGY_SERVICE = 'https://tiles.arcgis.com/tiles/tV7nu2LqSErotsj3/arcgis/rest/services/Orix_World_Experience_3D_WTL1/MapServer/tile';
 const ENVIRONMENT_GEOLOGY_SIZE = 1024;
 const ENVIRONMENT_FLOW_SIZE = 1024;
 // Agriculture is intentionally a material function, not a painted GIS layer.
@@ -1431,10 +1431,10 @@ function installTerrainMaterialProtocols() {
     const isNight = kind === 'VIIRS_Night_Lights';
     const world=20037508.342789244;
     const params=new URLSearchParams({
-      SERVICE:'WMS', VERSION:'1.3.0', REQUEST:'GetMap',
-      LAYERS:kind, STYLES:'', CRS:'EPSG:3857',
+      SERVICE:'WMS', VERSION:'1.1.1', REQUEST:'GetMap',
+      LAYERS:kind, STYLES:'', SRS:'EPSG:3857',
       BBOX:`-${world},-${world},${world},${world}`,
-      WIDTH:'1024', HEIGHT:'1024', FORMAT:'image/png', TRANSPARENT:'TRUE'
+      WIDTH:'1024', HEIGHT:'1024', FORMAT:'image/png', TRANSPARENT:'FALSE'
     });
     if(isNight) params.set('TIME','2016-01-01');
     else if(time && time !== 'default') params.set('TIME',time);
@@ -1485,7 +1485,7 @@ function installTerrainMaterialProtocols() {
     // patches.  OSM_Land_Mask is a dedicated coastline mask, so use it to
     // decide where the environmental material is allowed to exist.
     const width=1024, height=1024, world=20037508.342789244;
-    const url='https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?version=1.3.0&service=WMS&request=GetMap&format=image/png&layers=OSM_Land_Mask&styles=&crs=EPSG:3857&bbox=-'+world+',-'+world+','+world+','+world+'&width='+width+'&height='+height+'&transparent=true';
+    const url='https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?version=1.1.1&service=WMS&request=GetMap&format=image/png&layers=OSM_Land_Mask&styles=&srs=EPSG:3857&bbox=-'+world+',-'+world+','+world+','+world+'&width='+width+'&height='+height+'&transparent=true';
     const b=await materialFetchBitmap(url,signal);
     const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true});
     ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
@@ -1546,7 +1546,7 @@ function installTerrainMaterialProtocols() {
     const size=768, world=20037508.342789244;
     const canvases=[];
     for(const kind of kinds){
-      const params=new URLSearchParams({SERVICE:'WMS',VERSION:'1.3.0',REQUEST:'GetMap',LAYERS:kind,STYLES:'',CRS:'EPSG:3857',BBOX:`-${world},-${world},${world},${world}`,WIDTH:String(size),HEIGHT:String(size),FORMAT:'image/png',TRANSPARENT:'TRUE',TIME:time});
+      const params=new URLSearchParams({SERVICE:'WMS',VERSION:'1.1.1',REQUEST:'GetMap',LAYERS:kind,STYLES:'',SRS:'EPSG:3857',BBOX:`-${world},-${world},${world},${world}`,WIDTH:String(size),HEIGHT:String(size),FORMAT:'image/png',TRANSPARENT:'TRUE',TIME:time});
       const b=await materialFetchBitmap(`https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?${params.toString()}`,signal);
       const c=new OffscreenCanvas(size,size),ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(b,0,0,size,size); if(b.close)b.close();
       canvases.push(ctx.getImageData(0,0,size,size));
@@ -1576,24 +1576,33 @@ function installTerrainMaterialProtocols() {
   }
 
   async function materialBuildGeologyTexture(signal){
-    // ArcGIS export is requested in the service's native Web-Mercator CRS.
-    // The previous 4326 export parameters were unnecessarily forcing a
-    // reprojection and were one source of brittle/failed requests.
-    const width=1024,height=1024,world=20037508.342789244;
-    const params=new URLSearchParams({
-      bbox:`-${world},-${world},${world},${world}`,
-      bboxSR:'102100', imageSR:'102100', size:`${width},${height}`,
-      format:'png32', transparent:'false', f:'image'
-    });
-    const b=await materialFetchBitmap(`${ENVIRONMENT_GEOLOGY_SERVICE}?${params.toString()}`,signal);
-    const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
+    window.__glimStatus='loading';
+    window.__glimLoaded=false;
+    // GLiM is published by this ArcGIS service as a cached Web-Mercator map
+    // service. Use its documented tile cache directly instead of the brittle
+    // dynamic /export request. Level 2 is a 4x4 global cache (16 tiles), which
+    // is small enough for the material and is explicitly present in the service.
+    const z=2,n=1<<z,size=256,width=n*size,height=n*size;
+    const out=new OffscreenCanvas(width,height),ctx=out.getContext('2d',{willReadFrequently:true});
+    const base='https://tiles.arcgis.com/tiles/tV7nu2LqSErotsj3/arcgis/rest/services/Orix_World_Experience_3D_WTL1/MapServer/tile';
+    const jobs=[];
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
+      const b=await materialFetchBitmap(`${base}/${z}/${y}/${x}`,signal);
+      ctx.drawImage(b,x*size,y*size,size,size); if(b.close)b.close();
+    })());
+    await Promise.all(jobs);
     const img=ctx.getImageData(0,0,width,height),d=img.data;
     for(let i=0;i<d.length;i+=4){
       const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-      d[i]=(0.40+0.60*lum)*255; d[i+1]=(0.43+0.57*lum)*255; d[i+2]=(0.38+0.62*lum)*255; d[i+3]=255;
+      d[i]=Math.round((0.30+0.70*lum)*255);
+      d[i+1]=Math.round((0.32+0.68*lum)*255);
+      d[i+2]=Math.round((0.28+0.72*lum)*255);
+      d[i+3]=255;
     }
     ctx.putImageData(img,0,0);
-    return createImageBitmap(await c.convertToBlob({type:'image/png'}));
+    window.__glimStatus='GLiM ArcGIS tiles loaded';
+    window.__glimLoaded=true;
+    return createImageBitmap(await out.convertToBlob({type:'image/png'}));
   }
 
   async function materialBuildEnvironmentalDetailTexture(cropBitmap,riverBitmap,geologyBitmap){
@@ -1608,11 +1617,16 @@ function installTerrainMaterialProtocols() {
   }
 
   async function materialBuildWorldCerealTexture(signal){
+    window.__worldCerealStatus='loading';
+    window.__worldCerealLoaded=false;
     // Current public Terrascope WMS/WMTS exposes the ESA WorldCereal 2021
     // products directly. Use the documented current layer identifier rather
     // than the retired IIASA GeoServer layer names.
     const width=1024,height=1024,world=20037508.342789244;
-    const params=new URLSearchParams({service:'WMS',version:'1.3.0',request:'GetMap',layers:WORLDCEREAL_CROP_LAYER,styles:'',crs:'EPSG:3857',bbox:`-${world},-${world},${world},${world}`,width:String(width),height:String(height),format:'image/png',transparent:'true'});
+    // Terrascope documents this public WMS endpoint and the WorldCereal layer;
+    // use WMS 1.1.1 here to avoid axis-order ambiguity and request the product's
+    // actual 2021 temporal slice explicitly.
+    const params=new URLSearchParams({service:'WMS',version:'1.1.1',request:'GetMap',layers:WORLDCEREAL_CROP_LAYER,styles:'',srs:'EPSG:3857',bbox:`-${world},-${world},${world},${world}`,width:String(width),height:String(height),format:'image/png',transparent:'true',time:'2021-01-01'});
     const b=await materialFetchBitmap(`${WORLDCEREAL_WMS}?${params.toString()}`,signal);
     const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
     const img=ctx.getImageData(0,0,width,height),d=img.data;
@@ -1622,6 +1636,7 @@ function installTerrainMaterialProtocols() {
     }
     ctx.putImageData(img,0,0);
     window.__worldCerealStatus='WorldCereal WMS loaded';
+    window.__worldCerealLoaded=true;
     return createImageBitmap(await c.convertToBlob({type:'image/png'}));
   }
 
@@ -1633,7 +1648,7 @@ function installTerrainMaterialProtocols() {
 
   async function materialOptional(label, factory, fallback=0){
     try { return await factory(); }
-    catch(e){ console.warn(`gallery: ${label} unavailable; using neutral material fallback`, e); return materialNeutralTexture(fallback); }
+    catch(e){ if(label==='ESA WorldCereal') window.__worldCerealStatus='WorldCereal FAILED: '+(e&&e.message?e.message:e); if(label==='GLiM geology') window.__glimStatus='GLiM FAILED: '+(e&&e.message?e.message:e); console.warn(`gallery: ${label} unavailable; using neutral material fallback`, e); return materialNeutralTexture(fallback); }
   }
 
   async function loadTerrainMaterial(map){
@@ -1655,12 +1670,13 @@ function installTerrainMaterialProtocols() {
       const worldCereal=await materialOptional('ESA WorldCereal',()=>materialBuildWorldCerealTexture(controller.signal),0);
       const riverInfluence=await materialBuildRiverInfluenceTexture(controller.signal);
       const geology=await materialOptional('GLiM geology',()=>materialBuildGeologyTexture(controller.signal),0.5);
-      const detail=await materialBuildEnvironmentalDetailTexture(worldCereal || worldCover,riverInfluence,geology || worldCover);
+      const detail=await materialBuildEnvironmentalDetailTexture(window.__worldCerealLoaded ? worldCereal : worldCover,riverInfluence,window.__glimLoaded ? geology : worldCover);
       terrainMaterialTextures={radiation,precipitation,worldCover,canopy,climate,detail,night:null};
       terrainMaterialTiles=demTiles;
       terrainMaterialLandMask=landMask;
       terrainMaterialReady=true;
       window.__terrainMaterialStatus='ready';
+      window.__environmentDataStatus={night:window.__nightTextureStatus,worldCereal:window.__worldCerealStatus,glim:window.__glimStatus};
       if(map) map.triggerRepaint();
     }catch(e){
       window.__terrainMaterialStatus='FAILED: '+(e&&e.message?e.message:e);
@@ -1672,6 +1688,9 @@ function installTerrainMaterialProtocols() {
   window.__terrainMaterialStatus='loading';
   window.__nightTextureStatus='not loaded';
   window.__worldCerealStatus='not loaded';
+  window.__worldCerealLoaded=false;
+  window.__glimStatus='not loaded';
+  window.__glimLoaded=false;
   async function loadTerrainNightTexture(){
     if(terrainMaterialTextures && terrainMaterialTextures.night) return;
     if(terrainMaterialNightLoading) return;
@@ -1747,9 +1766,11 @@ function installTerrainMaterialProtocols() {
             float riverLush=riverProximity*(0.46+0.54*smoothstep(0.20,0.76,waterBalance));
             vec3 geology=vec3(detail.b);
             float geologyTone=0.5*(geology.r+geology.g);
-            float bareRock=1.0-smoothstep(0.10,0.48,vegetation);
+            // WorldCover-derived vegetation is needed by the geology response,
+            // so declare it before any expression that references it.
+            float bareRock;
             float steepRock=smoothstep(7.0,25.0,v_slope);
-            float rockSignal=clamp(smoothstep(0.48,0.76,geologyTone)*mix(0.58,1.0,bareRock)*mix(0.55,1.0,steepRock),0.0,1.0);
+            float rockSignal;
             // Convert Mercator Y to geographic latitude for the EPSG:4326
             // land-mask texture. Do not rely on the coarse DEM vertex flag:
             // that was the source of the square shoreline artifacts.
@@ -1780,6 +1801,8 @@ function installTerrainMaterialProtocols() {
             float isMangrove=1.0-step(0.55,abs(wcClass-9.0));
             float isMoss=1.0-step(0.55,abs(wcClass-10.0));
             float vegetation=(isTree*0.95+isShrub*0.72+isGrass*0.56+isCrop*0.46+isWet*0.86+isMangrove*0.98+isMoss*0.78+isBare*0.08+isBuilt*0.02)*wcValid;
+            bareRock=1.0-smoothstep(0.10,0.48,vegetation);
+            rockSignal=clamp(smoothstep(0.48,0.76,geologyTone)*mix(0.58,1.0,bareRock)*mix(0.55,1.0,steepRock),0.0,1.0);
             // GEDI L3 mean RH100 canopy-height layer. GIBS renders the official
             // canopy-height product as a continuous color ramp; its sampled
             // luminance is used only as a normalized height proxy, and only woody
@@ -1900,19 +1923,20 @@ function installTerrainMaterialProtocols() {
             // VIIRS is deliberately pushed hard here: preserve the real
             // spatial distribution, but bring up the low/mid radiance so
             // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.34);
+            float lightLift=pow(max(artificial,0.0),0.22);
             // Broad, soft regional presence: VIIRS is sampled as a material
             // coefficient, not converted into visible pixels or raised alpha.
-            float lightPresence=smoothstep(0.012,0.085,lightLift);
-            float emit=u_night*lightPresence*1.35;
-            vec3 orangeLight=vec3(1.0,0.18,0.035);
-            vec3 warmCore=vec3(1.0,0.08,0.34);
+            float lightPresence=smoothstep(0.0005,0.035,lightLift);
+            float emit=u_night*lightPresence*6.0;
+            vec3 orangeLight=vec3(1.0,0.0,0.55);
+            vec3 warmCore=vec3(1.0,0.0,1.0);
             float core=smoothstep(0.12,0.48,lightLift);
             vec3 artificialColor=mix(orangeLight,warmCore,core);
             // This is actual terrain-material emission. The existing tone and
             // alpha remain intact, so the relief never becomes a painted
             // night-light raster sitting above it.
-            tone += artificialColor*emit;
+            tone = mix(tone, artificialColor, min(0.98, emit*0.45));
+            tone += artificialColor*emit*0.55;
             tone=clamp(tone,0.0,1.0);
             gl_FragColor=vec4(tone,amount);
           }`;
@@ -2360,6 +2384,7 @@ function initTerrainMap() {
         // own pattern for improved render quality (terrain mesh + hillshade
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        terrainSource3D: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         // The flat azimuthal map still uses its GeoJSON water data. The 3D map
         // does not: bathymetry is the authoritative water surface here so
@@ -2572,7 +2597,7 @@ function initTerrainMap() {
           }
         },
       ],
-      terrain: { source: 'terrainSource', exaggeration: 1 },
+      terrain: { source: 'terrainSource3D', exaggeration: 1 },
       // Keep the 3D camera's exposed sky/horizon vividly blue up close,
       // but fade distant TERRAIN (not just the sky) toward a soft white
       // as it approaches the horizon — fog-color/fog-ground-blend are the

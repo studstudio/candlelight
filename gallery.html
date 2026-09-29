@@ -1445,7 +1445,7 @@ function installNightLightsProtocol() {
     const safeZ = Math.min(z, 8);
     const scale = Math.pow(2, z - safeZ);
     const safeX = Math.floor(x / scale), safeY = Math.floor(y / scale);
-    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/2016-01-01/GoogleMapsCompatible_Level8/${safeZ}/${safeY}/${safeX}.png`;
+    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/${safeZ}/${safeY}/${safeX}.png`;
     const res = await fetch(url, { signal: abortController && abortController.signal });
     if (!res.ok) throw new Error(`NASA VIIRS night-light tile ${res.status}`);
     const bitmap = await createImageBitmap(await res.blob());
@@ -1455,8 +1455,8 @@ function installNightLightsProtocol() {
     const img=ctx.getImageData(0,0,size,size), d=img.data;
     for(let i=0;i<d.length;i+=4){
       const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-      const s=Math.pow(Math.max(0,Math.min(1,(lum-.10)/.62)),2.15);
-      d[i]=255; d[i+1]=170; d[i+2]=82; d[i+3]=Math.round(255*s*.22);
+      const s=Math.pow(Math.max(0,Math.min(1,(lum-.035)/.50)),1.55);
+      d[i]=255; d[i+1]=174; d[i+2]=92; d[i+3]=Math.round(255*s*.88);
     }
     ctx.putImageData(img,0,0);
     return {data:await(await c.convertToBlob({type:'image/png'})).arrayBuffer()};
@@ -1526,7 +1526,7 @@ function installNightLightsProtocol() {
     for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
       const isNight = kind === 'VIIRS_Night_Lights';
       const url = isNight
-        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/2016-01-01/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
+        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
         : `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kind}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
       const b=await materialFetchBitmap(url,signal);
       ctx.drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE);
@@ -1972,15 +1972,15 @@ function installNightLightsProtocol() {
             // VIIRS is deliberately pushed hard here: preserve the real
             // spatial distribution, but bring up the low/mid radiance so
             // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.12);
-            float lightPresence=smoothstep(0.00008,0.025,lightLift);
-            float emit=u_night*lightPresence*9.50;
+            float lightLift=pow(max(artificial,0.0),0.20);
+            float lightPresence=smoothstep(0.0004,0.060,lightLift);
+            float emit=u_night*lightPresence*7.50;
             vec3 orangeLight=vec3(1.0,0.24,0.018);
             vec3 pinkLight=vec3(1.0,0.035,0.30);
             float pinkBias=smoothstep(0.10,0.62,lightLift);
             vec3 artificialColor=mix(orangeLight,pinkLight,pinkBias);
             tone=mix(tone,artificialColor,min(0.92,emit*0.30));
-            amount += emit*4.50;
+            amount += emit*3.00;
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -2141,20 +2141,22 @@ function setNightPalette(on) {
       if (terrainMapInstance.getLayer('stamen-toner-labels')) {
         terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-opacity',1.0);
         terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-min',0.0);
-        terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-max',0.62);
+        terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-max',on?0.62:1.0);
       }
       if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
         terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-opacity',1.0);
         terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-brightness-min',0.0);
         terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-brightness-max',on?0.68:1.0);
-        terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-contrast',-0.18);
       }
 
       if(terrainMapInstance.getLayer('night-lights')) {
-        terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'none':'none');
+        terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'visible':'none');
+        terrainMapInstance.setPaintProperty('night-lights','raster-opacity',on?0.95:0.0);
+        terrainMapInstance.setPaintProperty('night-lights','raster-brightness-min',0.0);
+        terrainMapInstance.setPaintProperty('night-lights','raster-brightness-max',on?1.0:1.0);
       }
       const material=window.__terrainMaterialLayer;
-      if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('stamen-toner-labels') ? 'stamen-toner-labels' : undefined);
+      if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('night-lights') ? 'night-lights' : (terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined));
       if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
       if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
       if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
@@ -2530,7 +2532,6 @@ function initTerrainMap() {
           minzoom: 0, maxzoom: 8,
           paint: { 'raster-opacity': 0.62, 'raster-fade-duration': 500, 'raster-resampling': 'linear' }
         },
-        { id: 'night-lights', type: 'raster', source: 'nightLights', layout: { visibility: 'none' }, paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' } },
         {
           id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
           paint: {
@@ -2632,7 +2633,6 @@ function initTerrainMap() {
             'raster-opacity': 1.0,
             'raster-brightness-min': 0.0,
             'raster-brightness-max': 1.0,
-            'raster-contrast': -0.18,
             'raster-fade-duration': 0
           }
         },
@@ -2644,6 +2644,9 @@ function initTerrainMap() {
           minzoom: 0, maxzoom: 10,
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
+        // NASA VIIRS Black Marble / Night Lights: processed to transparent warm hotspots.
+        // It must sit ABOVE snow/terrain so the light pixels are not covered by later raster layers.
+        { id: 'night-lights', type: 'raster', source: 'nightLights', layout: { visibility: 'none' }, paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 0, 'raster-resampling': 'linear', 'raster-brightness-min': 0.0, 'raster-brightness-max': 1.0 } },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.
         {
@@ -2687,7 +2690,7 @@ function initTerrainMap() {
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
     applyLayerToggles();
-    if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
+    if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer, terrainMapInstance.getLayer('night-lights') ? 'night-lights' : (terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined));
     if (window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     setNightPalette(nightModeOn);
     if (DEBUG_DISABLE_BATHYMETRY) {

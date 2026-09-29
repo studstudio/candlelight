@@ -1732,6 +1732,7 @@ function installTerrainMaterialProtocols() {
     terrainMaterialLayer={
       id:'environmental-terrain-material', type:'custom', renderingMode:'3d',
       onAdd(map,gl){
+        console.info('gallery: environmental custom layer onAdd', {context:!!gl});
         const vs=`
           attribute vec3 a_pos;
           attribute vec2 a_uv;
@@ -1949,14 +1950,14 @@ function installTerrainMaterialProtocols() {
             // Diagnostic emission: if VIIRS reaches this shader, populated
             // areas become unmistakably hot pink. This is still emitted by
             // the terrain material, never a separate raster layer.
-            float lightPresence=smoothstep(0.00001,0.012,lightLift);
-            float emit=u_night*lightPresence*18.0;
+            float lightPresence=smoothstep(0.000001,0.004,lightLift);
+            float emit=u_night*lightPresence*24.0;
             vec3 orangeLight=vec3(1.0,0.0,0.35);
             vec3 warmCore=vec3(1.0,0.0,1.0);
             float core=smoothstep(0.08,0.36,lightLift);
             vec3 artificialColor=mix(orangeLight,warmCore,core);
             tone=mix(tone,artificialColor,min(1.0,emit*0.85));
-            amount=mix(amount,1.0,lightPresence*u_night);
+            amount=max(amount,lightPresence*u_night);
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -1964,6 +1965,10 @@ function installTerrainMaterialProtocols() {
         terrainMaterialLayer._gl=gl;
       },
       render(gl,args){
+        if(!terrainMaterialLayer._firstRenderProbe){
+          terrainMaterialLayer._firstRenderProbe=true;
+          console.info('gallery: environmental custom layer render callback ACTIVE', {ready:terrainMaterialReady, program:!!terrainMaterialProgram, textures:!!terrainMaterialTextures, night:!!terrainMaterialNightTexture, nightMode:!!nightModeOn});
+        }
         if(!terrainMaterialReady || !terrainMaterialProgram || !terrainMaterialTextures) return;
         if(nightModeOn && !(terrainMaterialNightTexture || terrainMaterialTextures.night)) { if(window.__loadTerrainNightTexture) window.__loadTerrainNightTexture(); return; }
         const matrix=args.defaultProjectionData ? args.defaultProjectionData.mainMatrix : args.modelViewProjectionMatrix;
@@ -2132,7 +2137,7 @@ function setNightPalette(on) {
       }
 
       const material=window.__terrainMaterialLayer;
-      if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('stamen-toner-labels') ? 'stamen-toner-labels' : undefined);
+      if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material);
       if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
       if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
       if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
@@ -2649,7 +2654,7 @@ function initTerrainMap() {
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
     applyLayerToggles();
-    if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer, terrainMapInstance.getLayer('stamen-toner-labels') ? 'stamen-toner-labels' : undefined);
+    if (window.__terrainMaterialLayer && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(window.__terrainMaterialLayer);
     if (window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     setNightPalette(nightModeOn);
     if (DEBUG_DISABLE_BATHYMETRY) {

@@ -1106,6 +1106,7 @@ toggleSatelliteBtn.onclick = () => {
   toggleSatelliteBtn.classList.toggle('active', maptilerSatelliteOn);
   toggleSatelliteBtn.setAttribute('aria-pressed', String(maptilerSatelliteOn));
   applyLayerToggles();
+  applyBuildingPalette();
 };
 toggleBuildingsBtn.onclick = () => {
   buildingsOn = !buildingsOn;
@@ -2158,6 +2159,44 @@ const NIGHT_COLORS = {
   sky:{'sky-color':'#02050d','sky-horizon-blend':0.34,'horizon-color':'#17283c','horizon-fog-blend':0.72,'fog-color':'#08111d','fog-ground-blend':0.72},
   light:{anchor:'viewport',color:'#d9e7ff',intensity:0.18}
 };
+function applyBuildingPalette() {
+  if (!terrainMapInstance || !terrainMapInstance.getLayer('maptiler-3d-buildings')) return;
+  // The extrusion renderer supplies directional shading and its own vertical
+  // gradient. These palettes set the material family; the height stops give
+  // the upper faces a distinct highlight tone without adding another layer.
+  const satellite = maptilerSatelliteOn;
+  const night = nightModeOn;
+  let color, opacity;
+  if (satellite) {
+    color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
+      0, '#e9e5dc',
+      60, '#f1eee7',
+      180, '#f7f4ec',
+      400, '#fffdf5'
+    ];
+    opacity = 0.72;
+  } else if (night) {
+    color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
+      0, '#292b2d',
+      50, '#343638',
+      160, '#474a4d',
+      350, '#c4c9cb'
+    ];
+    opacity = 0.92;
+  } else {
+    color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
+      0, '#cdb58c',
+      50, '#d8c19a',
+      160, '#b77d61',
+      350, '#a95f4d'
+    ];
+    opacity = 0.92;
+  }
+  terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-color', color);
+  terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-opacity', opacity);
+  terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-vertical-gradient', true);
+}
+
 function setNightPalette(on) {
   window.__pendingNightPalette = on;
   if (!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
@@ -2176,6 +2215,7 @@ function setNightPalette(on) {
     if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',0);
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
+    applyBuildingPalette();
   } catch(err) {
     console.warn('gallery: night palette update failed',err);
     if (terrainMapInstance) terrainMapInstance.once('idle', () => { if (nightModeOn === on) setNightPalette(on); });
@@ -2536,7 +2576,7 @@ function initTerrainMap() {
             'fill-extrusion-base': [
               'coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0
             ],
-            'fill-extrusion-opacity': 0.90,
+            'fill-extrusion-opacity': 0.72,
             'fill-extrusion-vertical-gradient': true
           }
         },

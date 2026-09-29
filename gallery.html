@@ -2502,19 +2502,29 @@ function initTerrainMap() {
           source: 'maptilerBuildings',
           'source-layer': 'building',
           minzoom: 14,
-          // OpenMapTiles/MapTiler building tiles have used both a boolean
-          // and a string representation for the `extrude` flag across
-          // dataset/style generations. Accept either, and use the rendered
-          // height fields when present (with the raw OSM height fields as a
-          // fallback). This keeps ordinary San Francisco buildings from
-          // silently filtering out of the extrusion layer.
-          filter: ['any', ['==', ['get', 'extrude'], true], ['==', ['get', 'extrude'], 'true']],
+          // Do NOT require the optional `extrude` flag here. MapTiler's
+          // OpenMapTiles building data exposes the rendered building geometry
+          // through render_height/render_min_height, and the official MapTiler
+          // 3D style uses the absence of hide_3d as the inclusion rule. The
+          // previous extrude-only filter could therefore remove otherwise
+          // perfectly valid San Francisco buildings before the extrusion
+          // renderer ever saw them.
+          filter: ['!=', ['get', 'hide_3d'], true],
           layout: { visibility: 'visible' },
           paint: {
             'fill-extrusion-color': '#d9d2c5',
-            'fill-extrusion-height': ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
-            'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0],
-            'fill-extrusion-opacity': 0.86,
+            // Fade the extrusion in over one zoom level, matching MapLibre's
+            // documented 3D-building pattern rather than abruptly turning a
+            // large collection of polygons on at one zoom boundary.
+            'fill-extrusion-height': [
+              'interpolate', ['linear'], ['zoom'],
+              14, 0,
+              15, ['coalesce', ['get', 'render_height'], ['get', 'height'], 0]
+            ],
+            'fill-extrusion-base': [
+              'coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0
+            ],
+            'fill-extrusion-opacity': 0.90,
             'fill-extrusion-vertical-gradient': true
           }
         },

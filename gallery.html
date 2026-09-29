@@ -1303,10 +1303,11 @@ function installEnvironmentTileShaderProbe(){
     const octx=outCanvas.getContext('2d');
     const out=octx.createImageData(size,size);
     const decode=i=>(dem[i]*256+dem[i+1]+dem[i+2]/256)-32768;
-    // Synthetic geographic field for the first proof: latitude and longitude
-    // become a scalar that MapLibre's native color-relief shader turns into
-    // color. This proves geographic coordinates can drive a terrain-draped
-    // GPU paint pass without constructing a second terrain.
+    // IMPORTANT ARCHITECTURE TEST: this is now an ORDINARY RASTER tile, not
+    // a synthetic raster-DEM. MapLibre's normal raster renderer can therefore
+    // drape this geographic texture onto the existing map.setTerrain() surface.
+    // The Mapterhorn DEM is used only for the land/ocean mask; its elevation is
+    // NEVER encoded into the output texture.
     for(let py=0;py<size;py++){
       const worldY=(y+py/size)/n;
       const merc=Math.PI-2*Math.PI*worldY;
@@ -1343,11 +1344,15 @@ function installEnvironmentTileShaderProbe(){
           stripeValue += 0.055*latFrac + lonSeam;
           value=20+980*Math.max(0,Math.min(1,stripeValue));
         }
-        const enc=value+32768;
-        const r=Math.max(0,Math.min(255,Math.floor(enc/256)));
-        const g=Math.max(0,Math.min(255,Math.floor(enc-r*256)));
-        const b=Math.max(0,Math.min(255,Math.floor((enc-Math.floor(enc))*256)));
-        out.data[si]=r; out.data[si+1]=g; out.data[si+2]=b; out.data[si+3]=255;
+        // Encode the diagnostic as ordinary RGBA color. There is deliberately
+        // NO elevation/DEM value in these output channels. MapLibre will take
+        // this 2D raster and project/drape it over the real terrain.
+        const t=Math.max(0,Math.min(1,(value-20)/980));
+        const band=Math.max(0,Math.min(7,Math.floor(t*8)));
+        const colors=[[255,0,255],[255,70,0],[255,210,0],[0,230,80],[0,220,255],[40,110,255],[150,60,255],[255,255,255]];
+        const c=colors[band];
+        out.data[si]=c[0]; out.data[si+1]=c[1]; out.data[si+2]=c[2];
+        out.data[si+3]=e>25?255:0;
       }
     }
     octx.putImageData(out,0,0);
@@ -2262,7 +2267,7 @@ function initTerrainMap() {
         },
         bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
         snowTerrain: { type: 'raster', tiles: ['snow-terrain://{z}/{x}/{y}'], tileSize: 512, minzoom: 0, maxzoom: 10, attribution: 'Snow mask: Mapterhorn elevation / Copernicus DEM' },
-        environmentProbe: { type: 'raster-dem', tiles: ['environment-probe://{z}/{x}/{y}'], encoding: 'terrarium', tileSize: 256, minzoom: 0, maxzoom: 12 },
+        environmentProbe: { type: 'raster', tiles: ['environment-probe://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 12 },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -2387,23 +2392,17 @@ function initTerrainMap() {
           minzoom: 0, maxzoom: 10,
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
-        // TILE-SHADER STRIPE DIAGNOSTIC: latitude bands + longitude seams.
-        // This intentionally uses a synthetic DEM value only as a carrier for
-        // the geographic field, so we can see exactly how MapLibre's native
-        // color-relief render path interacts with the real terrain surface.
+        // TILE-SHADER STRIPE DIAGNOSTIC — TERRAIN DRAPE TEST.
+        // This is now an ordinary raster layer. The tile contains ONLY the
+        // latitude/longitude diagnostic colors; MapLibre's existing terrain
+        // remains the sole elevation surface. This is the architecture we
+        // actually want for the eventual environmental material textures.
         {
-          id: 'environment-probe', type: 'color-relief', source: 'environmentProbe',
+          id: 'environment-probe', type: 'raster', source: 'environmentProbe',
           paint: {
-            'color-relief-opacity': 0.62,
-            'color-relief-color': [
-              'interpolate', ['linear'], ['elevation'],
-              0, 'rgba(0,0,0,0)',
-              100, '#ff00ff',
-              350, '#ff0000',
-              600, '#00ff00',
-              850, '#0088ff',
-              1000, '#ffffff'
-            ]
+            'raster-opacity': 0.72,
+            'raster-fade-duration': 0,
+            'raster-resampling': 'linear'
           }
         },
         // Re-apply the real MapLibre hillshade after the environmental

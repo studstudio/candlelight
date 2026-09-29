@@ -2373,24 +2373,6 @@ function initTerrainMap() {
             'raster-fade-duration': 0
           }
         },
-        // TILE-SHADER PROOF: this is a normal MapLibre color-relief layer fed by
-        // tile-local environmental values. MapLibre drapes color-relief onto the
-        // existing 3D terrain; there is no second DEM mesh and no custom vertices.
-        {
-          id: 'environment-probe', type: 'color-relief', source: 'environmentProbe',
-          paint: {
-            'color-relief-opacity': 0.34,
-            'color-relief-color': [
-              'interpolate', ['linear'], ['elevation'],
-              0, 'rgba(0,0,0,0)',
-              100, 'rgba(89,148,68,0.28)',
-              350, 'rgba(143,177,78,0.34)',
-              600, 'rgba(205,181,83,0.38)',
-              850, 'rgba(220,135,72,0.42)',
-              1000, 'rgba(185,92,80,0.46)'
-            ]
-          }
-        },
         // Snow/ice is derived from the same global DEM rather than a full-world
         // white Antarctica raster. It is intentionally one compact procedural
         // material layer: permanent ice sheets + latitude/elevation snowline.
@@ -2398,6 +2380,24 @@ function initTerrainMap() {
           id: 'snow-terrain', type: 'raster', source: 'snowTerrain',
           minzoom: 0, maxzoom: 10,
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
+        },
+        // TILE-SHADER PROOF: this is a normal MapLibre color-relief layer fed by
+        // tile-local environmental values. MapLibre drapes color-relief onto the
+        // existing 3D terrain; there is no second DEM mesh and no custom vertices.
+        {
+          id: 'environment-probe', type: 'color-relief', source: 'environmentProbe',
+          paint: {
+            'color-relief-opacity': 0.92,
+            'color-relief-color': [
+              'interpolate', ['linear'], ['elevation'],
+              0, 'rgba(0,0,0,0)',
+              100, '#ff00ff',
+              350, '#ff0000',
+              600, '#00ff00',
+              850, '#0088ff',
+              1000, '#ffffff'
+            ]
+          }
         },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.

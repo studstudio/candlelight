@@ -1268,7 +1268,7 @@ const ENVIRONMENT_FLOW_SIZE = 1024;
 // supplied by WorldCereal as the higher-resolution agricultural data path is
 // wired in.
 const AGRICULTURE_BASE_VERSION = 2;
-const WORLDCEREAL_WMS = 'https://titiler.terrascope.be/wms';
+const WORLDCEREAL_WMS = 'https://mapproxy.terrascope.be/mapproxy/service';
 const WORLDCEREAL_CROP_LAYER = 'esa-worldcereal-temporarycrops-10m-2021-v1_classification';
 const WORLDCEREAL_MAIZE_LAYER = 'esa-worldcereal-maize-10m-2021-v1_classification';
 const WORLDCEREAL_WINTER_CEREALS_LAYER = 'esa-worldcereal-wintercereals-10m-2021-v1_classification';
@@ -1392,6 +1392,7 @@ function installTerrainMaterialProtocols() {
   let terrainMaterialTiles = [];
   let terrainMaterialTextures = null;
   let terrainMaterialLandMask = null;
+  let terrainMaterialNightTexture = null;
   const MATERIAL_Z = 2; // 16 global tiles: deliberately broad environmental scale
   const MATERIAL_SAMPLES = 32;
   const MATERIAL_SIZE = 256;
@@ -1418,7 +1419,7 @@ function installTerrainMaterialProtocols() {
 
   async function materialFetchBitmap(url, signal){
     const r = await fetch(url, {signal});
-    if(!r.ok) throw new Error(`environment tile ${r.status}`);
+    if(!r.ok) throw new Error(`environment tile ${r.status}: ${url}`);
     return createImageBitmap(await r.blob());
   }
 
@@ -1432,7 +1433,7 @@ function installTerrainMaterialProtocols() {
     const world=20037508.342789244;
     const params=new URLSearchParams({
       SERVICE:'WMS', VERSION:'1.1.1', REQUEST:'GetMap',
-      LAYERS:kind, STYLES:'', SRS:'EPSG:3857',
+      LAYERS:kind, STYLES:'default', SRS:'EPSG:3857',
       BBOX:`-${world},-${world},${world},${world}`,
       WIDTH:'1024', HEIGHT:'1024', FORMAT:'image/png', TRANSPARENT:'FALSE'
     });
@@ -1507,7 +1508,7 @@ function installTerrainMaterialProtocols() {
     // it to a categorical scalar texture. It is never displayed as its
     // original bright classification palette.
     const world=20037508.342789244;
-    const url='https://titiler.terrascope.be/wms?service=WMS&version=1.3.0&request=GetMap&layers=esa-worldcover-map-10m-2021-v2_map&styles=&format=image/png&transparent=true&crs=EPSG:3857&bbox=-'+world+',-'+world+','+world+','+world+'&width='+WORLDCOVER_WIDTH+'&height='+WORLDCOVER_HEIGHT;
+    const url='https://mapproxy.terrascope.be/mapproxy/service?service=WMS&version=1.1.1&request=GetMap&layers=esa-worldcover-map-10m-2021-v2_map&styles=&format=image/png&transparent=true&srs=EPSG:3857&bbox=-'+world+',-'+world+','+world+','+world+'&width='+WORLDCOVER_WIDTH+'&height='+WORLDCOVER_HEIGHT;
     const b=await materialFetchBitmap(url,signal);
     const c=new OffscreenCanvas(WORLDCOVER_WIDTH,WORLDCOVER_HEIGHT);
     const ctx=c.getContext('2d',{willReadFrequently:true});
@@ -1585,6 +1586,7 @@ function installTerrainMaterialProtocols() {
     const z=2,n=1<<z,size=256,width=n*size,height=n*size;
     const out=new OffscreenCanvas(width,height),ctx=out.getContext('2d',{willReadFrequently:true});
     const base='https://tiles.arcgis.com/tiles/tV7nu2LqSErotsj3/arcgis/rest/services/Orix_World_Experience_3D_WTL1/MapServer/tile';
+    window.__glimStatus='requesting cached ArcGIS GLiM tiles';
     const jobs=[];
     for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
       const b=await materialFetchBitmap(`${base}/${z}/${y}/${x}`,signal);
@@ -1671,7 +1673,7 @@ function installTerrainMaterialProtocols() {
       const riverInfluence=await materialBuildRiverInfluenceTexture(controller.signal);
       const geology=await materialOptional('GLiM geology',()=>materialBuildGeologyTexture(controller.signal),0.5);
       const detail=await materialBuildEnvironmentalDetailTexture(window.__worldCerealLoaded ? worldCereal : worldCover,riverInfluence,window.__glimLoaded ? geology : worldCover);
-      terrainMaterialTextures={radiation,precipitation,worldCover,canopy,climate,detail,night:null};
+      terrainMaterialTextures={radiation,precipitation,worldCover,canopy,climate,detail,night:terrainMaterialNightTexture};
       terrainMaterialTiles=demTiles;
       terrainMaterialLandMask=landMask;
       terrainMaterialReady=true;
@@ -1687,17 +1689,21 @@ function installTerrainMaterialProtocols() {
   let terrainMaterialNightLoading=false;
   window.__terrainMaterialStatus='loading';
   window.__nightTextureStatus='not loaded';
+  window.__nightTextureRequestCount=0;
   window.__worldCerealStatus='not loaded';
   window.__worldCerealLoaded=false;
   window.__glimStatus='not loaded';
   window.__glimLoaded=false;
   async function loadTerrainNightTexture(){
-    if(terrainMaterialTextures && terrainMaterialTextures.night) return;
+    if(terrainMaterialNightTexture || (terrainMaterialTextures && terrainMaterialTextures.night)) return;
     if(terrainMaterialNightLoading) return;
     terrainMaterialNightLoading=true;
     try{
       const controller=new AbortController();
-      terrainMaterialTextures.night=await materialBuildTexture('VIIRS_Night_Lights','2016-01-01',controller.signal);
+      window.__nightTextureRequestCount++;
+      const nightBitmap=await materialBuildTexture('VIIRS_Night_Lights','2016-01-01',controller.signal);
+      terrainMaterialNightTexture=nightBitmap;
+      if(terrainMaterialTextures) terrainMaterialTextures.night=nightBitmap;
       if(terrainMaterialLayer) terrainMaterialLayer._nightUploaded=false;
       window.__nightTextureStatus='VIIRS Black Marble WMS loaded';
       if(terrainMapInstance) terrainMapInstance.triggerRepaint();
@@ -1946,7 +1952,7 @@ function installTerrainMaterialProtocols() {
       },
       render(gl,args){
         if(!terrainMaterialReady || !terrainMaterialProgram || !terrainMaterialTextures) return;
-        if(nightModeOn && !terrainMaterialTextures.night) { if(window.__loadTerrainNightTexture) window.__loadTerrainNightTexture(); return; }
+        if(nightModeOn && !(terrainMaterialNightTexture || terrainMaterialTextures.night)) { if(window.__loadTerrainNightTexture) window.__loadTerrainNightTexture(); return; }
         const matrix=args.defaultProjectionData ? args.defaultProjectionData.mainMatrix : args.modelViewProjectionMatrix;
         const n=1<<MATERIAL_Z, s=MATERIAL_SAMPLES;
         gl.useProgram(terrainMaterialProgram);
@@ -2384,7 +2390,7 @@ function initTerrainMap() {
         // own pattern for improved render quality (terrain mesh + hillshade
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
-        terrainSource3D: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
+        terrainSource3D: { type: 'raster-dem', tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'], encoding: 'terrarium', tileSize: 512 },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         // The flat azimuthal map still uses its GeoJSON water data. The 3D map
         // does not: bathymetry is the authoritative water surface here so

@@ -1289,7 +1289,7 @@ function installEnvironmentTileShaderProbe(){
   maplibregl.addProtocol('environment-probe', async (params, abortController)=>{
     const parts=params.url.replace('environment-probe://','').split('/').map(Number);
     const z=parts[0], x=parts[1], y=parts[2];
-    const size=256, n=2**z;
+    const size=512, n=2**z;
     const demUrl=`https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
     const response=await fetch(demUrl,{signal:abortController&&abortController.signal});
     if(!response.ok) throw new Error(`environment probe DEM ${response.status}`);
@@ -1303,11 +1303,18 @@ function installEnvironmentTileShaderProbe(){
     const octx=outCanvas.getContext('2d');
     const out=octx.createImageData(size,size);
     const decode=i=>(dem[i]*256+dem[i+1]+dem[i+2]/256)-32768;
-    // IMPORTANT ARCHITECTURE TEST: this is now an ORDINARY RASTER tile, not
-    // a synthetic raster-DEM. MapLibre's normal raster renderer can therefore
-    // drape this geographic texture onto the existing map.setTerrain() surface.
-    // The Mapterhorn DEM is used only for the land/ocean mask; its elevation is
-    // NEVER encoded into the output texture.
+    // TERRAIN-FOLLOWING DIAGNOSTIC:
+    // This is an ordinary raster texture, but its pixels are computed from the
+    // SAME Mapterhorn DEM used by MapLibre terrain. We deliberately keep the
+    // environmental stripes independent of elevation, while using neighboring
+    // DEM samples ONLY to calculate a visible hillshade baked into the texture.
+    // If the result is actually riding the terrain, the color bands should be
+    // sculpted by real slopes instead of behaving like a flat decal.
+    const sample=(px,py)=>{
+      px=Math.max(0,Math.min(size-1,px));
+      py=Math.max(0,Math.min(size-1,py));
+      return decode((py*size+px)*4);
+    };
     for(let py=0;py<size;py++){
       const worldY=(y+py/size)/n;
       const merc=Math.PI-2*Math.PI*worldY;
@@ -1317,42 +1324,43 @@ function installEnvironmentTileShaderProbe(){
         const lon=worldX*360-180;
         const si=(py*size+px)*4;
         const e=decode(si);
-        // Leave sea level/ocean completely transparent. This is only the
-        // land-surface proof; existing bathymetry/rivers/lakes are untouched.
-        let value=0;
-        if(e>25){
-          // STRIPE DIAGNOSTIC: deliberately ignore elevation when generating
-          // the environmental value. Alternating 5-degree latitude bands make
-          // the geographic coordinate field unmistakable. A thin 10-degree
-          // longitude modulation is added inside each band so we can see both
-          // axes at once. The REAL terrain DEM is still MapLibre's terrainSource;
-          // if mountains occlude these stripes, that exposes the render-path
-          // limitation we are testing rather than hiding it with a palette.
-          const latBandIndex=Math.floor((lat+90.0)/5.0);
-          const latFrac=((lat+90.0)%5.0)/5.0;
-          const lonBandIndex=Math.floor((lon+180.0)/10.0);
-          const bandColor=((latBandIndex%8)+8)%8;
-          const palette=[0.05,0.18,0.31,0.44,0.57,0.70,0.83,0.96];
-          let stripeValue=palette[bandColor];
-          // Add a narrow coordinate seam every 10 degrees of longitude.
-          // This is intentionally subtle: the latitude stripes remain the
-          // primary signal, while the seams prove longitude is participating.
-          const lonFrac=((lon+180.0)%10.0)/10.0;
-          const lonSeam=lonFrac<0.045 ? 0.025 : 0.0;
-          // A tiny within-band ramp makes the horizontal boundaries easier to
-          // inspect without introducing any DEM/elevation dependence.
-          stripeValue += 0.055*latFrac + lonSeam;
-          value=20+980*Math.max(0,Math.min(1,stripeValue));
+        // Use sea level as the land boundary, not 25 m. This deliberately
+        // keeps low coastal terrain such as Florida in the diagnostic.
+        if(e<=0){
+          out.data[si]=0; out.data[si+1]=0; out.data[si+2]=0; out.data[si+3]=0;
+          continue;
         }
-        // Encode the diagnostic as ordinary RGBA color. There is deliberately
-        // NO elevation/DEM value in these output channels. MapLibre will take
-        // this 2D raster and project/drape it over the real terrain.
-        const t=Math.max(0,Math.min(1,(value-20)/980));
-        const band=Math.max(0,Math.min(7,Math.floor(t*8)));
+
+        const latBandIndex=Math.floor((lat+90.0)/5.0);
+        const latFrac=((lat+90.0)%5.0)/5.0;
+        const lonFrac=((lon+180.0)%10.0)/10.0;
+        const bandColor=((latBandIndex%8)+8)%8;
+        const palette=[0.05,0.18,0.31,0.44,0.57,0.70,0.83,0.96];
+        let stripeValue=palette[bandColor] + 0.055*latFrac + (lonFrac<0.045?0.025:0.0);
+        stripeValue=Math.max(0,Math.min(1,stripeValue));
+        const band=Math.max(0,Math.min(7,Math.floor(stripeValue*8)));
         const colors=[[255,0,255],[255,70,0],[255,210,0],[0,230,80],[0,220,255],[40,110,255],[150,60,255],[255,255,255]];
-        const c=colors[band];
-        out.data[si]=c[0]; out.data[si+1]=c[1]; out.data[si+2]=c[2];
-        out.data[si+3]=e>25?255:0;
+        const base=colors[band];
+
+        // Real DEM slope from adjacent pixels. The longitude derivative is
+        // scaled by cos(latitude) so the shading remains geographically sane.
+        const ex0=sample(px-1,py), ex1=sample(px+1,py);
+        const ey0=sample(px,py-1), ey1=sample(px,py+1);
+        const cosLat=Math.max(0.20,Math.cos(lat*Math.PI/180));
+        const dx=(ex1-ex0)*0.5/cosLat;
+        const dy=(ey1-ey0)*0.5;
+        const slope=Math.min(1.0,Math.hypot(dx,dy)/260.0);
+        // Fixed northwest light direction: highlights/valleys are now visible
+        // in the diagnostic itself rather than relying on another layer.
+        const nx=-dx, ny=-dy, nz=90.0;
+        const len=Math.hypot(nx,ny,nz);
+        const light=(nx*0.55 + ny*(-0.35) + nz*0.76)/len;
+        const shade=Math.max(0.38,Math.min(1.28,0.86 + light*0.34 - slope*0.10));
+
+        out.data[si]=Math.round(base[0]*shade);
+        out.data[si+1]=Math.round(base[1]*shade);
+        out.data[si+2]=Math.round(base[2]*shade);
+        out.data[si+3]=255;
       }
     }
     octx.putImageData(out,0,0);
@@ -2267,7 +2275,7 @@ function initTerrainMap() {
         },
         bathymetryVector: { type: 'vector', url: 'https://tiles.openwaters.io/seascape/vector.json' },
         snowTerrain: { type: 'raster', tiles: ['snow-terrain://{z}/{x}/{y}'], tileSize: 512, minzoom: 0, maxzoom: 10, attribution: 'Snow mask: Mapterhorn elevation / Copernicus DEM' },
-        environmentProbe: { type: 'raster', tiles: ['environment-probe://{z}/{x}/{y}'], tileSize: 256, minzoom: 0, maxzoom: 12 },
+        environmentProbe: { type: 'raster', tiles: ['environment-probe://{z}/{x}/{y}'], tileSize: 512, minzoom: 0, maxzoom: 12 },
       },
       layers: [
         // color-relief: colors the terrain BY ELEVATION straight from the
@@ -2392,7 +2400,7 @@ function initTerrainMap() {
           minzoom: 0, maxzoom: 10,
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
-        // TILE-SHADER STRIPE DIAGNOSTIC — TERRAIN DRAPE TEST.
+        // TILE-SHADER TERRAIN-FOLLOWING DIAGNOSTIC — SAME DEM + GEOGRAPHIC STRIPES.
         // This is now an ordinary raster layer. The tile contains ONLY the
         // latitude/longitude diagnostic colors; MapLibre's existing terrain
         // remains the sole elevation surface. This is the architecture we
@@ -2400,7 +2408,7 @@ function initTerrainMap() {
         {
           id: 'environment-probe', type: 'raster', source: 'environmentProbe',
           paint: {
-            'raster-opacity': 0.72,
+            'raster-opacity': 0.96,
             'raster-fade-duration': 0,
             'raster-resampling': 'linear'
           }

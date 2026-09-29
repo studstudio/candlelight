@@ -348,6 +348,7 @@ const toggleContoursBtn = document.getElementById('toggleContoursBtn');
 const toggleNightBtn = document.getElementById('toggleNightBtn');
 let tonerLabelsOn = false;
 let nightModeOn = false;
+let nightPaletteRequest = 0;
 let terrainLinesOn = false;
 let bathymetryOn = true;
 let bathymetryContoursOn = false;
@@ -1038,9 +1039,16 @@ toggleContoursBtn.onclick = () => {
 toggleBathymetryBtn.classList.add('active');
 toggleNightBtn.onclick = () => {
   nightModeOn = !nightModeOn;
-  toggleNightBtn.classList.toggle('active', nightModeOn);
-  toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
-  setNightPalette(nightModeOn);
+  const requestedNight = nightModeOn;
+  toggleNightBtn.classList.toggle('active', requestedNight);
+  toggleNightBtn.setAttribute('aria-pressed', String(requestedNight));
+  setNightPalette(requestedNight);
+  if (terrainMapInstance) {
+    terrainMapInstance.triggerRepaint();
+    terrainMapInstance.once('idle', () => {
+      if (nightModeOn === requestedNight) setNightPalette(requestedNight);
+    });
+  }
 };
 
 // ============================================================
@@ -1746,6 +1754,7 @@ function installNightLightsProtocol() {
     try{
       const controller=new AbortController();
       terrainMaterialTextures.night=await materialBuildTexture('VIIRS_Night_Lights','default',controller.signal);
+      if(terrainMaterialLayer) terrainMaterialLayer._nightUploaded = false;
       if(terrainMapInstance) terrainMapInstance.triggerRepaint();
     }catch(e){ console.warn('gallery: custom night luminance texture failed',e); }
     finally{ terrainMaterialNightLoading=false; }
@@ -1986,7 +1995,18 @@ function installNightLightsProtocol() {
         gl.useProgram(terrainMaterialProgram);
         const radTex=terrainMaterialTextures.radiation, wetTex=terrainMaterialTextures.precipitation;
         if(!terrainMaterialLayer._rad){ terrainMaterialLayer._rad=gl.createTexture(); terrainMaterialLayer._wet=gl.createTexture(); terrainMaterialLayer._worldCover=gl.createTexture(); terrainMaterialLayer._canopy=gl.createTexture(); terrainMaterialLayer._climate=gl.createTexture(); terrainMaterialLayer._detail=gl.createTexture(); terrainMaterialLayer._night=gl.createTexture(); terrainMaterialLayer._land=gl.createTexture();
-          for(const [tex,bm] of [[terrainMaterialLayer._rad,radTex],[terrainMaterialLayer._wet,wetTex],[terrainMaterialLayer._worldCover,terrainMaterialTextures.worldCover],[terrainMaterialLayer._canopy,terrainMaterialTextures.canopy],[terrainMaterialLayer._climate,terrainMaterialTextures.climate],[terrainMaterialLayer._detail,terrainMaterialTextures.detail],[terrainMaterialLayer._night,terrainMaterialTextures.night],[terrainMaterialLayer._land,terrainMaterialLandMask]]){ gl.bindTexture(gl.TEXTURE_2D,tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bm); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); }
+          for(const [tex,bm] of [[terrainMaterialLayer._rad,radTex],[terrainMaterialLayer._wet,wetTex],[terrainMaterialLayer._worldCover,terrainMaterialTextures.worldCover],[terrainMaterialLayer._canopy,terrainMaterialTextures.canopy],[terrainMaterialLayer._climate,terrainMaterialTextures.climate],[terrainMaterialLayer._detail,terrainMaterialTextures.detail],[terrainMaterialLayer._land,terrainMaterialLandMask]]){ gl.bindTexture(gl.TEXTURE_2D,tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bm); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); }
+          terrainMaterialLayer._nightUploaded = false;
+        }
+        if(terrainMaterialTextures.night && !terrainMaterialLayer._nightUploaded){
+          gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._night);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+          gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,terrainMaterialTextures.night);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+          terrainMaterialLayer._nightUploaded = true;
         }
         const aPos=gl.getAttribLocation(terrainMaterialProgram,'a_pos'), aUv=gl.getAttribLocation(terrainMaterialProgram,'a_uv'), aEnv=gl.getAttribLocation(terrainMaterialProgram,'a_env'), aSlope=gl.getAttribLocation(terrainMaterialProgram,'a_slope'), aAspect=gl.getAttribLocation(terrainMaterialProgram,'a_aspect');
         const uMat=gl.getUniformLocation(terrainMaterialProgram,'u_matrix'), uRad=gl.getUniformLocation(terrainMaterialProgram,'u_radiation'), uWet=gl.getUniformLocation(terrainMaterialProgram,'u_precipitation'), uWorldCover=gl.getUniformLocation(terrainMaterialProgram,'u_worldCover'), uCanopy=gl.getUniformLocation(terrainMaterialProgram,'u_canopy'), uClimate=gl.getUniformLocation(terrainMaterialProgram,'u_climate'), uDetail=gl.getUniformLocation(terrainMaterialProgram,'u_detail'), uNight=gl.getUniformLocation(terrainMaterialProgram,'u_nightLights'), uLand=gl.getUniformLocation(terrainMaterialProgram,'u_landMask');
@@ -2090,33 +2110,66 @@ const NIGHT_COLORS = {
 };
 function setNightPalette(on) {
   window.__pendingNightPalette = on;
-  if (!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
-  const c=on?NIGHT_COLORS:DAY_COLORS;
-  try {
-    if(terrainMapInstance.getLayer('color-relief')) terrainMapInstance.setPaintProperty('color-relief','color-relief-color',c.relief);
-    if(terrainMapInstance.getLayer('hillshade')) { terrainMapInstance.setPaintProperty('hillshade','hillshade-shadow-color',c.hillShadow); terrainMapInstance.setPaintProperty('hillshade','hillshade-highlight-color',c.hillHighlight); terrainMapInstance.setPaintProperty('hillshade','hillshade-accent-color',c.hillAccent); }
-    if(terrainMapInstance.getLayer('lakes')) terrainMapInstance.setPaintProperty('lakes','fill-color',c.lake);
-    if(terrainMapInstance.getLayer('rivers')) terrainMapInstance.setPaintProperty('rivers','line-color',c.river);
-    if(terrainMapInstance.getLayer('bathymetry-hillshade')) { terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#04304a':'#1e7cb5'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#63cfe3':'#cdeeff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#159fc0':'#18bfff'); terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-exaggeration',on?0.60:0.6); }
-    if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#020a12',-4500,'#03121d',-3000,'#041b29',-2000,'#052536',-1400,'#063143',-1000,'#073c50',-800,'#08465b',-650,'#0a5268',-500,'#0c6076',-400,'#0e6e84',-320,'#117d92',-260,'#168da1',-220,'#209eb0',-180,'#2aaebe',-150,'#35bac9',-120,'#42c4d2',-95,'#4fcbd8',-70,'#5bd0dc',-50,'#55cdd9',-35,'#4ac6d4',-22,'#3dbdce',-12,'#31b3c7',-5,'#25a7bd',-2,'#1b9bb2',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1200,'#1683bc',-900,'#1386bf',-700,'#1189c2',-500,'#118cc5',-350,'#128fc9',-250,'#1394ce',-180,'#1499d3',-130,'#159ed8',-100,'#15a3df',-75,'#16a8e4',-55,'#16ade9',-40,'#17b2ee',-28,'#17b6f3',-20,'#18b9f7',-14,'#18bcfa',-9,'#18bdfc',-5,'#18befe',-2,'#18bfff',0,'rgba(24,190,254,0)']);
-    terrainMapInstance.setSky(c.sky);
-    terrainMapInstance.setLight(c.light);
-      // Toner overlays stay at full/day strength in daytime; dim them only in night mode.
-      if (terrainMapInstance.getLayer('stamen-toner-labels')) terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-opacity',on?0.55:1.0);
-      if (terrainMapInstance.getLayer('stamen-terrain-lines')) terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-opacity',on?0.40:0.60);
-    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'visible':'none');
-    const material=window.__terrainMaterialLayer;
-    if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
-    if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
-    if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
-    if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
-    if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
-    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',on?0.72:0);
-    if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
-  } catch(err) {
-    console.warn('gallery: night palette update failed',err);
-    if (terrainMapInstance) terrainMapInstance.once('idle', () => { if (nightModeOn === on) setNightPalette(on); });
-  }
+  const request = ++nightPaletteRequest;
+
+  const apply = () => {
+    if (!terrainMapInstance || request !== nightPaletteRequest || nightModeOn !== on) return;
+    if (!terrainMapInstance.isStyleLoaded()) {
+      terrainMapInstance.once('idle', apply);
+      return;
+    }
+    const c=on?NIGHT_COLORS:DAY_COLORS;
+    try {
+      if(terrainMapInstance.getLayer('color-relief')) terrainMapInstance.setPaintProperty('color-relief','color-relief-color',c.relief);
+      if(terrainMapInstance.getLayer('hillshade')) {
+        terrainMapInstance.setPaintProperty('hillshade','hillshade-shadow-color',c.hillShadow);
+        terrainMapInstance.setPaintProperty('hillshade','hillshade-highlight-color',c.hillHighlight);
+        terrainMapInstance.setPaintProperty('hillshade','hillshade-accent-color',c.hillAccent);
+      }
+      if(terrainMapInstance.getLayer('bathymetry-hillshade')) {
+        terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-shadow-color',on?'#04304a':'#1e7cb5');
+        terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-highlight-color',on?'#63cfe3':'#cdeeff');
+        terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-accent-color',on?'#159fc0':'#18bfff');
+        terrainMapInstance.setPaintProperty('bathymetry-hillshade','hillshade-exaggeration',0.60);
+      }
+      if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#020a12',-4500,'#03121d',-3000,'#041b29',-2000,'#052536',-1400,'#063143',-1000,'#073c50',-800,'#08465b',-650,'#0a5268',-500,'#0c6076',-400,'#0e6e84',-320,'#117d92',-260,'#168da1',-220,'#209eb0',-180,'#2aaebe',-150,'#35bac9',-120,'#42c4d2',-95,'#4fcbd8',-70,'#5bd0dc',-50,'#55cdd9',-35,'#4ac6d4',-22,'#3dbdce',-12,'#31b3c7',-5,'#25a7bd',-2,'#1b9bb2',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1200,'#1683bc',-900,'#1386bf',-700,'#1189c2',-500,'#118cc5',-350,'#128fc9',-250,'#1394ce',-180,'#1499d3',-130,'#159ed8',-100,'#15a3df',-75,'#16a8e4',-55,'#16ade9',-40,'#17b2ee',-28,'#17b6f3',-20,'#18b9f7',-14,'#18bcfa',-9,'#18bdfc',-5,'#18befe',-2,'#18bfff',0,'rgba(24,190,254,0)']);
+      terrainMapInstance.setSky(c.sky);
+      terrainMapInstance.setLight(c.light);
+
+      // Brightness, not opacity: daytime stays at the original full-strength
+      // values. Night mode only compresses the bright end of the raster artwork.
+      if (terrainMapInstance.getLayer('stamen-toner-labels')) {
+        terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-opacity',1.0);
+        terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-min',0.0);
+        terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-brightness-max',on?0.62:1.0);
+      }
+      if (terrainMapInstance.getLayer('stamen-terrain-lines')) {
+        terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-opacity',1.0);
+        terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-brightness-min',0.0);
+        terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-brightness-max',on?0.68:1.0);
+      }
+
+      if(terrainMapInstance.getLayer('night-lights')) {
+        terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'none':'none');
+      }
+      const material=window.__terrainMaterialLayer;
+      if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
+      if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
+      if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
+      if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
+      if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
+      if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
+      terrainMapInstance.triggerRepaint();
+      requestAnimationFrame(() => { if (terrainMapInstance && request === nightPaletteRequest) terrainMapInstance.triggerRepaint(); });
+    } catch(err) {
+      console.warn('gallery: night palette update failed',err);
+      if (terrainMapInstance && request === nightPaletteRequest) terrainMapInstance.once('idle', apply);
+    }
+  };
+
+  if (!terrainMapInstance) return;
+  if (terrainMapInstance.isStyleLoaded()) apply();
+  else terrainMapInstance.once('load', apply);
 }
 
 let terrainMapInstance = null;
@@ -2379,11 +2432,9 @@ function initTerrainMap() {
         // drawn from independent caches instead of sharing one).
         terrainSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
         hillshadeSource: { type: 'raster-dem', url: 'https://tiles.mapterhorn.com/tilejson.json' },
-        // lakes/rivers reuse the exact same GeoJSON already fetched for the
-        // flat map (see LAKES_URL/RIVERS_URL) — no second data source, just
-        // fed to MapLibre as plain in-memory GeoJSON
-        lakesGeo: { type: 'geojson', data: lakes || { type: 'FeatureCollection', features: [] } },
-        riversGeo: { type: 'geojson', data: rivers || { type: 'FeatureCollection', features: [] } },
+        // The flat azimuthal map still uses its GeoJSON water data. The 3D map
+        // does not: bathymetry is the authoritative water surface here so
+        // inland basins can reveal real depth/relief instead of a flat fill.
         // Real DEM-derived Antarctic ice shading — see
         // installAntarcticTerrainProtocol() above. Same Mapterhorn tiles
         // as terrainSource/hillshadeSource, recolored+hillshaded
@@ -2577,7 +2628,9 @@ function initTerrainMap() {
           source: 'stamenTerrainLines',
           layout: { visibility: terrainLinesOn ? 'visible' : 'none' },
           paint: {
-            'raster-opacity': 0.60,
+            'raster-opacity': 1.0,
+            'raster-brightness-min': 0.0,
+            'raster-brightness-max': 1.0,
             'raster-fade-duration': 0
           }
         },
@@ -2589,8 +2642,6 @@ function initTerrainMap() {
           minzoom: 0, maxzoom: 10,
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
-        { id: 'lakes', type: 'fill', source: 'lakesGeo', paint: { 'fill-color': '#18BFFF' } },
-        { id: 'rivers', type: 'line', source: 'riversGeo', paint: { 'line-color': '#8fc3d6', 'line-width': 1.2 } },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.
         {
@@ -2600,7 +2651,8 @@ function initTerrainMap() {
           layout: { visibility: tonerLabelsOn ? 'visible' : 'none' },
           paint: {
             'raster-opacity': 1.0,
-            'raster-contrast': -0.6,
+            'raster-brightness-min': 0.0,
+            'raster-brightness-max': 1.0,
             'raster-fade-duration': 0
           }
         },

@@ -1448,7 +1448,7 @@ function installNightLightsProtocol() {
     for(let i=0;i<d.length;i+=4){
       const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
       const s=Math.pow(Math.max(0,Math.min(1,(lum-.10)/.62)),2.15);
-      d[i]=255; d[i+1]=170; d[i+2]=82; d[i+3]=Math.round(255*s*.08);
+      d[i]=255; d[i+1]=170; d[i+2]=82; d[i+3]=Math.round(255*s*.22);
     }
     ctx.putImageData(img,0,0);
     return {data:await(await c.convertToBlob({type:'image/png'})).arrayBuffer()};
@@ -1532,7 +1532,7 @@ function installNightLightsProtocol() {
     // material coefficient by the shader.
     for(let i=0;i<d.length;i+=4){
       const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-      const scalar = isNight ? Math.pow(Math.max(0, Math.min(1, (lum-0.06)/0.72)), 1.55) : lum;
+      const scalar = isNight ? Math.pow(Math.max(0, Math.min(1, (lum-0.035)/0.70)), 1.05) : lum;
       d[i]=Math.round(scalar*255); d[i+1]=d[i]; d[i+2]=d[i]; d[i+3]=255;
     }
     ctx.putImageData(img,0,0);
@@ -1963,15 +1963,15 @@ function installNightLightsProtocol() {
             // VIIRS is deliberately pushed hard here: preserve the real
             // spatial distribution, but bring up the low/mid radiance so
             // populated regions read clearly on a phone-sized screen.
-            float lightLift=pow(max(artificial,0.0),0.30);
-            float lightPresence=smoothstep(0.0008,0.085,lightLift);
-            float emit=u_night*lightPresence*4.80;
+            float lightLift=pow(max(artificial,0.0),0.20);
+            float lightPresence=smoothstep(0.0004,0.060,lightLift);
+            float emit=u_night*lightPresence*7.50;
             vec3 orangeLight=vec3(1.0,0.24,0.018);
             vec3 pinkLight=vec3(1.0,0.035,0.30);
             float pinkBias=smoothstep(0.10,0.62,lightLift);
             vec3 artificialColor=mix(orangeLight,pinkLight,pinkBias);
             tone=mix(tone,artificialColor,min(0.92,emit*0.30));
-            amount += emit*2.10;
+            amount += emit*3.00;
             gl_FragColor=vec4(tone,amount);
           }`;
         const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
@@ -2101,14 +2101,17 @@ function setNightPalette(on) {
     if(terrainMapInstance.getLayer('bathymetry-color-relief')) terrainMapInstance.setPaintProperty('bathymetry-color-relief','color-relief-color',on?['interpolate',['linear'],['elevation'],-6000,'#020a12',-4500,'#03121d',-3000,'#041b29',-2000,'#052536',-1400,'#063143',-1000,'#073c50',-800,'#08465b',-650,'#0a5268',-500,'#0c6076',-400,'#0e6e84',-320,'#117d92',-260,'#168da1',-220,'#209eb0',-180,'#2aaebe',-150,'#35bac9',-120,'#42c4d2',-95,'#4fcbd8',-70,'#5bd0dc',-50,'#55cdd9',-35,'#4ac6d4',-22,'#3dbdce',-12,'#31b3c7',-5,'#25a7bd',-2,'#1b9bb2',0,'rgba(5,18,29,0)']:['interpolate',['linear'],['elevation'],-6000,'#2378b2',-4000,'#1e7cb5',-2000,'#1981b9',-1200,'#1683bc',-900,'#1386bf',-700,'#1189c2',-500,'#118cc5',-350,'#128fc9',-250,'#1394ce',-180,'#1499d3',-130,'#159ed8',-100,'#15a3df',-75,'#16a8e4',-55,'#16ade9',-40,'#17b2ee',-28,'#17b6f3',-20,'#18b9f7',-14,'#18bcfa',-9,'#18bdfc',-5,'#18befe',-2,'#18bfff',0,'rgba(24,190,254,0)']);
     terrainMapInstance.setSky(c.sky);
     terrainMapInstance.setLight(c.light);
-    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility','none');
+      // Toner overlays stay at full/day strength in daytime; dim them only in night mode.
+      if (terrainMapInstance.getLayer('stamen-toner-labels')) terrainMapInstance.setPaintProperty('stamen-toner-labels','raster-opacity',on?0.55:1.0);
+      if (terrainMapInstance.getLayer('stamen-terrain-lines')) terrainMapInstance.setPaintProperty('stamen-terrain-lines','raster-opacity',on?0.40:0.60);
+    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility',on?'visible':'none');
     const material=window.__terrainMaterialLayer;
     if(material && !terrainMapInstance.getLayer('environmental-terrain-material')) terrainMapInstance.addLayer(material, terrainMapInstance.getLayer('snow-terrain') ? 'snow-terrain' : undefined);
     if(material && window.__loadTerrainMaterial) window.__loadTerrainMaterial();
     if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
     if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
     if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
-    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',0);
+    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',on?0.72:0);
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
   } catch(err) {
     console.warn('gallery: night palette update failed',err);
@@ -2574,7 +2577,7 @@ function initTerrainMap() {
           source: 'stamenTerrainLines',
           layout: { visibility: terrainLinesOn ? 'visible' : 'none' },
           paint: {
-            'raster-opacity': 0.6,
+            'raster-opacity': 0.60,
             'raster-fade-duration': 0
           }
         },

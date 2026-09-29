@@ -1073,11 +1073,27 @@ toggleContoursBtn.onclick = () => {
   applyLayerToggles();
 };
 toggleBathymetryBtn.classList.add('active');
+// iOS can occasionally deliver two closely-spaced activation events when a
+// control sits over a WebGL map. Keep the night switch atomic so one physical
+// tap can never be interpreted as an on/off pair. Palette application is also
+// queued against the current MapLibre style instead of depending on the user
+// tapping again while the style is settling.
+let nightToggleLastActivation = 0;
+let nightPaletteRequest = 0;
 toggleNightBtn.onclick = () => {
+  const now = performance.now();
+  if (now - nightToggleLastActivation < 350) return;
+  nightToggleLastActivation = now;
   nightModeOn = !nightModeOn;
   toggleNightBtn.classList.toggle('active', nightModeOn);
   toggleNightBtn.setAttribute('aria-pressed', String(nightModeOn));
-  setNightPalette(nightModeOn);
+  const request = ++nightPaletteRequest;
+  const apply = () => {
+    if (request !== nightPaletteRequest) return;
+    setNightPalette(nightModeOn);
+  };
+  if (terrainMapInstance && terrainMapInstance.isStyleLoaded()) apply();
+  else if (terrainMapInstance) terrainMapInstance.once('idle', apply);
 };
 toggleSatelliteBtn.onclick = () => {
   maptilerSatelliteOn = !maptilerSatelliteOn;
@@ -2485,14 +2501,20 @@ function initTerrainMap() {
           type: 'fill-extrusion',
           source: 'maptilerBuildings',
           'source-layer': 'building',
-          minzoom: 15,
-          filter: ['==', ['get', 'extrude'], true],
+          minzoom: 14,
+          // OpenMapTiles/MapTiler building tiles have used both a boolean
+          // and a string representation for the `extrude` flag across
+          // dataset/style generations. Accept either, and use the rendered
+          // height fields when present (with the raw OSM height fields as a
+          // fallback). This keeps ordinary San Francisco buildings from
+          // silently filtering out of the extrusion layer.
+          filter: ['any', ['==', ['get', 'extrude'], true], ['==', ['get', 'extrude'], 'true']],
           layout: { visibility: 'visible' },
           paint: {
             'fill-extrusion-color': '#d9d2c5',
-            'fill-extrusion-height': ['coalesce', ['get', 'height'], 0],
-            'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
-            'fill-extrusion-opacity': 0.78,
+            'fill-extrusion-height': ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
+            'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0],
+            'fill-extrusion-opacity': 0.86,
             'fill-extrusion-vertical-gradient': true
           }
         },

@@ -1322,7 +1322,12 @@ function installEnvironmentTileShaderProbe(){
         if(e>25){
           const latBand=(Math.sin(lat*Math.PI/180)*0.5+0.5);
           const lonBand=(Math.sin((lon+35)*Math.PI/90)*0.5+0.5);
-          value=20+980*(0.62*latBand+0.38*lonBand);
+          const envBase=0.62*latBand+0.38*lonBand;
+          // Keep the environmental field dominant, but let the real DEM
+          // perturb the scalar so the diagnostic can visibly react to actual
+          // topography rather than remaining perfectly flat by geography.
+          const relief=Math.max(0,Math.min(1,(e+50)/5050));
+          value=20+980*(0.84*envBase+0.16*relief);
         }
         const enc=value+32768;
         const r=Math.max(0,Math.min(255,Math.floor(enc/256)));
@@ -2269,19 +2274,6 @@ function initTerrainMap() {
             ],
           },
         },
-        {
-          id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
-          paint: {
-            // lighter/creamier overall (matching our warm beige palette)
-            // while keeping real contrast between shadow and highlight —
-            // a lighter shadow tone still reads as relief as long as it's
-            // clearly darker than the highlight, it just isn't a deep brown
-            'hillshade-shadow-color': '#c9ad7a',
-            'hillshade-highlight-color': '#fdf6e3',
-            'hillshade-accent-color': '#e0c896',
-            'hillshade-exaggeration': 1.0,
-          },
-        },
         // Depth-varying ocean tint from real bathymetry, replacing the
         // flat single ocean-blue above for actual underwater elevation.
         // Deep water (-6000 to -1000) is a lighter, more vibrant shade of
@@ -2387,7 +2379,7 @@ function initTerrainMap() {
         {
           id: 'environment-probe', type: 'color-relief', source: 'environmentProbe',
           paint: {
-            'color-relief-opacity': 0.92,
+            'color-relief-opacity': 0.42,
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
               0, 'rgba(0,0,0,0)',
@@ -2398,6 +2390,18 @@ function initTerrainMap() {
               1000, '#ffffff'
             ]
           }
+        },
+        // Re-apply the real MapLibre hillshade after the environmental
+        // diagnostic. This keeps the experiment on the existing DEM relief
+        // instead of painting a flat opaque color over it.
+        {
+          id: 'hillshade', type: 'hillshade', source: 'hillshadeSource',
+          paint: {
+            'hillshade-shadow-color': '#c9ad7a',
+            'hillshade-highlight-color': '#fdf6e3',
+            'hillshade-accent-color': '#e0c896',
+            'hillshade-exaggeration': 1.0,
+          },
         },
         // Keep labels last so the transparent Toner label artwork stays
         // readable above the terrain, hillshade, lakes, and rivers.

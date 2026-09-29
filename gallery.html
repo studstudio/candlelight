@@ -1320,14 +1320,28 @@ function installEnvironmentTileShaderProbe(){
         // land-surface proof; existing bathymetry/rivers/lakes are untouched.
         let value=0;
         if(e>25){
-          const latBand=(Math.sin(lat*Math.PI/180)*0.5+0.5);
-          const lonBand=(Math.sin((lon+35)*Math.PI/90)*0.5+0.5);
-          const envBase=0.62*latBand+0.38*lonBand;
-          // Keep the environmental field dominant, but let the real DEM
-          // perturb the scalar so the diagnostic can visibly react to actual
-          // topography rather than remaining perfectly flat by geography.
-          const relief=Math.max(0,Math.min(1,(e+50)/5050));
-          value=20+980*(0.84*envBase+0.16*relief);
+          // STRIPE DIAGNOSTIC: deliberately ignore elevation when generating
+          // the environmental value. Alternating 5-degree latitude bands make
+          // the geographic coordinate field unmistakable. A thin 10-degree
+          // longitude modulation is added inside each band so we can see both
+          // axes at once. The REAL terrain DEM is still MapLibre's terrainSource;
+          // if mountains occlude these stripes, that exposes the render-path
+          // limitation we are testing rather than hiding it with a palette.
+          const latBandIndex=Math.floor((lat+90.0)/5.0);
+          const latFrac=((lat+90.0)%5.0)/5.0;
+          const lonBandIndex=Math.floor((lon+180.0)/10.0);
+          const bandColor=((latBandIndex%8)+8)%8;
+          const palette=[0.05,0.18,0.31,0.44,0.57,0.70,0.83,0.96];
+          let stripeValue=palette[bandColor];
+          // Add a narrow coordinate seam every 10 degrees of longitude.
+          // This is intentionally subtle: the latitude stripes remain the
+          // primary signal, while the seams prove longitude is participating.
+          const lonFrac=((lon+180.0)%10.0)/10.0;
+          const lonSeam=lonFrac<0.045 ? 0.025 : 0.0;
+          // A tiny within-band ramp makes the horizontal boundaries easier to
+          // inspect without introducing any DEM/elevation dependence.
+          stripeValue += 0.055*latFrac + lonSeam;
+          value=20+980*Math.max(0,Math.min(1,stripeValue));
         }
         const enc=value+32768;
         const r=Math.max(0,Math.min(255,Math.floor(enc/256)));
@@ -2373,13 +2387,14 @@ function initTerrainMap() {
           minzoom: 0, maxzoom: 10,
           paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 350, 'raster-resampling': 'linear' }
         },
-        // TILE-SHADER PROOF: this is a normal MapLibre color-relief layer fed by
-        // tile-local environmental values. MapLibre drapes color-relief onto the
-        // existing 3D terrain; there is no second DEM mesh and no custom vertices.
+        // TILE-SHADER STRIPE DIAGNOSTIC: latitude bands + longitude seams.
+        // This intentionally uses a synthetic DEM value only as a carrier for
+        // the geographic field, so we can see exactly how MapLibre's native
+        // color-relief render path interacts with the real terrain surface.
         {
           id: 'environment-probe', type: 'color-relief', source: 'environmentProbe',
           paint: {
-            'color-relief-opacity': 0.42,
+            'color-relief-opacity': 0.62,
             'color-relief-color': [
               'interpolate', ['linear'], ['elevation'],
               0, 'rgba(0,0,0,0)',

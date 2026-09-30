@@ -1500,13 +1500,14 @@ let nightGlowLoading = false;
 let nightGlowReady = false;
 let nightGlowRequestSerial = 0;
 let nightGlowMoveTimer = null;
-const nightGlowCache = new Map();
-const NIGHT_GLOW_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
-const NIGHT_GLOW_MAX_POINTS = 14000;
-const NIGHT_GLOW_CACHE_MAX = 18;
+const nightGlowTileCache = new Map();
+const NIGHT_GLOW_TILE_BASE = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8';
+const NIGHT_GLOW_TILE_MAX = 120;
+const NIGHT_GLOW_MAX_POINTS = 6500;
+const NIGHT_GLOW_MAX_FETCH = 12;
 
-function nightGlowView() {
-  const b = terrainMapInstance.getBounds();
+function nightGlowView(){
+  const b=terrainMapInstance.getBounds();
   let west=b.getWest(), east=b.getEast();
   const south=Math.max(-85,b.getSouth()), north=Math.min(85,b.getNorth());
   if(east-west>=359) return {west:-180,east:180,south,north,world:true};
@@ -1515,173 +1516,200 @@ function nightGlowView() {
   return {west,south,east,north,world:false};
 }
 
-function nightGlowImageSpec(view) {
-  const z=terrainMapInstance.getZoom();
-  // One coarse global field at low zooms; progressively smaller regional
-  // requests as the camera gets closer. This prevents a city-sized request
-  // from being the only field available after zooming back out.
-  if(view.world || z<=3.5) return {key:'world',part:{west:-180,south:-85,east:180,north:85},size:1024};
-  const span=Math.max(view.east-view.west, view.north-view.south);
-  const pad=Math.max(span*0.28, z<6?8:z<9?3:1);
-  const west=Math.max(-180,view.west-pad), east=Math.min(180,view.east+pad);
-  const south=Math.max(-85,view.south-pad), north=Math.min(85,view.north+pad);
-  const target=Math.max(640,Math.min(1280,Math.round(980 + Math.max(0,9-z)*70)));
-  const q= z<6 ? 10 : z<9 ? 5 : z<12 ? 2 : 0.5;
-  const key=[Math.round(west/q)*q,Math.round(south/q)*q,Math.round(east/q)*q,Math.round(north/q)*q,target].join('|');
-  return {key,part:{west,south,east,north},size:target};
+function nightGlowLngLatFromTilePixel(z,x,y,px,py){
+  const n=Math.pow(2,z);
+  const fx=(x+(px+0.5)/256)/n;
+  const fy=(y+(py+0.5)/256)/n;
+  const lon=fx*360-180;
+  const merc=Math.PI*(1-2*fy);
+  const lat=180/Math.PI*Math.atan(Math.sinh(merc));
+  return [lon,Math.max(-85.051129,Math.min(85.051129,lat))];
 }
 
-async function fetchNightGlowWMS(spec) {
-  if(nightGlowCache.has(spec.key)) return nightGlowCache.get(spec.key);
-  const params=new URLSearchParams({
-    service:'WMS',version:'1.1.1',request:'GetMap',format:'image/png',
-    layers:'VIIRS_Night_Lights',styles:'',srs:'EPSG:4326',
-    bbox:`${spec.part.west},${spec.part.south},${spec.part.east},${spec.part.north}`,
-    width:String(spec.size),height:String(spec.size),transparent:'true'
-  });
-  const r=await fetch(`${NIGHT_GLOW_WMS}?${params.toString()}`,{cache:'force-cache'});
-  if(!r.ok) throw new Error(`VIIRS viewport WMS ${r.status}`);
+function nightGlowTileRange(view,z){
+  const n=Math.pow(2,z);
+  const lonToX=lon=>Math.floor(((lon+180)/360)*n);
+  const latToY=lat=>Math.floor((1-Math.asinh(Math.tan(lat*Math.PI/180))/Math.PI)/2*n);
+  let x0=lonToX(view.west), x1=lonToX(view.east);
+  const y0=Math.max(0,Math.min(n-1,latToY(view.north)));
+  const y1=Math.max(0,Math.min(n-1,latToY(view.south)));
+  if(view.world) return {z,x0:0,x1:n-1,y0:0,y1:n-1};
+  x0=((x0%n)+n)%n; x1=((x1%n)+n)%n;
+  return {z,x0,x1,y0,y1,wrap:x0>x1};
+}
+
+function nightGlowNeededTiles(view,z){
+  const r=nightGlowTileRange(view,z), n=Math.pow(2,z), out=[];
+  const xs=[];
+  if(view.world||!r.wrap){for(let x=r.x0;x<=r.x1;x++) xs.push(x);}
+  else {for(let x=r.x0;x<n;x++) xs.push(x); for(let x=0;x<=r.x1;x++) xs.push(x);}
+  for(let y=r.y0;y<=r.y1;y++) for(const x of xs) out.push({z,x,y});
+  return out;
+}
+
+function nightGlowDataZoom(){
+  const z=terrainMapInstance.getZoom();
+  // The light field follows the same discrete tile pyramid idea as imagery:
+  // coarse tiles at distance, progressively finer source tiles as the camera
+  // approaches. We never request a giant viewport bitmap.
+  return Math.max(1,Math.min(8,Math.floor(z+0.25)));
+}
+
+function nightGlowPixelSignal(r,g,b,a){
+  if(a<8) return 0;
+  const lum=(0.2126*r+0.7152*g+0.0722*b)/255;
+  // GIBS renders the VIIRS field into a transparent grayscale-style image.
+  // Pull the useful luminance range down aggressively so secondary city light
+  // survives instead of collapsing into a few isolated peaks.
+  return Math.max(0,Math.min(1,(lum-0.025)/0.42));
+}
+
+function nightGlowTilePixelsToFeatures(data,z,x,y){
+  const size=256;
+  const camZ=terrainMapInstance?terrainMapInstance.getZoom():z;
+  const tier=camZ<4.5?0:camZ<6.5?1:camZ<9?2:3;
+  // Aggregate the source into progressively smaller cells. This is the key
+  // to the desired behavior: at far zoom a metro is a luminous constellation,
+  // not dozens of individual sensor pixels; zooming in reveals its subclusters.
+  const cell=tier===0?8:tier===1?4:tier===2?2:1;
+  const sample=tier<=1?2:1;
+  const minSum=tier===0?0.48:tier===1?0.20:tier===2?0.055:0.018;
+  const maxFeatures=tier===0?120:tier===1?220:tier===2?420:700;
+  const cells=[];
+  for(let py=0;py<size;py+=cell){
+    for(let px=0;px<size;px+=cell){
+      let sum=0,max=0,wx=0,wy=0,count=0;
+      const ex=Math.min(size,px+cell), ey=Math.min(size,py+cell);
+      for(let yy=py;yy<ey;yy+=sample) for(let xx=px;xx<ex;xx+=sample){
+        const i=(yy*size+xx)*4;
+        const s=nightGlowPixelSignal(data[i],data[i+1],data[i+2],data[i+3]);
+        if(s<=0) continue;
+        const w=Math.pow(s,0.72);
+        sum+=w; max=Math.max(max,s); wx+=xx*w; wy+=yy*w; count++;
+      }
+      if(count===0||sum<minSum) continue;
+      const cx=wx/sum, cy=wy/sum;
+      // Keep the radiance weight aggressive. Sum represents the luminous mass
+      // of the cell while max preserves a bright urban core.
+      const intensity=Math.min(1,Math.pow(sum/(cell*cell*0.22),0.54)*0.92 + Math.pow(max,0.36)*0.48);
+      const [lon,lat]=nightGlowLngLatFromTilePixel(z,x,y,cx,cy);
+      cells.push({lon,lat,intensity,raw:sum,max});
+    }
+  }
+  cells.sort((a,b)=>b.intensity-a.intensity);
+  // Lightweight geographic non-max suppression only inside this tile. It is
+  // deliberately much looser than the old pixel-space suppression, so city
+  // clusters keep their internal luminance structure.
+  const spacing=tier===0?0.48:tier===1?0.22:tier===2?0.075:0.022;
+  const kept=[];
+  for(const p of cells){
+    let close=false;
+    for(const q of kept){
+      const dx=(p.lon-q.lon)*Math.cos(((p.lat+q.lat)*0.5)*Math.PI/180),dy=p.lat-q.lat;
+      if(dx*dx+dy*dy<spacing*spacing){close=true;break;}
+    }
+    if(!close) kept.push(p);
+    if(kept.length>=maxFeatures) break;
+  }
+  return kept.map((p,i)=>({
+    type:'Feature',id:`${z}/${x}/${y}/${i}`,
+    geometry:{type:'Point',coordinates:[p.lon,p.lat]},
+    properties:{intensity:p.intensity,raw:p.raw,max:p.max}
+  }));
+}
+
+async function fetchNightGlowTile(tile){
+  const key=`${tile.z}/${tile.x}/${tile.y}`;
+  const cached=nightGlowTileCache.get(key);
+  if(cached){cached.last=performance.now();return cached;}
+  const url=`${NIGHT_GLOW_TILE_BASE}/${tile.z}/${tile.y}/${tile.x}.png`;
+  const r=await fetch(url,{cache:'force-cache'});
+  if(!r.ok) throw new Error(`NASA VIIRS tile ${r.status}`);
   const bmp=await createImageBitmap(await r.blob());
-  const c=new OffscreenCanvas(spec.size,spec.size),ctx=c.getContext('2d',{willReadFrequently:true});
-  ctx.drawImage(bmp,0,0); if(bmp.close) bmp.close();
-  const item={data:ctx.getImageData(0,0,spec.size,spec.size).data,size:spec.size,part:spec.part,key:spec.key};
-  nightGlowCache.set(spec.key,item);
-  while(nightGlowCache.size>NIGHT_GLOW_CACHE_MAX) nightGlowCache.delete(nightGlowCache.keys().next().value);
+  const c=new OffscreenCanvas(256,256),ctx=c.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(bmp,0,0,256,256); if(bmp.close) bmp.close();
+  const data=ctx.getImageData(0,0,256,256).data;
+  const item={key,z:tile.z,x:tile.x,y:tile.y,features:nightGlowTilePixelsToFeatures(data,tile.z,tile.x,tile.y),last:performance.now()};
+  nightGlowTileCache.set(key,item);
+  while(nightGlowTileCache.size>NIGHT_GLOW_TILE_MAX){
+    let oldestKey=null,oldest=Infinity;
+    for(const [k,v] of nightGlowTileCache){if(v.last<oldest){oldest=v.last;oldestKey=k;}}
+    if(oldestKey==null) break;
+    nightGlowTileCache.delete(oldestKey);
+  }
   return item;
 }
 
-function nightGlowPixelsToFeatures(item,maxPoints=NIGHT_GLOW_MAX_POINTS,zoomOverride=null) {
-  const {data,size,part}=item;
-  const z=zoomOverride==null ? (terrainMapInstance ? terrainMapInstance.getZoom() : 5) : zoomOverride;
-  // Treat VIIRS as a radiance field from which we extract city-scale peaks.
-  // At low zooms, aggressively suppress nearby weak pixels so the map reads
-  // as a constellation of major metros rather than a blanket of dots.
-  const tier = z < 4.5 ? 0 : z < 6.5 ? 1 : z < 9 ? 2 : 3;
-  const step = tier===0 ? 3 : tier===1 ? 2 : 1;
-  const suppression = tier===0 ? 34 : tier===1 ? 20 : tier===2 ? 9 : 4;
-  const threshold = tier===0 ? 0.15 : tier===1 ? 0.095 : tier===2 ? 0.060 : 0.045;
-  const exponent = tier===0 ? 3.0 : tier===1 ? 2.35 : tier===2 ? 1.75 : 1.35;
-  const candidates=[];
-  for(let py=2;py<size-2;py+=step){
-    for(let px=2;px<size-2;px+=step){
-      const i=(py*size+px)*4;
-      const lum=(0.2126*data[i]+0.7152*data[i+1]+0.0722*data[i+2])/255;
-      const signal=Math.max(0,Math.min(1,(lum-0.055)/0.50));
-      if(signal<threshold) continue;
-      // Local-maximum test uses the current tier's neighborhood, so weak
-      // pixels inside a city merge into the strongest nearby sparkle.
-      let peak=true;
-      const r=Math.max(step*2,Math.round(suppression*0.42));
-      for(let oy=-r;oy<=r&&peak;oy+=step) for(let ox=-r;ox<=r;ox+=step){
-        if(!ox&&!oy) continue;
-        const sx=px+ox,sy=py+oy;
-        if(sx<0||sy<0||sx>=size||sy>=size) continue;
-        if(ox*ox+oy*oy>r*r) continue;
-        const ni=(sy*size+sx)*4;
-        const nl=(0.2126*data[ni]+0.7152*data[ni+1]+0.0722*data[ni+2])/255;
-        if(nl>lum*0.985){peak=false;break;}
-      }
-      if(!peak) continue;
-      const lon=part.west+(px+.5)/size*(part.east-part.west);
-      const lat=part.north-(py+.5)/size*(part.north-part.south);
-      // Compress weak radiance much more strongly at low zoom. This is the
-      // key to making major metropolitan areas dominate the distant view.
-      const intensity=Math.pow(signal,exponent);
-      candidates.push({lon,lat,intensity,raw:signal,px,py});
-    }
+function nightGlowCollectFeatures(view,z){
+  const tiles=nightGlowNeededTiles(view,z), out=[];
+  for(const t of tiles){
+    const item=nightGlowTileCache.get(`${t.z}/${t.x}/${t.y}`);
+    if(item){item.last=performance.now();out.push(...item.features);}
   }
-  candidates.sort((a,b)=>b.intensity-a.intensity);
-  const kept=[];
-  // Greedy screen-space non-max suppression. The minimum spacing is tiered,
-  // so a metro starts as one/few lights and progressively resolves into its
-  // component urban clusters as the camera approaches.
-  const minDist2=suppression*suppression;
-  for(const p of candidates){
-    let tooClose=false;
-    for(const q of kept){
-      const dx=p.px-q.px,dy=p.py-q.py;
-      if(dx*dx+dy*dy<minDist2){tooClose=true;break;}
-    }
-    if(tooClose) continue;
-    kept.push(p);
-    if(kept.length>=maxPoints) break;
-  }
-  return kept.map((p,i)=>({type:'Feature',id:i,geometry:{type:'Point',coordinates:[p.lon,p.lat]},properties:{intensity:p.intensity,raw:p.raw}}));
+  // At distant zooms use the strongest luminous clusters, but retain enough
+  // neighboring cells that a city reads as a field rather than 2–5 dots.
+  out.sort((a,b)=>b.properties.intensity-a.properties.intensity);
+  const limit=z<=3?900:z<=5?1800:z<=7?3600:NIGHT_GLOW_MAX_POINTS;
+  return out.slice(0,limit);
 }
 
-function nightGlowSetData(features) {
+function nightGlowSetData(features){
   if(!terrainMapInstance) return;
   const data={type:'FeatureCollection',features};
   const src=terrainMapInstance.getSource('nightGlow');
   if(src) src.setData(data);
-  else terrainMapInstance.addSource('nightGlow',{type:'geojson',data,attribution:'Night lights: NASA VIIRS / GIBS',maxzoom:12,promoteId:'id'});
+  else terrainMapInstance.addSource('nightGlow',{type:'geojson',data,attribution:'Night lights: NASA VIIRS / GIBS',maxzoom:10,promoteId:'id',buffer:32});
   const basePaint={
-    'circle-color':['interpolate',['linear'],['get','intensity'],0.05,'#d58b4a',0.22,'#e4a45d',0.55,'#f3c27d',1,'#fff0c9'],
-    'circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.34,0.22,0.48,0.55,0.68,1,0.86],
-    'circle-radius':['interpolate',['linear'],['zoom'],0,0.38,4,0.55,7,0.72,10,0.90,14,1.08,18,1.28],
-    'circle-blur':0.08
+    'circle-color':['interpolate',['linear'],['get','intensity'],0.04,'#d98543',0.18,'#e9a45c',0.42,'#f4c77f',0.72,'#ffe2a8',1,'#fff5dc'],
+    'circle-opacity':['interpolate',['linear'],['get','intensity'],0.015,0.48,0.08,0.66,0.25,0.82,0.55,0.93,1,1.0],
+    'circle-radius':['interpolate',['linear'],['zoom'],0,1.65,3,1.95,5,2.25,7,2.55,9,2.85,12,3.10,16,3.35,20,3.55],
+    'circle-blur':0.035
   };
   const haloPaint={
-    'circle-color':'#f0b76c','circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.018,0.22,0.032,0.55,0.055,1,0.085],
-    'circle-radius':['interpolate',['linear'],['zoom'],0,1.0,4,1.5,7,2.1,10,2.8,14,3.5,18,4.0],'circle-blur':0.82
+    'circle-color':'#f4b968',
+    'circle-opacity':['interpolate',['linear'],['get','intensity'],0.03,0.04,0.12,0.085,0.35,0.15,0.72,0.23,1,0.30],
+    'circle-radius':['interpolate',['linear'],['zoom'],0,2.1,3,2.6,5,3.0,7,3.5,10,4.0,14,4.6,20,5.2],
+    'circle-blur':0.72
   };
   if(!terrainMapInstance.getLayer('nightGlowHalo')) terrainMapInstance.addLayer({id:'nightGlowHalo',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:haloPaint,layout:{visibility:'visible'}});
   if(!terrainMapInstance.getLayer('nightGlow')) terrainMapInstance.addLayer({id:'nightGlow',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:basePaint,layout:{visibility:'visible'}});
   nightGlowReady=true;
 }
 
-function nightGlowCachedFeatures(view) {
-  const z=terrainMapInstance ? terrainMapInstance.getZoom() : 5;
-  const pad=Math.max(1.5, Math.min(8, (view.east-view.west)*0.08));
-  const west=view.west-pad,east=view.east+pad,south=view.south-pad,north=view.north+pad;
-  const out=[];
-  for(const item of nightGlowCache.values()){
-    if(item.part.east<west||item.part.west>east||item.part.north<south||item.part.south>north) continue;
-    out.push(...nightGlowPixelsToFeatures(item, z<6.5?2500:5000, z));
-  }
-  out.sort((a,b)=>b.properties.intensity-a.properties.intensity);
-  const seen=new Map(), kept=[];
-  const q=z<4.5?20:z<6.5?80:z<9?160:300;
-  for(const f of out){
-    const [lon,lat]=f.geometry.coordinates;
-    const k=`${Math.round(lon*q)},${Math.round(lat*q)}`;
-    if(seen.has(k)) continue; seen.set(k,1); kept.push(f);
-    if(kept.length>=NIGHT_GLOW_MAX_POINTS) break;
-  }
-  return kept;
-}
-
-async function buildNightGlowGeoJSON(force=false) {
+async function buildNightGlowGeoJSON(force=false){
   if(!terrainMapInstance||!nightModeOn) return;
   const serial=++nightGlowRequestSerial;
   const view=nightGlowView();
-  const z=terrainMapInstance.getZoom();
-  const cached=nightGlowCachedFeatures(view);
+  const z=nightGlowDataZoom();
+  // Paint immediately from already cached tiles. This is the equivalent of
+  // MapLibre's raster tile cache: moving the camera does not blank the field.
+  const cached=nightGlowCollectFeatures(view,z);
   if(cached.length) nightGlowSetData(cached);
-  const spec=nightGlowImageSpec(view);
-  if(nightGlowLoading&&!force) return;
+  const needed=nightGlowNeededTiles(view,z);
+  const missing=needed.filter(t=>!nightGlowTileCache.has(`${t.z}/${t.x}/${t.y}`));
+  if(!missing.length) return;
+  // Prioritize the tiles nearest the camera center and cap concurrency/work.
+  const c=terrainMapInstance.getCenter();
+  missing.sort((a,b)=>{
+    const tileLon=t=>((t.x+0.5)/Math.pow(2,z))*360-180;
+    const da=Math.abs(((tileLon(a)-c.lng+540)%360)-180), db=Math.abs(((tileLon(b)-c.lng+540)%360)-180);
+    return da-db;
+  });
+  const batch=missing.slice(0,NIGHT_GLOW_MAX_FETCH);
   nightGlowLoading=true;
   try{
-    // Always fetch the current viewport plus a coarser parent field. The
-    // parent guarantees an immediate city/metro constellation while the
-    // viewport field refines it; neither waits for a zoom gesture to happen.
-    const parentView={...view};
-    const span=Math.max(view.east-view.west,view.north-view.south);
-    if(!view.world){
-      const p=Math.max(span*0.55, z<6?12:5);
-      parentView.west=Math.max(-180,view.west-p);
-      parentView.east=Math.min(180,view.east+p);
-      parentView.south=Math.max(-85,view.south-p);
-      parentView.north=Math.min(85,view.north+p);
+    // Fetch in small parallel batches. No giant WMS bitmap and no parent
+    // request are created, so the page is not asked to decode a new megapixel
+    // image every time the camera moves.
+    for(let i=0;i<batch.length;i+=4){
+      if(serial!==nightGlowRequestSerial||!nightModeOn) return;
+      await Promise.all(batch.slice(i,i+4).map(fetchNightGlowTile));
+      if(serial!==nightGlowRequestSerial||!nightModeOn) return;
+      const current=nightGlowCollectFeatures(view,z);
+      if(current.length) nightGlowSetData(current);
     }
-    const parentSpec=nightGlowImageSpec({...parentView,world:view.world});
-    const specs=parentSpec.key===spec.key?[spec]:[parentSpec,spec];
-    const items=await Promise.all(specs.map(fetchNightGlowWMS));
-    if(serial!==nightGlowRequestSerial||!nightModeOn) return;
-    const merged=nightGlowCachedFeatures(view);
-    nightGlowSetData(merged);
-    console.log('gallery: hierarchical VIIRS sparkle field ready',{zoom:z,requests:specs.length,points:merged.length,cache:nightGlowCache.size});
-  }catch(err){console.warn('gallery: hierarchical VIIRS sparkle field FAILED',err);}
+    console.log('gallery: tiled VIIRS sparkle field ready',{zoom:z,tiles:batch.length,points:nightGlowCollectFeatures(view,z).length,cache:nightGlowTileCache.size});
+  }catch(err){console.warn('gallery: tiled VIIRS sparkle field FAILED',err);}
   finally{if(serial===nightGlowRequestSerial) nightGlowLoading=false;}
 }
 
@@ -1689,7 +1717,7 @@ function scheduleNightGlowUpdate(immediate=false){
   if(!terrainMapInstance||!nightModeOn) return;
   if(nightGlowMoveTimer) clearTimeout(nightGlowMoveTimer);
   const run=()=>buildNightGlowGeoJSON(true);
-  if(immediate) run(); else nightGlowMoveTimer=setTimeout(run,140);
+  if(immediate) run(); else nightGlowMoveTimer=setTimeout(run,90);
 }
 
 function installNightLightsProtocol() {

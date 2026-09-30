@@ -1540,16 +1540,11 @@ async function buildNightGlowGeoJSON(force=false) {
     const ys=[]; for(let y=y0;y<=y1;y++) ys.push(y);
     const tiles=[];
     for(const x of xs) for(const y of ys) tiles.push({x,y});
-    if (tiles.length > 64) {
-      // At very wide views use the coarser existing global field rather than
-      // trying to download hundreds of Level-8 tiles.
-      console.warn('gallery: VIIRS glow viewport too wide', tiles.length);
-      return;
-    }
+    if (tiles.length > 64) return;
 
     const results = await Promise.all(tiles.map(async ({x,y})=>{
       const url=`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/8/${y}/${x}.png`;
-      const r=await fetch(url, {cache:'force-cache'});
+      const r=await fetch(url,{cache:'force-cache'});
       if(!r.ok) throw new Error(`VIIRS Level-8 tile ${r.status}`);
       const bmp=await createImageBitmap(await r.blob());
       const c=new OffscreenCanvas(NIGHT_GLOW_TILE_SIZE,NIGHT_GLOW_TILE_SIZE);
@@ -1559,54 +1554,79 @@ async function buildNightGlowGeoJSON(force=false) {
     }));
     if(requestSerial!==nightGlowRequestSerial || !nightModeOn) return;
 
+    // Reinterpret VIIRS as a sparse astronomical-style point field.  We do
+    // NOT render the source pixels and we do NOT use a heatmap.  Each emitted
+    // point is a local radiance maximum, so cities become collections of tiny
+    // crisp lights instead of soft geographic blobs.
     const candidates=[];
-    const stride=4;
     for(const tile of results){
       const d=tile.img;
-      for(let py=2;py<256-2;py+=stride){
-        for(let px=2;px<256-2;px+=stride){
+      for(let py=3;py<253;py+=2){
+        for(let px=3;px<253;px+=2){
           const i=(py*256+px)*4;
           const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-          // Ignore background noise; preserve bright urban cores and a softer
-          // tail around them. VIIRS is radiance data, not a displayed image.
-          const signal=Math.max(0,Math.min(1,(lum-0.055)/0.52));
-          if(signal<0.018) continue;
-          const weight=Math.pow(signal,1.35);
-          candidates.push({x:tile.x,y:tile.y,px,py,weight});
+          const signal=Math.max(0,Math.min(1,(lum-0.055)/0.50));
+          if(signal<0.045) continue;
+          let isPeak=true;
+          let neighborhoodMax=0;
+          for(let oy=-3;oy<=3 && isPeak;oy+=3){
+            for(let ox=-3;ox<=3;ox+=3){
+              if(!ox && !oy) continue;
+              const ni=((py+oy)*256+(px+ox))*4;
+              const nl=(0.2126*d[ni]+0.7152*d[ni+1]+0.0722*d[ni+2])/255;
+              if(nl>lum*0.97){ isPeak=false; break; }
+              neighborhoodMax=Math.max(neighborhoodMax,nl);
+            }
+          }
+          if(!isPeak) continue;
+          const intensity=Math.pow(signal,1.18);
+          candidates.push({x:tile.x,y:tile.y,px,py,intensity});
         }
       }
     }
-    candidates.sort((a,b)=>b.weight-a.weight);
-    const features=candidates.slice(0,NIGHT_GLOW_MAX_POINTS).map(p=>({
-      type:'Feature',
-      geometry:{type:'Point',coordinates:nightGlowLonLat(p.px,p.py,p.x,p.y)},
-      properties:{intensity:p.weight}
-    }));
+    candidates.sort((a,b)=>b.intensity-a.intensity);
+    const features=[];
+    const occupied=[];
+    // Screen-like geographic suppression prevents a bright urban patch from
+    // becoming a carpet of points while preserving separate city centers.
+    for(const p of candidates){
+      if(features.length>=9000) break;
+      const coord=nightGlowLonLat(p.px,p.py,p.x,p.y);
+      let tooClose=false;
+      for(let j=Math.max(0,occupied.length-80);j<occupied.length;j++){
+        const q=occupied[j];
+        const dx=(coord[0]-q[0])*Math.cos(coord[1]*Math.PI/180);
+        const dy=coord[1]-q[1];
+        if(dx*dx+dy*dy < 0.00035*0.00035){ tooClose=true; break; }
+      }
+      if(tooClose) continue;
+      occupied.push(coord);
+      features.push({type:'Feature',geometry:{type:'Point',coordinates:coord},properties:{intensity:p.intensity}});
+    }
     const data={type:'FeatureCollection',features};
     let src=terrainMapInstance.getSource('nightGlow');
     if(src) src.setData(data);
     else terrainMapInstance.addSource('nightGlow',{type:'geojson',data,attribution:'Night lights: NASA VIIRS / GIBS'});
-    if(!terrainMapInstance.getLayer('nightGlow')) terrainMapInstance.addLayer({
-      id:'nightGlow',type:'heatmap',source:'nightGlow',minzoom:0,maxzoom:18,
-      paint:{
-        'heatmap-weight':['get','intensity'],
-        'heatmap-intensity':['interpolate',['linear'],['zoom'],2,0.16,5,0.20,8,0.24,12,0.28,16,0.32],
-        'heatmap-radius':['interpolate',['linear'],['zoom'],2,18,4,24,6,32,8,42,12,54,16,68,18,78],
-        'heatmap-opacity':0.92,
-        'heatmap-color':['interpolate',['linear'],['heatmap-density'],
-          0,'rgba(255,180,90,0)',
-          0.08,'rgba(255,166,76,0.012)',
-          0.18,'rgba(255,177,88,0.025)',
-          0.32,'rgba(255,190,105,0.045)',
-          0.48,'rgba(255,204,128,0.075)',
-          0.68,'rgba(255,218,151,0.11)',
-          0.84,'rgba(255,230,177,0.15)',
-          1,'rgba(255,241,202,0.20)']
-      },layout:{visibility:'visible'}
-    });
+
+    const basePaint={
+      'circle-color':['interpolate',['linear'],['get','intensity'],0.05,'#d58b4a',0.22,'#e4a45d',0.55,'#f3c27d',1,'#fff0c9'],
+      'circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.38,0.22,0.55,0.55,0.72,1,0.90],
+      'circle-radius':['interpolate',['linear'],['get','intensity'],0.05,0.65,0.22,0.85,0.55,1.15,1,1.65],
+      'circle-blur':0.08
+    };
+    const haloPaint={
+      'circle-color':'#f0b76c',
+      'circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.025,0.22,0.045,0.55,0.075,1,0.11],
+      'circle-radius':['interpolate',['linear'],['get','intensity'],0.05,2.2,0.22,3.0,0.55,4.2,1,5.5],
+      'circle-blur':0.82
+    };
+    if(!terrainMapInstance.getLayer('nightGlowHalo')) terrainMapInstance.addLayer({id:'nightGlowHalo',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:haloPaint,layout:{visibility:'visible'}});
+    else for(const [k,v] of Object.entries(haloPaint)) terrainMapInstance.setPaintProperty('nightGlowHalo',k,v);
+    if(!terrainMapInstance.getLayer('nightGlow')) terrainMapInstance.addLayer({id:'nightGlow',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:basePaint,layout:{visibility:'visible'}});
+    else for(const [k,v] of Object.entries(basePaint)) terrainMapInstance.setPaintProperty('nightGlow',k,v);
     nightGlowReady=true;
-    console.log('gallery: VIIRS Level-8 night glow ready',{tiles:tiles.length,points:features.length,zoom:terrainMapInstance.getZoom()});
-  }catch(err){ console.error('gallery: VIIRS Level-8 night glow FAILED',err); }
+    console.log('gallery: VIIRS sparkle field ready',{tiles:tiles.length,points:features.length,zoom:terrainMapInstance.getZoom()});
+  }catch(err){ console.error('gallery: VIIRS sparkle field FAILED',err); }
   finally{ nightGlowLoading=false; }
 }
 
@@ -2324,6 +2344,7 @@ function setNightPalette(on) {
     terrainMapInstance.setLight(c.light);
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility','none');
     if (terrainMapInstance.getLayer('nightGlow')) terrainMapInstance.setLayoutProperty('nightGlow','visibility',on ? 'visible' : 'none');
+    if (terrainMapInstance.getLayer('nightGlowHalo')) terrainMapInstance.setLayoutProperty('nightGlowHalo','visibility',on ? 'visible' : 'none');
     if (on) buildNightGlowGeoJSON();
     const material=window.__terrainMaterialLayer;
     // Keep the old material texture dormant; night illumination is now rendered

@@ -1510,7 +1510,7 @@ function ensureNightGlowRaster(){
         tileSize:256,
         minzoom:0,
         maxzoom:14,
-        attribution:'Night lights: NASA VIIRS / GIBS'
+        attribution:'Night lights: NASA VIIRS Black Marble / GIBS'
       });
     }
     if(!terrainMapInstance.getLayer('nightGlowRaster')){
@@ -1544,7 +1544,7 @@ function installNightLightsProtocol() {
   // into a padded, oversampled image.  We then apply the glow on the tile and
   // return only the 256px tile MapLibre needs.  There is no giant viewport
   // image and no GeoJSON point swarm.
-  const GIBS_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
+  const GIBS_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi';
   const NIGHT_TILE_CACHE = new Map();
   const NIGHT_TILE_CACHE_MAX = 96;
 
@@ -1553,6 +1553,8 @@ function installNightLightsProtocol() {
     const n=Math.PI - 2*Math.PI*y/Math.pow(2,z);
     return 180/Math.PI * Math.atan(Math.sinh(n));
   }
+  function mercatorX(lon){ return lon * 20037508.342789244 / 180; }
+  function mercatorY(lat){ const r=lat*Math.PI/180; return Math.max(-20037508.342789244, Math.min(20037508.342789244, Math.log(Math.tan(Math.PI/4+r/2))*20037508.342789244/Math.PI)); }
   function tileKey(z,x,y){ return `${z}/${x}/${y}`; }
   function touchNightCache(k,v){
     if(NIGHT_TILE_CACHE.has(k)) NIGHT_TILE_CACHE.delete(k);
@@ -1577,9 +1579,9 @@ function installNightLightsProtocol() {
     const renderSize = z <= 8 ? 256 : 512;
     const params = new URLSearchParams({
       service:'WMS', request:'GetMap', version:'1.1.1',
-      layers:'VIIRS_Night_Lights', styles:'default', format:'image/png',
-      transparent:'true', srs:'EPSG:4326',
-      bbox:`${west},${south},${east},${north}`,
+      layers:'VIIRS_SNPP_GapFilled_BRDF_Corrected_DayNightBand_Radiance', styles:'default', format:'image/png',
+      transparent:'true', srs:'EPSG:3857',
+      bbox:`${mercatorX(west)},${mercatorY(south)},${mercatorX(east)},${mercatorY(north)}`,
       width:String(renderSize), height:String(renderSize),
       // GIBS will use the current/default time dimension for the layer.
       time:'default'
@@ -1722,7 +1724,7 @@ function installNightLightsProtocol() {
     for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
       const isNight = kind === 'VIIRS_Night_Lights';
       const url = isNight
-        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
+        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_GapFilled_BRDF_Corrected_DayNightBand_Radiance/default/default/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
         : `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kind}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
       const b=await materialFetchBitmap(url,signal);
       ctx.drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE);

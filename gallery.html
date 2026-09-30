@@ -1499,27 +1499,56 @@ function installEnvironmentalProtocols() {
 let nightGlowLoading = false;
 let nightGlowReady = false;
 let nightGlowRequestSerial = 0;
-const NIGHT_GLOW_Z = 8;
-const NIGHT_GLOW_TILE_SIZE = 256;
-const NIGHT_GLOW_MAX_POINTS = 35000;
+const NIGHT_GLOW_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
+const NIGHT_GLOW_MAX_IMAGE = 1536;
+const NIGHT_GLOW_MIN_IMAGE = 768;
+const NIGHT_GLOW_MAX_POINTS = 12000;
 
-function nightGlowTileX(lon) {
-  const n = 1 << NIGHT_GLOW_Z;
-  return Math.max(0, Math.min(n - 1, Math.floor((lon + 180) / 360 * n)));
+function nightGlowViewportSize() {
+  if (!terrainMapInstance) return NIGHT_GLOW_MIN_IMAGE;
+  const c = terrainMapInstance.getContainer();
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  return Math.max(NIGHT_GLOW_MIN_IMAGE, Math.min(NIGHT_GLOW_MAX_IMAGE,
+    Math.round(Math.max(c.clientWidth, c.clientHeight) * 1.35 * dpr)));
 }
-function nightGlowTileY(lat) {
-  const n = 1 << NIGHT_GLOW_Z;
-  const r = Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI / 180;
-  return Math.max(0, Math.min(n - 1, Math.floor((1 - Math.asinh(Math.tan(r)) / Math.PI) / 2 * n)));
+
+function nightGlowBoundsParts() {
+  const b = terrainMapInstance.getBounds();
+  let west = b.getWest(), east = b.getEast();
+  const south = Math.max(-85, b.getSouth());
+  const north = Math.min(85, b.getNorth());
+  if (east - west >= 359) return [{ west:-180, south, east:180, north }];
+  while (west < -180) { west += 360; east += 360; }
+  while (west > 180) { west -= 360; east -= 360; }
+  if (east <= 180) return [{west, south, east, north}];
+  return [
+    {west, south, east:180, north},
+    {west:-180, south, east:east-360, north}
+  ];
 }
-function nightGlowLonLat(px, py, tileX, tileY) {
-  const n = 1 << NIGHT_GLOW_Z;
-  const gx = tileX * NIGHT_GLOW_TILE_SIZE + px + 0.5;
-  const gy = tileY * NIGHT_GLOW_TILE_SIZE + py + 0.5;
-  const lon = gx / (n * NIGHT_GLOW_TILE_SIZE) * 360 - 180;
-  const q = Math.PI - 2 * Math.PI * gy / (n * NIGHT_GLOW_TILE_SIZE);
-  const lat = 180 / Math.PI * Math.atan(Math.sinh(q));
-  return [lon, Math.max(-85.05112878, Math.min(85.05112878, lat))];
+
+async function fetchNightGlowWMS(part, size) {
+  const params = new URLSearchParams({
+    service:'WMS', version:'1.1.1', request:'GetMap',
+    format:'image/png', layers:'VIIRS_Night_Lights', styles:'',
+    srs:'EPSG:4326',
+    bbox:`${part.west},${part.south},${part.east},${part.north}`,
+    width:String(size), height:String(size), transparent:'true'
+  });
+  const r = await fetch(`${NIGHT_GLOW_WMS}?${params.toString()}`, {cache:'force-cache'});
+  if (!r.ok) throw new Error(`VIIRS viewport WMS ${r.status}`);
+  const bmp = await createImageBitmap(await r.blob());
+  const c = new OffscreenCanvas(size,size);
+  const ctx = c.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(bmp,0,0);
+  if (bmp.close) bmp.close();
+  return {data:ctx.getImageData(0,0,size,size).data, size, part};
+}
+
+function nightGlowPixelLonLat(px,py,size,part) {
+  const lon = part.west + (px + 0.5) / size * (part.east - part.west);
+  const lat = part.north - (py + 0.5) / size * (part.north - part.south);
+  return [lon,lat];
 }
 
 async function buildNightGlowGeoJSON(force=false) {
@@ -1528,83 +1557,63 @@ async function buildNightGlowGeoJSON(force=false) {
   const requestSerial = ++nightGlowRequestSerial;
   nightGlowLoading = true;
   try {
-    const b = terrainMapInstance.getBounds();
-    const west = b.getWest(), east = b.getEast(), north = b.getNorth(), south = b.getSouth();
-    const n = 1 << NIGHT_GLOW_Z;
-    const x0 = nightGlowTileX(west), x1 = nightGlowTileX(east);
-    const y0 = nightGlowTileY(north), y1 = nightGlowTileY(south);
-    const xs=[];
-    if (east - west >= 359) { for(let x=0;x<n;x++) xs.push(x); }
-    else if (west > east) { for(let x=x0;x<n;x++) xs.push(x); for(let x=0;x<=x1;x++) xs.push(x); }
-    else { for(let x=x0;x<=x1;x++) xs.push(x); }
-    const ys=[]; for(let y=y0;y<=y1;y++) ys.push(y);
-    const tiles=[];
-    for(const x of xs) for(const y of ys) tiles.push({x,y});
-    if (tiles.length > 64) return;
+    // One viewport-sized WMS request gives us the entire visible world region
+    // at whatever geographic scale the user is currently viewing. At a world
+    // view that means global lights; zoomed into a city it means only that city
+    // region. The WMS image is NEVER displayed — it is converted immediately
+    // into sparse point lights.
+    const size = nightGlowViewportSize();
+    const parts = nightGlowBoundsParts();
+    const results = await Promise.all(parts.map(part => fetchNightGlowWMS(part,size)));
+    if (requestSerial !== nightGlowRequestSerial || !nightModeOn) return;
 
-    const results = await Promise.all(tiles.map(async ({x,y})=>{
-      const url=`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/8/${y}/${x}.png`;
-      const r=await fetch(url,{cache:'force-cache'});
-      if(!r.ok) throw new Error(`VIIRS Level-8 tile ${r.status}`);
-      const bmp=await createImageBitmap(await r.blob());
-      const c=new OffscreenCanvas(NIGHT_GLOW_TILE_SIZE,NIGHT_GLOW_TILE_SIZE);
-      const ctx=c.getContext('2d',{willReadFrequently:true});
-      ctx.drawImage(bmp,0,0); if(bmp.close) bmp.close();
-      return {x,y,img:ctx.getImageData(0,0,NIGHT_GLOW_TILE_SIZE,NIGHT_GLOW_TILE_SIZE).data};
-    }));
-    if(requestSerial!==nightGlowRequestSerial || !nightModeOn) return;
-
-    // Reinterpret VIIRS as a sparse astronomical-style point field.  We do
-    // NOT render the source pixels and we do NOT use a heatmap.  Each emitted
-    // point is a local radiance maximum, so cities become collections of tiny
-    // crisp lights instead of soft geographic blobs.
     const candidates=[];
-    for(const tile of results){
-      const d=tile.img;
-      for(let py=3;py<253;py+=2){
-        for(let px=3;px<253;px+=2){
-          const i=(py*256+px)*4;
-          const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
+    for (const tile of results) {
+      const {data,size,part}=tile;
+      const step = size >= 1200 ? 3 : 2;
+      for (let py=2; py<size-2; py+=step) {
+        for (let px=2; px<size-2; px+=step) {
+          const i=(py*size+px)*4;
+          const lum=(0.2126*data[i]+0.7152*data[i+1]+0.0722*data[i+2])/255;
           const signal=Math.max(0,Math.min(1,(lum-0.055)/0.50));
           if(signal<0.045) continue;
-          let isPeak=true;
-          let neighborhoodMax=0;
-          for(let oy=-3;oy<=3 && isPeak;oy+=3){
-            for(let ox=-3;ox<=3;ox+=3){
-              if(!ox && !oy) continue;
-              const ni=((py+oy)*256+(px+ox))*4;
-              const nl=(0.2126*d[ni]+0.7152*d[ni+1]+0.0722*d[ni+2])/255;
-              if(nl>lum*0.97){ isPeak=false; break; }
-              neighborhoodMax=Math.max(neighborhoodMax,nl);
+          let peak=true;
+          for(let oy=-step*2;oy<=step*2 && peak;oy+=step){
+            for(let ox=-step*2;ox<=step*2;ox+=step){
+              if(!ox&&!oy) continue;
+              const sx=px+ox, sy=py+oy;
+              if(sx<0||sy<0||sx>=size||sy>=size) continue;
+              const ni=(sy*size+sx)*4;
+              const nl=(0.2126*data[ni]+0.7152*data[ni+1]+0.0722*data[ni+2])/255;
+              if(nl>lum*0.97){peak=false;break;}
             }
           }
-          if(!isPeak) continue;
+          if(!peak) continue;
           const intensity=Math.pow(signal,1.18);
-          candidates.push({x:tile.x,y:tile.y,px,py,intensity});
+          candidates.push({part,px,py,size,intensity});
         }
       }
     }
     candidates.sort((a,b)=>b.intensity-a.intensity);
     const features=[];
     const occupied=[];
-    // Screen-like geographic suppression prevents a bright urban patch from
-    // becoming a carpet of points while preserving separate city centers.
+    const minDistance = Math.max(0.00018, Math.min(0.0009, 0.18 / Math.pow(2, Math.max(0, terrainMapInstance.getZoom()-3))));
     for(const p of candidates){
-      if(features.length>=9000) break;
-      const coord=nightGlowLonLat(p.px,p.py,p.x,p.y);
+      if(features.length>=NIGHT_GLOW_MAX_POINTS) break;
+      const coord=nightGlowPixelLonLat(p.px,p.py,p.size,p.part);
       let tooClose=false;
-      for(let j=Math.max(0,occupied.length-80);j<occupied.length;j++){
+      for(let j=Math.max(0,occupied.length-120);j<occupied.length;j++){
         const q=occupied[j];
         const dx=(coord[0]-q[0])*Math.cos(coord[1]*Math.PI/180);
         const dy=coord[1]-q[1];
-        if(dx*dx+dy*dy < 0.00035*0.00035){ tooClose=true; break; }
+        if(dx*dx+dy*dy < minDistance*minDistance){tooClose=true;break;}
       }
       if(tooClose) continue;
       occupied.push(coord);
       features.push({type:'Feature',geometry:{type:'Point',coordinates:coord},properties:{intensity:p.intensity}});
     }
     const data={type:'FeatureCollection',features};
-    let src=terrainMapInstance.getSource('nightGlow');
+    const src=terrainMapInstance.getSource('nightGlow');
     if(src) src.setData(data);
     else terrainMapInstance.addSource('nightGlow',{type:'geojson',data,attribution:'Night lights: NASA VIIRS / GIBS'});
 
@@ -1625,8 +1634,8 @@ async function buildNightGlowGeoJSON(force=false) {
     if(!terrainMapInstance.getLayer('nightGlow')) terrainMapInstance.addLayer({id:'nightGlow',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:basePaint,layout:{visibility:'visible'}});
     else for(const [k,v] of Object.entries(basePaint)) terrainMapInstance.setPaintProperty('nightGlow',k,v);
     nightGlowReady=true;
-    console.log('gallery: VIIRS sparkle field ready',{tiles:tiles.length,points:features.length,zoom:terrainMapInstance.getZoom()});
-  }catch(err){ console.error('gallery: VIIRS sparkle field FAILED',err); }
+    console.log('gallery: VIIRS viewport sparkle field ready',{parts:parts.length,points:features.length,size,zoom:terrainMapInstance.getZoom()});
+  }catch(err){ console.error('gallery: VIIRS viewport sparkle field FAILED',err); }
   finally{ nightGlowLoading=false; }
 }
 

@@ -1509,7 +1509,7 @@ function ensureNightGlowRaster(){
         tiles:['nightlights://{z}/{x}/{y}'],
         tileSize:256,
         minzoom:0,
-        maxzoom:8,
+        maxzoom:14,
         attribution:'Night lights: NASA VIIRS / GIBS'
       });
     }
@@ -1518,7 +1518,7 @@ function ensureNightGlowRaster(){
       const layer={
         id:'nightGlowRaster', type:'raster', source:'nightGlowRasterSource',
         minzoom:0, maxzoom:24,
-        paint:{'raster-opacity':0.98,'raster-resampling':'linear','raster-fade-duration':0}
+        paint:{'raster-opacity':0.98,'raster-resampling':'linear','raster-fade-duration':180}
       };
       if(firstSymbol) terrainMapInstance.addLayer(layer,firstSymbol.id);
       else terrainMapInstance.addLayer(layer);
@@ -1532,73 +1532,130 @@ function installNightLightsProtocol() {
   if (nightProtocolInstalled) return;
   nightProtocolInstalled = true;
 
-  // The VIIRS service is natively tiled to zoom 8 (~500 m at the equator).
-  // MapLibre owns viewport selection, tile caching, fade-free swaps and reuse
-  // while panning. At closer camera zooms it smoothly overscales the finest
-  // available source tiles instead of generating a swarm of GeoJSON points.
-  maplibregl.addProtocol('nightlights', async (params, abortController) => {
-    const [z, x, y] = params.url.replace('nightlights://', '').split('/').map(Number);
-    const safeZ = Math.max(0, Math.min(z, 8));
-    const scale = Math.pow(2, z - safeZ);
-    const safeX = Math.floor(x / scale), safeY = Math.floor(y / scale);
-    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/${safeZ}/${safeY}/${safeX}.png`;
-    const res = await fetch(url, { signal: abortController && abortController.signal, cache:'force-cache' });
-    if (!res.ok) throw new Error(`NASA VIIRS night-light tile ${res.status}`);
-    const bitmap = await createImageBitmap(await res.blob());
-    const size = bitmap.width || 256;
-    const base = new OffscreenCanvas(size, size);
-    const bctx = base.getContext('2d', {willReadFrequently:true});
-    bctx.drawImage(bitmap,0,0,size,size);
+  // Native-resolution VIIRS delivery.
+  //
+  // GIBS exposes the Black Marble / VIIRS nighttime-light product at the
+  // product's native ~500 m grid.  The old implementation hard-clamped every
+  // request to the GoogleMapsCompatible Level-8 PNG and then overscaled that
+  // 256px image forever.  That is what produced the obvious square pixels.
+  //
+  // Here MapLibre still owns the tile pyramid, cache and viewport selection,
+  // but each requested tile is rendered by NASA's WMS from the 500 m product
+  // into a padded, oversampled image.  We then apply the glow on the tile and
+  // return only the 256px tile MapLibre needs.  There is no giant viewport
+  // image and no GeoJSON point swarm.
+  const GIBS_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
+  const NIGHT_TILE_CACHE = new Map();
+  const NIGHT_TILE_CACHE_MAX = 96;
+
+  function lonFromTileX(x,z){ return x / Math.pow(2,z) * 360 - 180; }
+  function latFromTileY(y,z){
+    const n=Math.PI - 2*Math.PI*y/Math.pow(2,z);
+    return 180/Math.PI * Math.atan(Math.sinh(n));
+  }
+  function tileKey(z,x,y){ return `${z}/${x}/${y}`; }
+  function touchNightCache(k,v){
+    if(NIGHT_TILE_CACHE.has(k)) NIGHT_TILE_CACHE.delete(k);
+    NIGHT_TILE_CACHE.set(k,v);
+    while(NIGHT_TILE_CACHE.size>NIGHT_TILE_CACHE_MAX){
+      const first=NIGHT_TILE_CACHE.keys().next().value;
+      NIGHT_TILE_CACHE.delete(first);
+    }
+  }
+
+  async function fetchNightWMS(z,x,y,signal){
+    const n=Math.pow(2,z);
+    const xx=((x%n)+n)%n;
+    const west=lonFromTileX(xx,z);
+    const east=lonFromTileX(xx+1,z);
+    const north=latFromTileY(y,z);
+    const south=latFromTileY(y+1,z);
+
+    // At z<=8, 256px is already close to the native ~500 m product sampling.
+    // Above that, ask GIBS for an oversampled tile so the 500 m cells are
+    // filtered rather than repeatedly magnified as a raw 256px PNG.
+    const renderSize = z <= 8 ? 256 : 512;
+    const params = new URLSearchParams({
+      service:'WMS', request:'GetMap', version:'1.1.1',
+      layers:'VIIRS_Night_Lights', styles:'default', format:'image/png',
+      transparent:'true', srs:'EPSG:4326',
+      bbox:`${west},${south},${east},${north}`,
+      width:String(renderSize), height:String(renderSize),
+      // GIBS will use the current/default time dimension for the layer.
+      time:'default'
+    });
+    const url=`${GIBS_WMS}?${params.toString()}`;
+    const res=await fetch(url,{signal,cache:'force-cache'});
+    if(!res.ok) throw new Error(`NASA VIIRS WMS ${res.status}`);
+    return createImageBitmap(await res.blob());
+  }
+
+  function processNightTile(bitmap,z){
+    const src=bitmap.width||256;
+    const pad = z>=9 ? 18 : 12;
+    const ps=src+pad*2;
+    const base=new OffscreenCanvas(src,src);
+    const bctx=base.getContext('2d',{willReadFrequently:true});
+    bctx.imageSmoothingEnabled=true;
+    bctx.imageSmoothingQuality='high';
+    bctx.drawImage(bitmap,0,0,src,src);
     if(bitmap.close) bitmap.close();
 
-    // Interpret the VIIRS rendered luminance as a radiance proxy. A soft gamma
-    // curve keeps secondary urban fabric visible; bright cores become ivory,
-    // while the surrounding urban glow stays warm amber. Background pixels are
-    // transparent, so the satellite/terrain beneath remains untouched.
-    const img=bctx.getImageData(0,0,size,size), d=img.data;
+    const img=bctx.getImageData(0,0,src,src), d=img.data;
     for(let i=0;i<d.length;i+=4){
       const a=d[i+3]/255;
       const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
-      const signal=Math.max(0,Math.min(1,(lum-0.018)/0.38));
-      const s=Math.pow(signal,0.66);
-      const alpha=Math.max(0,Math.min(0.94,Math.pow(s,0.82)*0.96*a));
-      // Warm amber body to near-white hot cores, without a flat uniform dot color.
-      d[i]=Math.round(224+31*Math.pow(s,1.8));
-      d[i+1]=Math.round(135+108*Math.pow(s,1.35));
-      d[i+2]=Math.round(64+178*Math.pow(s,1.15));
+      // Keep considerably more of the mid/low radiance so urban fabric is a
+      // continuous field rather than a few isolated bright specks.
+      const signal=Math.max(0,Math.min(1,(lum-0.012)/0.34));
+      const s=Math.pow(signal,0.58);
+      const alpha=Math.max(0,Math.min(0.96,Math.pow(s,0.86)*0.98*a));
+      d[i]=Math.round(218+37*Math.pow(s,1.7));
+      d[i+1]=Math.round(126+119*Math.pow(s,1.30));
+      d[i+2]=Math.round(54+201*Math.pow(s,1.10));
       d[i+3]=Math.round(alpha*255);
     }
     bctx.putImageData(img,0,0);
 
-    // Build a restrained two-scale bloom on a padded tile. Padding prevents
-    // most halo clipping at tile edges; the crisp source remains dominant.
-    const pad=12, ps=size+pad*2;
     const padded=new OffscreenCanvas(ps,ps), pctx=padded.getContext('2d');
+    // Edge replication keeps the glow continuous across tile boundaries.
     pctx.drawImage(base,pad,pad);
-    pctx.drawImage(base,0,0,1,size,0,pad,pad,size);
-    pctx.drawImage(base,size-1,0,1,size,pad+size,pad,pad,size);
-    pctx.drawImage(base,0,0,size,1,pad,0,size,pad);
-    pctx.drawImage(base,0,size-1,size,1,pad,pad+size,size,pad);
-    pctx.drawImage(base,0,0,1,1,0,0,pad,pad);
-    pctx.drawImage(base,size-1,0,1,1,pad+size,0,pad,pad);
-    pctx.drawImage(base,0,size-1,1,1,0,pad+size,pad,pad);
-    pctx.drawImage(base,size-1,size-1,1,1,pad+size,pad+size,pad,pad);
+    pctx.drawImage(base,0,0,1,src,0,pad,pad,src);
+    pctx.drawImage(base,src-1,0,1,src,pad+src,pad,pad,src);
+    pctx.drawImage(base,0,0,src,1,pad,0,src,pad);
+    pctx.drawImage(base,0,src-1,src,1,pad,pad+src,src,pad);
 
-    const bloom=new OffscreenCanvas(ps,ps), gctx=bloom.getContext('2d');
-    gctx.globalCompositeOperation='lighter';
-    gctx.globalAlpha=0.72;
-    gctx.filter='blur(7px)';
-    gctx.drawImage(padded,0,0);
-    gctx.globalAlpha=0.48;
-    gctx.filter='blur(2.5px)';
-    gctx.drawImage(padded,0,0);
-    gctx.filter='none';
-    gctx.globalAlpha=0.92;
-    gctx.drawImage(padded,0,0);
+    const bloom=new OffscreenCanvas(ps,ps), g=bloom.getContext('2d');
+    g.globalCompositeOperation='lighter';
+    // Broader low-frequency radiance + restrained near-core glow.
+    g.globalAlpha=0.54; g.filter='blur(14px)'; g.drawImage(padded,0,0);
+    g.globalAlpha=0.34; g.filter='blur(5px)';  g.drawImage(padded,0,0);
+    g.globalAlpha=0.92; g.filter='none';        g.drawImage(padded,0,0);
 
-    const out=new OffscreenCanvas(size,size), octx=out.getContext('2d');
-    octx.drawImage(bloom,pad,pad,size,size,0,0,size,size);
-    return {data:await(await out.convertToBlob({type:'image/png'})).arrayBuffer()};
+    const out=new OffscreenCanvas(256,256), o=out.getContext('2d');
+    o.imageSmoothingEnabled=true;
+    o.imageSmoothingQuality='high';
+    o.drawImage(bloom,pad,pad,src,src,0,0,256,256);
+    return out.convertToBlob({type:'image/png'}).then(b=>b.arrayBuffer());
+  }
+
+  maplibregl.addProtocol('nightlights', async (params, abortController) => {
+    const [rz,rx,ry]=params.url.replace('nightlights://','').split('/').map(Number);
+    // Never create fake detail beyond the native VIIRS sampling.  We do,
+    // however, let the WMS re-render the same 500 m field into the local tile
+    // at higher pixel density, which removes the harsh Level-8 square blocks.
+    const z=Math.max(0,Math.min(14,rz));
+    const n=Math.pow(2,z);
+    const x=((rx%n)+n)%n;
+    const y=Math.max(0,Math.min(n-1,ry));
+    const key=tileKey(z,x,y);
+    const cached=NIGHT_TILE_CACHE.get(key);
+    if(cached){ touchNightCache(key,cached); return {data:cached.slice(0)}; }
+
+    const bitmap=await fetchNightWMS(z,x,y,abortController && abortController.signal);
+    const data=await processNightTile(bitmap,z);
+    touchNightCache(key,data);
+    return {data:data.slice(0)};
   });
 
   // ------------------------------------------------------------

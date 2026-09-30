@@ -1499,144 +1499,154 @@ function installEnvironmentalProtocols() {
 let nightGlowLoading = false;
 let nightGlowReady = false;
 let nightGlowRequestSerial = 0;
+let nightGlowMoveTimer = null;
+const nightGlowCache = new Map();
 const NIGHT_GLOW_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
-const NIGHT_GLOW_MAX_IMAGE = 1536;
-const NIGHT_GLOW_MIN_IMAGE = 768;
-const NIGHT_GLOW_MAX_POINTS = 12000;
+const NIGHT_GLOW_MAX_POINTS = 14000;
+const NIGHT_GLOW_CACHE_MAX = 18;
 
-function nightGlowViewportSize() {
-  if (!terrainMapInstance) return NIGHT_GLOW_MIN_IMAGE;
-  const c = terrainMapInstance.getContainer();
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-  return Math.max(NIGHT_GLOW_MIN_IMAGE, Math.min(NIGHT_GLOW_MAX_IMAGE,
-    Math.round(Math.max(c.clientWidth, c.clientHeight) * 1.35 * dpr)));
-}
-
-function nightGlowBoundsParts() {
+function nightGlowView() {
   const b = terrainMapInstance.getBounds();
-  let west = b.getWest(), east = b.getEast();
-  const south = Math.max(-85, b.getSouth());
-  const north = Math.min(85, b.getNorth());
-  if (east - west >= 359) return [{ west:-180, south, east:180, north }];
-  while (west < -180) { west += 360; east += 360; }
-  while (west > 180) { west -= 360; east -= 360; }
-  if (east <= 180) return [{west, south, east, north}];
-  return [
-    {west, south, east:180, north},
-    {west:-180, south, east:east-360, north}
-  ];
+  let west=b.getWest(), east=b.getEast();
+  const south=Math.max(-85,b.getSouth()), north=Math.min(85,b.getNorth());
+  if(east-west>=359) return {west:-180,east:180,south,north,world:true};
+  while(west<-180){west+=360;east+=360;}
+  while(west>180){west-=360;east-=360;}
+  return {west,south,east,north,world:false};
 }
 
-async function fetchNightGlowWMS(part, size) {
-  const params = new URLSearchParams({
-    service:'WMS', version:'1.1.1', request:'GetMap',
-    format:'image/png', layers:'VIIRS_Night_Lights', styles:'',
-    srs:'EPSG:4326',
-    bbox:`${part.west},${part.south},${part.east},${part.north}`,
-    width:String(size), height:String(size), transparent:'true'
+function nightGlowImageSpec(view) {
+  const z=terrainMapInstance.getZoom();
+  // One coarse global field at low zooms; progressively smaller regional
+  // requests as the camera gets closer. This prevents a city-sized request
+  // from being the only field available after zooming back out.
+  if(view.world || z<=3.5) return {key:'world',part:{west:-180,south:-85,east:180,north:85},size:1024};
+  const span=Math.max(view.east-view.west, view.north-view.south);
+  const pad=Math.max(span*0.28, z<6?8:z<9?3:1);
+  const west=Math.max(-180,view.west-pad), east=Math.min(180,view.east+pad);
+  const south=Math.max(-85,view.south-pad), north=Math.min(85,view.north+pad);
+  const target=Math.max(640,Math.min(1280,Math.round(980 + Math.max(0,9-z)*70)));
+  const q= z<6 ? 10 : z<9 ? 5 : z<12 ? 2 : 0.5;
+  const key=[Math.round(west/q)*q,Math.round(south/q)*q,Math.round(east/q)*q,Math.round(north/q)*q,target].join('|');
+  return {key,part:{west,south,east,north},size:target};
+}
+
+async function fetchNightGlowWMS(spec) {
+  if(nightGlowCache.has(spec.key)) return nightGlowCache.get(spec.key);
+  const params=new URLSearchParams({
+    service:'WMS',version:'1.1.1',request:'GetMap',format:'image/png',
+    layers:'VIIRS_Night_Lights',styles:'',srs:'EPSG:4326',
+    bbox:`${spec.part.west},${spec.part.south},${spec.part.east},${spec.part.north}`,
+    width:String(spec.size),height:String(spec.size),transparent:'true'
   });
-  const r = await fetch(`${NIGHT_GLOW_WMS}?${params.toString()}`, {cache:'force-cache'});
-  if (!r.ok) throw new Error(`VIIRS viewport WMS ${r.status}`);
-  const bmp = await createImageBitmap(await r.blob());
-  const c = new OffscreenCanvas(size,size);
-  const ctx = c.getContext('2d',{willReadFrequently:true});
-  ctx.drawImage(bmp,0,0);
-  if (bmp.close) bmp.close();
-  return {data:ctx.getImageData(0,0,size,size).data, size, part};
+  const r=await fetch(`${NIGHT_GLOW_WMS}?${params.toString()}`,{cache:'force-cache'});
+  if(!r.ok) throw new Error(`VIIRS viewport WMS ${r.status}`);
+  const bmp=await createImageBitmap(await r.blob());
+  const c=new OffscreenCanvas(spec.size,spec.size),ctx=c.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(bmp,0,0); if(bmp.close) bmp.close();
+  const item={data:ctx.getImageData(0,0,spec.size,spec.size).data,size:spec.size,part:spec.part,key:spec.key};
+  nightGlowCache.set(spec.key,item);
+  while(nightGlowCache.size>NIGHT_GLOW_CACHE_MAX) nightGlowCache.delete(nightGlowCache.keys().next().value);
+  return item;
 }
 
-function nightGlowPixelLonLat(px,py,size,part) {
-  const lon = part.west + (px + 0.5) / size * (part.east - part.west);
-  const lat = part.north - (py + 0.5) / size * (part.north - part.south);
-  return [lon,lat];
+function nightGlowPixelsToFeatures(item,maxPoints=NIGHT_GLOW_MAX_POINTS) {
+  const {data,size,part}=item;
+  const step=size>=1100?3:2;
+  const candidates=[];
+  for(let py=2;py<size-2;py+=step){
+    for(let px=2;px<size-2;px+=step){
+      const i=(py*size+px)*4;
+      const lum=(0.2126*data[i]+0.7152*data[i+1]+0.0722*data[i+2])/255;
+      const signal=Math.max(0,Math.min(1,(lum-0.055)/0.50));
+      if(signal<0.045) continue;
+      let peak=true;
+      for(let oy=-step*2;oy<=step*2&&peak;oy+=step) for(let ox=-step*2;ox<=step*2;ox+=step){
+        if(!ox&&!oy) continue; const sx=px+ox,sy=py+oy;
+        if(sx<0||sy<0||sx>=size||sy>=size) continue;
+        const ni=(sy*size+sx)*4;
+        const nl=(0.2126*data[ni]+0.7152*data[ni+1]+0.0722*data[ni+2])/255;
+        if(nl>lum*0.97){peak=false;break;}
+      }
+      if(!peak) continue;
+      const lon=part.west+(px+.5)/size*(part.east-part.west);
+      const lat=part.north-(py+.5)/size*(part.north-part.south);
+      candidates.push({lon,lat,intensity:Math.pow(signal,1.18)});
+    }
+  }
+  candidates.sort((a,b)=>b.intensity-a.intensity);
+  return candidates.slice(0,maxPoints).map((p,i)=>({type:'Feature',id:i,geometry:{type:'Point',coordinates:[p.lon,p.lat]},properties:{intensity:p.intensity}}));
+}
+
+function nightGlowSetData(features) {
+  if(!terrainMapInstance) return;
+  const data={type:'FeatureCollection',features};
+  const src=terrainMapInstance.getSource('nightGlow');
+  if(src) src.setData(data);
+  else terrainMapInstance.addSource('nightGlow',{type:'geojson',data,attribution:'Night lights: NASA VIIRS / GIBS',maxzoom:12,promoteId:'id'});
+  const basePaint={
+    'circle-color':['interpolate',['linear'],['get','intensity'],0.05,'#d58b4a',0.22,'#e4a45d',0.55,'#f3c27d',1,'#fff0c9'],
+    'circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.38,0.22,0.55,0.55,0.72,1,0.90],
+    'circle-radius':['interpolate',['linear'],['get','intensity'],0.05,0.65,0.22,0.85,0.55,1.15,1,1.65],
+    'circle-blur':0.08
+  };
+  const haloPaint={
+    'circle-color':'#f0b76c','circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.025,0.22,0.045,0.55,0.075,1,0.11],
+    'circle-radius':['interpolate',['linear'],['get','intensity'],0.05,2.2,0.22,3.0,0.55,4.2,1,5.5],'circle-blur':0.82
+  };
+  if(!terrainMapInstance.getLayer('nightGlowHalo')) terrainMapInstance.addLayer({id:'nightGlowHalo',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:haloPaint,layout:{visibility:'visible'}});
+  if(!terrainMapInstance.getLayer('nightGlow')) terrainMapInstance.addLayer({id:'nightGlow',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:basePaint,layout:{visibility:'visible'}});
+  nightGlowReady=true;
+}
+
+function nightGlowCachedFeatures(view) {
+  const west=view.west-2,east=view.east+2,south=view.south-2,north=view.north+2;
+  const out=[];
+  for(const item of nightGlowCache.values()){
+    if(item.part.east<west||item.part.west>east||item.part.north<south||item.part.south>north) continue;
+    out.push(...nightGlowPixelsToFeatures(item,5000));
+  }
+  // Deduplicate nearby cached points so overlapping coarse/refined fields do
+  // not make the same city appear brighter during progressive loading.
+  out.sort((a,b)=>b.properties.intensity-a.properties.intensity);
+  const seen=new Map(), kept=[];
+  for(const f of out){
+    const [lon,lat]=f.geometry.coordinates;
+    const k=`${Math.round(lon*80)},${Math.round(lat*80)}`;
+    if(seen.has(k)) continue; seen.set(k,1); kept.push(f);
+    if(kept.length>=NIGHT_GLOW_MAX_POINTS) break;
+  }
+  return kept;
 }
 
 async function buildNightGlowGeoJSON(force=false) {
-  if (!terrainMapInstance || !nightModeOn) return;
-  if (nightGlowLoading && !force) return;
-  const requestSerial = ++nightGlowRequestSerial;
-  nightGlowLoading = true;
-  try {
-    // One viewport-sized WMS request gives us the entire visible world region
-    // at whatever geographic scale the user is currently viewing. At a world
-    // view that means global lights; zoomed into a city it means only that city
-    // region. The WMS image is NEVER displayed — it is converted immediately
-    // into sparse point lights.
-    const size = nightGlowViewportSize();
-    const parts = nightGlowBoundsParts();
-    const results = await Promise.all(parts.map(part => fetchNightGlowWMS(part,size)));
-    if (requestSerial !== nightGlowRequestSerial || !nightModeOn) return;
+  if(!terrainMapInstance||!nightModeOn) return;
+  const serial=++nightGlowRequestSerial;
+  const view=nightGlowView();
+  // Cached points paint immediately; network work happens afterward.
+  const cached=nightGlowCachedFeatures(view);
+  if(cached.length) nightGlowSetData(cached);
+  const spec=nightGlowImageSpec(view);
+  if(nightGlowLoading&&!force) return;
+  nightGlowLoading=true;
+  try{
+    const item=await fetchNightGlowWMS(spec);
+    if(serial!==nightGlowRequestSerial||!nightModeOn) return;
+    const regional=nightGlowPixelsToFeatures(item);
+    const merged=nightGlowCachedFeatures(view);
+    // Replace the current field with the best current regional data plus any
+    // cached neighboring coverage, rather than waiting for every request.
+    nightGlowSetData(merged.length?merged:regional);
+    console.log('gallery: progressive VIIRS sparkle field ready',{key:spec.key,points:(merged.length||regional.length),zoom:terrainMapInstance.getZoom()});
+  }catch(err){console.warn('gallery: progressive VIIRS sparkle field FAILED',err);}
+  finally{if(serial===nightGlowRequestSerial) nightGlowLoading=false;}
+}
 
-    const candidates=[];
-    for (const tile of results) {
-      const {data,size,part}=tile;
-      const step = size >= 1200 ? 3 : 2;
-      for (let py=2; py<size-2; py+=step) {
-        for (let px=2; px<size-2; px+=step) {
-          const i=(py*size+px)*4;
-          const lum=(0.2126*data[i]+0.7152*data[i+1]+0.0722*data[i+2])/255;
-          const signal=Math.max(0,Math.min(1,(lum-0.055)/0.50));
-          if(signal<0.045) continue;
-          let peak=true;
-          for(let oy=-step*2;oy<=step*2 && peak;oy+=step){
-            for(let ox=-step*2;ox<=step*2;ox+=step){
-              if(!ox&&!oy) continue;
-              const sx=px+ox, sy=py+oy;
-              if(sx<0||sy<0||sx>=size||sy>=size) continue;
-              const ni=(sy*size+sx)*4;
-              const nl=(0.2126*data[ni]+0.7152*data[ni+1]+0.0722*data[ni+2])/255;
-              if(nl>lum*0.97){peak=false;break;}
-            }
-          }
-          if(!peak) continue;
-          const intensity=Math.pow(signal,1.18);
-          candidates.push({part,px,py,size,intensity});
-        }
-      }
-    }
-    candidates.sort((a,b)=>b.intensity-a.intensity);
-    const features=[];
-    const occupied=[];
-    const minDistance = Math.max(0.00018, Math.min(0.0009, 0.18 / Math.pow(2, Math.max(0, terrainMapInstance.getZoom()-3))));
-    for(const p of candidates){
-      if(features.length>=NIGHT_GLOW_MAX_POINTS) break;
-      const coord=nightGlowPixelLonLat(p.px,p.py,p.size,p.part);
-      let tooClose=false;
-      for(let j=Math.max(0,occupied.length-120);j<occupied.length;j++){
-        const q=occupied[j];
-        const dx=(coord[0]-q[0])*Math.cos(coord[1]*Math.PI/180);
-        const dy=coord[1]-q[1];
-        if(dx*dx+dy*dy < minDistance*minDistance){tooClose=true;break;}
-      }
-      if(tooClose) continue;
-      occupied.push(coord);
-      features.push({type:'Feature',geometry:{type:'Point',coordinates:coord},properties:{intensity:p.intensity}});
-    }
-    const data={type:'FeatureCollection',features};
-    const src=terrainMapInstance.getSource('nightGlow');
-    if(src) src.setData(data);
-    else terrainMapInstance.addSource('nightGlow',{type:'geojson',data,attribution:'Night lights: NASA VIIRS / GIBS'});
-
-    const basePaint={
-      'circle-color':['interpolate',['linear'],['get','intensity'],0.05,'#d58b4a',0.22,'#e4a45d',0.55,'#f3c27d',1,'#fff0c9'],
-      'circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.38,0.22,0.55,0.55,0.72,1,0.90],
-      'circle-radius':['interpolate',['linear'],['get','intensity'],0.05,0.65,0.22,0.85,0.55,1.15,1,1.65],
-      'circle-blur':0.08
-    };
-    const haloPaint={
-      'circle-color':'#f0b76c',
-      'circle-opacity':['interpolate',['linear'],['get','intensity'],0.05,0.025,0.22,0.045,0.55,0.075,1,0.11],
-      'circle-radius':['interpolate',['linear'],['get','intensity'],0.05,2.2,0.22,3.0,0.55,4.2,1,5.5],
-      'circle-blur':0.82
-    };
-    if(!terrainMapInstance.getLayer('nightGlowHalo')) terrainMapInstance.addLayer({id:'nightGlowHalo',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:haloPaint,layout:{visibility:'visible'}});
-    else for(const [k,v] of Object.entries(haloPaint)) terrainMapInstance.setPaintProperty('nightGlowHalo',k,v);
-    if(!terrainMapInstance.getLayer('nightGlow')) terrainMapInstance.addLayer({id:'nightGlow',type:'circle',source:'nightGlow',minzoom:0,maxzoom:22,paint:basePaint,layout:{visibility:'visible'}});
-    else for(const [k,v] of Object.entries(basePaint)) terrainMapInstance.setPaintProperty('nightGlow',k,v);
-    nightGlowReady=true;
-    console.log('gallery: VIIRS viewport sparkle field ready',{parts:parts.length,points:features.length,size,zoom:terrainMapInstance.getZoom()});
-  }catch(err){ console.error('gallery: VIIRS viewport sparkle field FAILED',err); }
-  finally{ nightGlowLoading=false; }
+function scheduleNightGlowUpdate(immediate=false){
+  if(!terrainMapInstance||!nightModeOn) return;
+  if(nightGlowMoveTimer) clearTimeout(nightGlowMoveTimer);
+  const run=()=>buildNightGlowGeoJSON(true);
+  if(immediate) run(); else nightGlowMoveTimer=setTimeout(run,140);
 }
 
 function installNightLightsProtocol() {
@@ -2834,7 +2844,9 @@ function initTerrainMap() {
     }
   });
   terrainMapInstance.on('zoom', autoExitCheck);
-  terrainMapInstance.on('moveend', () => { if (nightModeOn) buildNightGlowGeoJSON(true); });
+  terrainMapInstance.on('movestart', () => { if (nightModeOn) scheduleNightGlowUpdate(false); });
+  terrainMapInstance.on('move', () => { if (nightModeOn) scheduleNightGlowUpdate(false); });
+  terrainMapInstance.on('moveend', () => { if (nightModeOn) scheduleNightGlowUpdate(true); });
   // Diagnostic: MapLibre has its own internal ResizeObserver watching the
   // container and auto-resizing when it detects a change — the console
   // showed a "ResizeObserver loop completed with undelivered

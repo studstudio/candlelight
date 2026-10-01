@@ -1840,10 +1840,31 @@ function installAntarcticTerrainProtocol() {
 
 
 
+function getSafeMapLibreCanvasLimit() {
+  // MapLibre requires maxCanvasSize to stay at or below WebGL
+  // MAX_TEXTURE_SIZE. Query the actual device limit first instead of
+  // hard-coding 8192, which can be too large on some iPhones and can make
+  // the WebGL context fail during 3D initialization.
+  try {
+    const probe = document.createElement('canvas');
+    const gl = probe.getContext('webgl2') || probe.getContext('webgl');
+    const maxTextureSize = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096;
+    const limit = Math.max(2048, Math.min(16384, Number(maxTextureSize) || 4096));
+    probe.width = probe.height = 1;
+    return [limit, limit];
+  } catch (err) {
+    console.warn('gallery: WebGL MAX_TEXTURE_SIZE probe failed; using 4096', err);
+    return [4096, 4096];
+  }
+}
+
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
+    // Use the actual hardware MAX_TEXTURE_SIZE so MapLibre can retain the
+    // highest possible device pixel ratio without exceeding WebGL limits.
+    maxCanvasSize: getSafeMapLibreCanvasLimit(),
     renderWorldCopies: true,
     style: {
       version: 8,

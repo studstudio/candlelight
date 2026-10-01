@@ -1496,6 +1496,622 @@ function installEnvironmentalProtocols() {
     return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
   });
 }
+function installNightLightsProtocol() {
+  if (nightProtocolInstalled) return;
+  nightProtocolInstalled = true;
+
+  // Keep the original raster protocol as a quiet fallback/source. The actual
+  // night-mode rendering below uses a GPU additive luminance field so VIIRS
+  // contributes brightness instead of depositing colored pixels over terrain.
+  maplibregl.addProtocol('nightlights', async (params, abortController) => {
+    const [z, x, y] = params.url.replace('nightlights://', '').split('/').map(Number);
+    const safeZ = Math.min(z, 8);
+    const scale = Math.pow(2, z - safeZ);
+    const safeX = Math.floor(x / scale), safeY = Math.floor(y / scale);
+    const url = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/${safeZ}/${safeY}/${safeX}.png`;
+    const res = await fetch(url, { signal: abortController && abortController.signal });
+    if (!res.ok) throw new Error(`NASA VIIRS night-light tile ${res.status}`);
+    const bitmap = await createImageBitmap(await res.blob());
+    const size = bitmap.width;
+    const c = new OffscreenCanvas(size, size), ctx = c.getContext('2d', {willReadFrequently:true});
+    ctx.drawImage(bitmap,0,0); if(bitmap.close) bitmap.close();
+    const img=ctx.getImageData(0,0,size,size), d=img.data;
+    for(let i=0;i<d.length;i+=4){
+      const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
+      const s=Math.pow(Math.max(0,Math.min(1,(lum-.10)/.62)),2.15);
+      d[i]=255; d[i+1]=170; d[i+2]=82; d[i+3]=Math.round(255*s*.08);
+    }
+    ctx.putImageData(img,0,0);
+    return {data:await(await c.convertToBlob({type:'image/png'})).arrayBuffer()};
+  });
+
+  // ------------------------------------------------------------
+  // GPU NIGHT LUMINANCE FIELD
+  // One low-frequency global VIIRS mosaic is uploaded as a texture and
+  // accumulated additively by WebGL. This is intentionally not a raster
+  // paint layer: the shader adds warm radiance to the framebuffer, so dark
+  // terrain gets brighter where artificial light is present while existing
+  // relief/color underneath remains visible. The field is deliberately
+  // broad and smooth; VIIRS is a regional radiance product, not a street
+  // light dataset, so we do not turn individual pixels into dots.
+  // ------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // ENVIRONMENTAL TERRAIN MATERIAL — custom WebGL 3D drape
+  // -------------------------------------------------------------------------
+  // This is intentionally NOT a raster layer.  The environmental fields are
+  // uploaded as scalar textures and sampled by a custom fragment shader while
+  // the vertices are displaced from the same Mapterhorn DEM used by MapLibre's
+  // terrain.  The native MapLibre terrain remains underneath, preserving all
+  // camera/terrain mechanics; this layer contributes only material response.
+  let terrainMaterialLayer = null;
+  let terrainMaterialReady = false;
+  let terrainMaterialLoading = false;
+  let terrainMaterialProgram = null;
+  let terrainMaterialTiles = [];
+  let terrainMaterialTextures = null;
+  let terrainMaterialLandMask = null;
+  const MATERIAL_Z = 2; // 16 global tiles: deliberately broad environmental scale
+  const MATERIAL_SAMPLES = 32;
+  const MATERIAL_SIZE = 256;
+  const MATERIAL_EARTH_CIRC = 40075016.68557849;
+  const WORLDCOVER_WIDTH = 1536;
+  const WORLDCOVER_HEIGHT = 612; // EPSG:4326 bbox -180,-60,180,83
+  const WORLDCOVER_MIN_LAT = -60.0;
+  const WORLDCOVER_MAX_LAT = 83.0;
+
+  function materialDecodeDem(r,g,b){ return (r * 256 + g + b / 256) - 32768; }
+  function materialMercatorY(lat){
+    const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
+    const rad = clamped * Math.PI / 180;
+    return (180 - (180 / Math.PI * Math.log(Math.tan(Math.PI/4 + rad/2)))) / 360;
+  }
+  function materialLatFromY(y){
+    const q = Math.PI - 2 * Math.PI * y;
+    return 180 / Math.PI * Math.atan(Math.sinh(q));
+  }
+  function materialZFromElevation(m, lat){
+    const c = Math.max(0.087, Math.cos(lat * Math.PI / 180));
+    return m / (MATERIAL_EARTH_CIRC * c);
+  }
+
+  async function materialFetchBitmap(url, signal){
+    const r = await fetch(url, {signal});
+    if(!r.ok) throw new Error(`environment tile ${r.status}`);
+    return createImageBitmap(await r.blob());
+  }
+
+  async function materialBuildTexture(kind, time, signal){
+    const n = 1 << MATERIAL_Z;
+    const size = n * MATERIAL_SIZE;
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d', {willReadFrequently:true});
+    const jobs=[];
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
+      const isNight = kind === 'VIIRS_Night_Lights';
+      const url = isNight
+        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`
+        : `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kind}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
+      const b=await materialFetchBitmap(url,signal);
+      ctx.drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE);
+      if(b.close)b.close();
+    })());
+    await Promise.all(jobs);
+    const img=ctx.getImageData(0,0,size,size), d=img.data;
+    // Store a normalized scalar in R. The GIBS image is a visualization, so
+    // this is a deliberately smooth proxy rather than pretending RGB is the
+    // scientific variable itself.  It is then interpreted only as a weak
+    // material coefficient by the shader.
+    for(let i=0;i<d.length;i+=4){
+      const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
+      const scalar = isNight ? Math.pow(Math.max(0, Math.min(1, (lum-0.06)/0.72)), 1.55) : lum;
+      d[i]=Math.round(scalar*255); d[i+1]=d[i]; d[i+2]=d[i]; d[i+3]=255;
+    }
+    ctx.putImageData(img,0,0);
+    return createImageBitmap(await canvas.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildDemTiles(signal){
+    const n=1<<MATERIAL_Z;
+    const tiles=[];
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++){
+      const url=`https://tiles.mapterhorn.com/${MATERIAL_Z}/${x}/${y}.webp`;
+      const b=await materialFetchBitmap(url,signal);
+      const c=new OffscreenCanvas(MATERIAL_SIZE,MATERIAL_SIZE);
+      const ctx=c.getContext('2d',{willReadFrequently:true});
+      ctx.drawImage(b,0,0,MATERIAL_SIZE,MATERIAL_SIZE); if(b.close)b.close();
+      const data=ctx.getImageData(0,0,MATERIAL_SIZE,MATERIAL_SIZE).data;
+      const s=MATERIAL_SAMPLES;
+      const dem=new Float32Array(s*s);
+      for(let j=0;j<s;j++) for(let i=0;i<s;i++){
+        const px=Math.min(MATERIAL_SIZE-1,Math.floor((i/(s-1))*(MATERIAL_SIZE-1)));
+        const py=Math.min(MATERIAL_SIZE-1,Math.floor((j/(s-1))*(MATERIAL_SIZE-1)));
+        const k=(py*MATERIAL_SIZE+px)*4;
+        dem[j*s+i]=materialDecodeDem(data[k],data[k+1],data[k+2]);
+      }
+      tiles.push({x,y,dem});
+    }
+    return tiles;
+  }
+
+  async function materialBuildLandMask(signal){
+    // High-resolution global land mask used ONLY as a fragment discard mask.
+    // The old custom terrain drape decided land/water from 32-sample DEM
+    // vertices, which allowed shoreline triangles to survive as rectangular
+    // patches.  OSM_Land_Mask is a dedicated coastline mask, so use it to
+    // decide where the environmental material is allowed to exist.
+    const width=1536, height=768;
+    const url='https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?version=1.1.1&service=WMS&request=GetMap&format=image/png&layers=OSM_Land_Mask&styles=&srs=EPSG:4326&bbox=-180,-90,180,90&width='+width+'&height='+height+'&transparent=true';
+    const b=await materialFetchBitmap(url,signal);
+    const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
+    const img=ctx.getImageData(0,0,width,height),d=img.data;
+    for(let i=0;i<d.length;i+=4){
+      // GIBS OSM_Land_Mask uses black for land. Preserve a crisp but
+      // antialiased shoreline: black/near-black = land, everything else water.
+      const land=1.0-Math.min(1.0,(d[i]+d[i+1]+d[i+2])/96.0);
+      const a=Math.round(255*Math.max(0,Math.min(1,land)));
+      d[i]=255; d[i+1]=255; d[i+2]=255; d[i+3]=a;
+    }
+    ctx.putImageData(img,0,0);
+    return createImageBitmap(await c.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildWorldCoverTexture(signal){
+    // ESA WorldCover 2021 v200: global 10 m, 11-class land-cover product.
+    // We request one server-rendered geographic image and immediately reduce
+    // it to a categorical scalar texture. It is never displayed as its
+    // original bright classification palette.
+    const url='https://services.terrascope.be/wms/v2?service=WMS&version=1.1.1&request=GetMap&layers=WORLDCOVER_2021_MAP&styles=&format=image/png&transparent=true&srs=EPSG:4326&bbox=-180,-60,180,83&width='+WORLDCOVER_WIDTH+'&height='+WORLDCOVER_HEIGHT;
+    const b=await materialFetchBitmap(url,signal);
+    const c=new OffscreenCanvas(WORLDCOVER_WIDTH,WORLDCOVER_HEIGHT);
+    const ctx=c.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(b,0,0,WORLDCOVER_WIDTH,WORLDCOVER_HEIGHT); if(b.close)b.close();
+    const img=ctx.getImageData(0,0,WORLDCOVER_WIDTH,WORLDCOVER_HEIGHT), d=img.data;
+    // Standard WorldCover class colors. Encode the nearest class as 0..10 in R.
+    const palette=[
+      [0,100,0],       // 10 tree cover
+      [255,187,34],    // 20 shrubland
+      [255,255,76],    // 30 grassland
+      [240,150,255],   // 40 cropland
+      [250,0,0],       // 50 built-up
+      [180,180,180],   // 60 bare/sparse
+      [240,240,240],   // 70 snow/ice
+      [0,100,200],     // 80 permanent water
+      [0,150,160],     // 90 herbaceous wetland
+      [0,207,117],     // 95 mangroves
+      [250,230,160]    // 100 moss/lichen
+    ];
+    for(let i=0;i<d.length;i+=4){
+      if(d[i+3]<20){ d[i]=255; d[i+1]=0; d[i+2]=0; d[i+3]=0; continue; }
+      let best=0,bestDist=1e9;
+      for(let k=0;k<palette.length;k++){
+        const dr=d[i]-palette[k][0], dg=d[i+1]-palette[k][1], db=d[i+2]-palette[k][2];
+        const dist=dr*dr+dg*dg+db*db;
+        if(dist<bestDist){bestDist=dist;best=k;}
+      }
+      d[i]=Math.round(best/10*255); d[i+1]=0; d[i+2]=0; d[i+3]=255;
+    }
+    ctx.putImageData(img,0,0);
+    return createImageBitmap(await c.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildClimateTexture(time, signal){
+    // Pack several slow climate fields into RGBA so the shader does not need
+    // one WebGL texture unit per variable. Channels are normalized proxies
+    // derived from the official GIBS visualization ramps: R temperature,
+    // G evaporation, B root-zone soil water, A precipitable water vapour.
+    const kinds=[ENVIRONMENT_TEMPERATURE_LAYER,ENVIRONMENT_EVAPORATION_LAYER,ENVIRONMENT_SOIL_LAYER,ENVIRONMENT_VAPOR_LAYER];
+    const n=1<<MATERIAL_Z, size=n*MATERIAL_SIZE;
+    const canvases=kinds.map(()=>new OffscreenCanvas(size,size));
+    const ctxs=canvases.map(c=>c.getContext('2d',{willReadFrequently:true}));
+    const jobs=[];
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++) jobs.push((async()=>{
+      for(let k=0;k<kinds.length;k++){
+        const url=`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${kinds[k]}/default/${time}/GoogleMapsCompatible_Level${MATERIAL_Z}/${MATERIAL_Z}/${y}/${x}.png`;
+        const b=await materialFetchBitmap(url,signal); ctxs[k].drawImage(b,x*MATERIAL_SIZE,y*MATERIAL_SIZE,MATERIAL_SIZE,MATERIAL_SIZE); if(b.close)b.close();
+      }
+    })());
+    await Promise.all(jobs);
+    const out=new OffscreenCanvas(size,size), oc=out.getContext('2d',{willReadFrequently:true});
+    const imgs=ctxs.map(c=>c.getImageData(0,0,size,size));
+    const od=oc.createImageData(size,size), d=od.data;
+    for(let i=0;i<d.length;i+=4){
+      // The GIBS rendered ramps are intentionally reduced to broad normalized
+      // environmental coefficients; we do not present these as raw units.
+      for(let k=0;k<4;k++){
+        const a=imgs[k].data;
+        const lum=(0.2126*a[i]+0.7152*a[i+1]+0.0722*a[i+2])/255;
+        d[i+k]=Math.round(Math.max(0,Math.min(1,lum))*255);
+      }
+    }
+    oc.putImageData(od,0,0);
+    return createImageBitmap(await out.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildRiverInfluenceTexture(signal){
+    const width=ENVIRONMENT_FLOW_SIZE,height=width/2,out=new OffscreenCanvas(width,height),c=out.getContext('2d',{willReadFrequently:true});
+    c.lineCap='round';c.lineJoin='round';
+    const features=(rivers&&Array.isArray(rivers.features))?rivers.features:[];
+    const project=p=>{const lon=Number(p[0]),lat=Math.max(-85,Math.min(85,Number(p[1]))),x=((lon+180)/360)*width,ss=Math.sin(lat*Math.PI/180),y=(0.5-Math.log((1+ss)/(1-ss))/(4*Math.PI))*height;return[x,y];};
+    const draw=(a,w)=>{if(!a||a.length<2)return;c.beginPath();for(let i=0;i<a.length;i++){const q=project(a[i]);i?c.lineTo(q[0],q[1]):c.moveTo(q[0],q[1]);}c.lineWidth=.5+4*w;c.strokeStyle=`rgba(255,255,255,${.18+.55*w})`;c.stroke();};
+    const walk=(g,w)=>{if(!g)return;if(g.type==='LineString')draw(g.coordinates,w);else if(g.type==='MultiLineString')g.coordinates.forEach(a=>draw(a,w));else if(g.type==='GeometryCollection')g.geometries.forEach(x=>walk(x,w));};
+    for(const f of features){const p=f.properties||{},o=Number(p.ORDER||p.order||p.river_order||0),d=Number(p.DIS_AV_CMS||p.dis_av_cms||p.discharge||0),l=Number(p.LENGTH_KM||p.length_km||p.length||0),ow=o?Math.min(1,o/8):0,dw=d?Math.min(1,Math.log10(d+1)/3):0,lw=l?Math.min(1,Math.log10(l+1)/3):.25;walk(f.geometry,Math.max(.1,.42*ow+.38*dw+.2*lw));}
+    const blur=new OffscreenCanvas(width,height),bc=blur.getContext('2d');bc.filter='blur(10px)';bc.drawImage(out,0,0);c.globalAlpha=.48;c.drawImage(blur,0,0);c.globalAlpha=1;
+    const img=c.getImageData(0,0,width,height),d=img.data;for(let i=0;i<d.length;i+=4){const v=Math.max(d[i],d[i+1],d[i+2]);d[i]=v;d[i+1]=0;d[i+2]=0;d[i+3]=255;}c.putImageData(img,0,0);return createImageBitmap(await out.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildGeologyTexture(signal){
+    const width=ENVIRONMENT_GEOLOGY_SIZE,height=width/2,params=new URLSearchParams({bbox:'-180,-85.05112878,180,85.05112878',bboxSR:'4326',imageSR:'4326',size:`${width},${height}`,format:'png32',transparent:'false',f:'image'});
+    const b=await materialFetchBitmap(`${ENVIRONMENT_GEOLOGY_SERVICE}?${params.toString()}`,signal),c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(b,0,0,width,height);if(b.close)b.close();
+    const img=ctx.getImageData(0,0,width,height),d=img.data;for(let i=0;i<d.length;i+=4){const r=d[i]/255,g=d[i+1]/255,bv=d[i+2]/255,lum=.2126*r+.7152*g+.0722*bv;d[i]=(0.40+0.60*lum)*255;d[i+1]=(0.43+0.57*lum)*255;d[i+2]=(0.38+0.62*lum)*255;d[i+3]=255;}ctx.putImageData(img,0,0);return createImageBitmap(await c.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildEnvironmentalDetailTexture(cropBitmap,riverBitmap,geologyBitmap){
+    const width=2048,height=1024,out=new OffscreenCanvas(width,height),ctx=out.getContext('2d',{willReadFrequently:true});
+    const crop=new OffscreenCanvas(width,height),cc=crop.getContext('2d'); cc.drawImage(cropBitmap,0,0,width,height);
+    const river=new OffscreenCanvas(width,height),rc=river.getContext('2d'); rc.drawImage(riverBitmap,0,0,width,height);
+    const geo=new OffscreenCanvas(width,height),gc=geo.getContext('2d'); gc.drawImage(geologyBitmap,0,0,width,height);
+    const a=cc.getImageData(0,0,width,height).data,b=rc.getImageData(0,0,width,height).data,g=gc.getImageData(0,0,width,height).data;
+    const od=ctx.createImageData(width,height),d=od.data;
+    for(let i=0;i<d.length;i+=4){d[i]=a[i];d[i+1]=b[i];d[i+2]=g[i];d[i+3]=255;}
+    ctx.putImageData(od,0,0); return createImageBitmap(await out.convertToBlob({type:'image/png'}));
+  }
+
+  async function materialBuildWorldCerealTexture(signal){
+    // WorldCereal publishes 2021 10 m products as COGs/archives and exposes
+    // them through its visualization stack. This lightweight browser path
+    // uses the public EWOC GeoServer WMS for the global temporary-crop product.
+    // If that service is unavailable, agriculture cleanly falls back to the
+    // WorldCover cropland class instead of breaking the terrain material.
+    const width=2048, height=1024;
+    const params=new URLSearchParams({service:'WMS',version:'1.1.1',request:'GetMap',layers:WORLDCEREAL_CROP_LAYER,styles:'',format:'image/png',transparent:'true',srs:'EPSG:4326',bbox:'-180,-90,180,90',width:String(width),height:String(height)});
+    const b=await materialFetchBitmap(`${WORLDCEREAL_WMS}?${params.toString()}`,signal);
+    const c=new OffscreenCanvas(width,height),ctx=c.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(b,0,0,width,height); if(b.close)b.close();
+    const img=ctx.getImageData(0,0,width,height),d=img.data;
+    // Preserve luminance as a fractional crop-extent proxy. The server's
+    // rendered WMS palette is not treated as a numeric measurement; it is
+    // only a confidence/extent cue that strengthens or weakens the procedural
+    // morphology. Exact crop fractions can later come from direct COG values.
+    for(let i=0;i<d.length;i+=4){
+      const lum=(0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])/255;
+      d[i]=Math.round(lum*255); d[i+1]=0; d[i+2]=0; d[i+3]=255;
+    }
+    ctx.putImageData(img,0,0);
+    return createImageBitmap(await c.convertToBlob({type:'image/png'}));
+  }
+
+  async function loadTerrainMaterial(map){
+    if(terrainMaterialLoading || terrainMaterialReady) return;
+    terrainMaterialLoading=true;
+    try{
+      const controller=new AbortController();
+      const results = await Promise.all([
+        materialBuildTexture('MERRA2_Incident_Shortwave_Over_Land_Monthly', ENVIRONMENT_RADIATION_TIME, controller.signal),
+        materialBuildTexture('MERRA2_Precipitation_Bias_Corrected_Monthly', ENVIRONMENT_CLIMATE_TIME, controller.signal),
+        materialBuildWorldCoverTexture(controller.signal),
+        materialBuildTexture(ENVIRONMENT_CANOPY_LAYER, 'default', controller.signal),
+        materialBuildClimateTexture(ENVIRONMENT_CLIMATE_TIME, controller.signal),
+        materialBuildWorldCerealTexture(controller.signal).catch(e=>{ console.warn('gallery: WorldCereal WMS unavailable; falling back to WorldCover agriculture mask',e); return null; }),
+        materialBuildRiverInfluenceTexture(controller.signal),
+        materialBuildGeologyTexture(controller.signal).catch(e=>{ console.warn('gallery: GLiM geology image unavailable; using neutral geology base',e); return null; }),
+        materialBuildDemTiles(controller.signal),
+        materialBuildLandMask(controller.signal)
+      ]);
+      const [radiation, precipitation, worldCover, canopy, climate, worldCereal, riverInfluence, geology, demTiles, landMask] = results;
+      const detail=await materialBuildEnvironmentalDetailTexture(worldCereal || worldCover,riverInfluence,geology || worldCover);
+      terrainMaterialTextures={radiation,precipitation,worldCover,canopy,climate,detail,night:null};
+      terrainMaterialTiles=demTiles;
+      terrainMaterialLandMask=landMask;
+      terrainMaterialReady=true;
+      if(map) map.triggerRepaint();
+    }catch(e){ console.warn('gallery: custom terrain material failed',e); }
+    finally{ terrainMaterialLoading=false; }
+  }
+
+  let terrainMaterialNightLoading=false;
+  async function loadTerrainNightTexture(){
+    if(terrainMaterialTextures && terrainMaterialTextures.night) return;
+    if(terrainMaterialNightLoading) return;
+    terrainMaterialNightLoading=true;
+    try{
+      const controller=new AbortController();
+      terrainMaterialTextures.night=await materialBuildTexture('VIIRS_Night_Lights','default',controller.signal);
+      if(terrainMapInstance) terrainMapInstance.triggerRepaint();
+    }catch(e){ console.warn('gallery: custom night luminance texture failed',e); }
+    finally{ terrainMaterialNightLoading=false; }
+  }
+
+  function makeTerrainMaterialLayer(){
+    terrainMaterialLayer={
+      id:'environmental-terrain-material', type:'custom', renderingMode:'3d',
+      onAdd(map,gl){
+        const vs=`
+          attribute vec3 a_pos;
+          attribute vec2 a_uv;
+          attribute float a_env;
+          attribute float a_slope;
+          attribute float a_aspect;
+          uniform mat4 u_matrix;
+          varying vec2 v_uv;
+          varying float v_env;
+          varying float v_slope;
+          varying float v_aspect;
+          void main(){
+            v_uv=a_uv; v_env=a_env; v_slope=a_slope; v_aspect=a_aspect;
+            gl_Position=u_matrix*vec4(a_pos,1.0);
+          }`;
+        const fs=`
+          precision mediump float;
+          uniform sampler2D u_radiation;
+          uniform sampler2D u_precipitation;
+          uniform sampler2D u_nightLights;
+          uniform sampler2D u_landMask;
+          uniform sampler2D u_worldCover;
+          uniform sampler2D u_canopy;
+          uniform sampler2D u_climate;
+          uniform sampler2D u_detail;
+          uniform float u_radStrength;
+          uniform float u_materialZoom;
+          uniform float u_agricultureStrength;
+          uniform float u_wetStrength;
+          uniform float u_night;
+          varying vec2 v_uv;
+          varying float v_env;
+          varying float v_slope;
+          varying float v_aspect;
+          void main(){
+            float rad=texture2D(u_radiation,v_uv).r;
+            float wet=texture2D(u_precipitation,v_uv).r;
+            float artificial=texture2D(u_nightLights,v_uv).r;
+            vec4 climate=texture2D(u_climate,v_uv);
+            float temp=climate.r;
+            float evap=climate.g;
+            float soil=climate.b;
+            float vapor=climate.a;
+            // Derived climate indices: broad coefficients, not displayed maps.
+            float thermal=smoothstep(0.24,0.78,temp);
+            float humidity=smoothstep(0.18,0.72,vapor);
+            float waterBalance=clamp(0.52*wet+0.28*soil+0.20*humidity-0.24*evap,0.0,1.0);
+            float aridity=1.0-smoothstep(0.28,0.72,waterBalance);
+            float heatDry=thermal*aridity;
+            vec4 detail=texture2D(u_detail,v_uv);
+            float riverSignal=detail.g;
+            float riverProximity=smoothstep(0.015,0.32,riverSignal);
+            float riverLush=riverProximity*(0.46+0.54*smoothstep(0.20,0.76,waterBalance));
+            vec3 geology=vec3(detail.b);
+            float geologyTone=0.5*(geology.r+geology.g);
+            float bareRock=1.0-smoothstep(0.10,0.48,vegetation);
+            float steepRock=smoothstep(7.0,25.0,v_slope);
+            float rockSignal=clamp(smoothstep(0.48,0.76,geologyTone)*mix(0.58,1.0,bareRock)*mix(0.55,1.0,steepRock),0.0,1.0);
+            // Convert Mercator Y to geographic latitude for the EPSG:4326
+            // land-mask texture. Do not rely on the coarse DEM vertex flag:
+            // that was the source of the square shoreline artifacts.
+            float q=3.14159265-6.28318530*v_uv.y;
+            float lat=degrees(atan(sinh(q)));
+            float landV=(lat+90.0)/180.0;
+            float land=texture2D(u_landMask,vec2(v_uv.x,1.0-landV)).a;
+            if(land < 0.42) discard;
+            // WorldCover is geographic EPSG:4326, so convert the Mercator
+            // latitude/longitude into its own UV space. Outside the product
+            // extent (-60..83) we simply leave the land-cover contribution off.
+            float lon=(fract(v_uv.x)*360.0)-180.0;
+            float wcY=(83.0-lat)/(83.0-(-60.0));
+            float wcX=(lon+180.0)/360.0;
+            float wcValid=step(-60.0,lat)*step(lat,83.0);
+            float wcClass=texture2D(u_worldCover,vec2(clamp(wcX,0.0,1.0),clamp(wcY,0.0,1.0))).r*10.0;
+            // Class-specific material weights. These are intentionally modest:
+            // land cover should diversify the base material, not become a map.
+            float isTree=1.0-step(0.55,abs(wcClass-0.0));
+            float isShrub=1.0-step(0.55,abs(wcClass-1.0));
+            float isGrass=1.0-step(0.55,abs(wcClass-2.0));
+            float isCrop=1.0-step(0.55,abs(wcClass-3.0));
+            float isBuilt=1.0-step(0.55,abs(wcClass-4.0));
+            float isBare=1.0-step(0.55,abs(wcClass-5.0));
+            float isSnow=1.0-step(0.55,abs(wcClass-6.0));
+            float isWater=1.0-step(0.55,abs(wcClass-7.0));
+            float isWet=1.0-step(0.55,abs(wcClass-8.0));
+            float isMangrove=1.0-step(0.55,abs(wcClass-9.0));
+            float isMoss=1.0-step(0.55,abs(wcClass-10.0));
+            float vegetation=(isTree*0.95+isShrub*0.72+isGrass*0.56+isCrop*0.46+isWet*0.86+isMangrove*0.98+isMoss*0.78+isBare*0.08+isBuilt*0.02)*wcValid;
+            // GEDI L3 mean RH100 canopy-height layer. GIBS renders the official
+            // canopy-height product as a continuous color ramp; its sampled
+            // luminance is used only as a normalized height proxy, and only woody
+            // land-cover classes are allowed to respond to it.
+            float canopyRaw=texture2D(u_canopy,v_uv).r;
+            float canopy=smoothstep(0.06,0.78,canopyRaw);
+            canopy*=smoothstep(0.02,0.22,vegetation);
+            float canopyTall=smoothstep(0.28,0.82,canopy);
+            vec3 coverTone=vec3(0.55,0.64,0.46);
+            coverTone=mix(coverTone,vec3(0.20,0.38,0.25),isTree*wcValid);
+            coverTone=mix(coverTone,vec3(0.42,0.50,0.29),isShrub*wcValid);
+            coverTone=mix(coverTone,vec3(0.56,0.63,0.34),isGrass*wcValid);
+            coverTone=mix(coverTone,vec3(0.64,0.60,0.34),isCrop*wcValid);
+            coverTone=mix(coverTone,vec3(0.50,0.48,0.43),isBuilt*wcValid);
+            coverTone=mix(coverTone,vec3(0.60,0.55,0.45),isBare*wcValid);
+            coverTone=mix(coverTone,vec3(0.50,0.67,0.52),isWet*wcValid);
+            coverTone=mix(coverTone,vec3(0.30,0.58,0.40),isMangrove*wcValid);
+            coverTone=mix(coverTone,vec3(0.60,0.66,0.48),isMoss*wcValid);
+            // Canopy height modulates forest material instead of painting a forest
+            // overlay: taller canopy is deeper/richer and receives a little more
+            // material contrast; short/sparse vegetation stays closer to the base.
+            float canopyWeight=canopy*wcValid*(isTree+0.55*isMangrove);
+            coverTone=mix(coverTone,vec3(0.16,0.30,0.19),canopyWeight*0.58);
+            float riverVegetation=riverLush*wcValid*(0.28+0.72*vegetation);
+            coverTone=mix(coverTone,vec3(0.14,0.40,0.24),riverVegetation*0.42);
+            // ------------------------------------------------------------
+            // PROCEDURAL AGRICULTURE BASE
+            // ------------------------------------------------------------
+            // This is deliberately a morphology layer, not a crop heatmap.
+            // WorldCover tells us where cropland exists; slope, precipitation,
+            // latitude and (when available) irrigation/crop identity will decide
+            // how the material behaves. At this stage we only generate plausible
+            // field structure inside confirmed cropland, and keep it restrained
+            // until the higher-resolution WorldCereal products are connected.
+            float wcAg=texture2D(u_detail,v_uv).r;
+            float cropMask=wcValid*mix(isCrop,smoothstep(0.08,0.42,wcAg),0.78);
+            // WorldCereal is a real crop-extent signal, while WorldCover is the
+            // broad land-cover gate. The blend keeps the shader robust if a
+            // region has no current WorldCereal coverage.
+            float cropPresence=clamp(max(isCrop*0.35,wcAg),0.0,1.0);
+            float slopeDeg=v_slope;
+            float flatField=cropMask*(1.0-smoothstep(2.0,12.0,slopeDeg));
+            // A warm/humid, sloping candidate zone is useful for terraced-field
+            // morphology. This is NOT a claim that every such pixel is rice;
+            // actual crop identity will later come from WorldCereal crop-type data.
+            float humid=clamp(0.58*humidity+0.42*waterBalance,0.0,1.0);
+            float subtropical=smoothstep(2.0,8.0,abs(lat))* (1.0-smoothstep(34.0,42.0,abs(lat)));
+            float terraceCandidate=cropMask*smoothstep(4.0,16.0,slopeDeg)*humid*subtropical*(0.65+0.35*smoothstep(0.35,0.78,temp));
+
+            // Geographic metres-per-UV lets the same shader describe real field
+            // dimensions instead of arbitrary screen-space squares.
+            float latRad=lat*0.01745329252;
+            float worldX=max(1000.0,40075016.6856*cos(latRad));
+            float worldY=40075016.6856;
+            vec2 meters=v_uv*vec2(worldX,worldY);
+            // Low-frequency orientation field prevents the entire planet from
+            // sharing one artificial grid while remaining coherent over regions.
+            float regionHash=sin(dot(floor(meters/120000.0),vec2(127.1,311.7)))*43758.5453;
+            regionHash=fract(regionHash);
+            float orientation=(regionHash-0.5)*0.90 + v_aspect*0.35;
+            float co=cos(orientation), si=sin(orientation);
+            vec2 q=meters*mat2(co,-si,si,co);
+
+            // Large, long rectangles: a restrained Midwest/Great Plains-style
+            // field cadence. It only becomes visible as the map gets closer.
+            float flatScale=smoothstep(3.8,6.5,u_materialZoom);
+            vec2 flatCell=q/vec2(900.0,2600.0);
+            vec2 flatFrac=abs(fract(flatCell)-0.5);
+            float flatEdges=1.0-smoothstep(0.015,0.075,max(flatFrac.x,flatFrac.y));
+            float flatRows=0.5+0.5*sin(q.y*0.0041);
+            float flatTexture=mix(0.72+0.28*flatRows,1.0-flatEdges*0.52,0.55);
+
+            // Contour-following bands for steep cultivated terrain. Instead of
+            // perfect horizontal stripes, aspect and a low-frequency warp make
+            // the bands bend with terrain orientation.
+            vec2 tq=q/vec2(180.0,180.0);
+            float warp=0.22*sin(q.x*0.0017)+0.17*sin(q.y*0.0023);
+            float contour=0.5+0.5*sin((q.x*0.010 + q.y*0.004)*0.55 + warp + v_aspect*2.2);
+            contour=smoothstep(0.28,0.72,contour);
+            float terraceEdges=1.0-smoothstep(0.08,0.24,abs(contour-0.5));
+            float terraceTexture=mix(0.78,1.0-terraceEdges*0.34,0.72);
+            float agriPattern=mix(1.0,flatTexture,flatField*flatScale);
+            agriPattern=mix(agriPattern,terraceTexture,terraceCandidate*flatScale);
+
+            // Keep the first pass intimate: field structure changes local
+            // reflectance/tone rather than drawing bright outlines.
+            float agriWeight=u_agricultureStrength*(flatField*0.55+terraceCandidate*0.75)*flatScale;
+            // Water/snow classes are handled by the existing water/snow systems.
+            float coverStrength=(0.08+0.20*vegetation)*wcValid;
+            coverTone*=mix(1.0,0.92+0.16*agriPattern,agriWeight);
+            coverStrength += agriWeight*0.035;
+            // Broad, nonlinear response: this is material modulation, not a
+            // displayed heatmap.  The shader intentionally avoids saturated
+            // colors so native relief remains the visual structure.
+            float dry=1.0-smoothstep(.25,.78,wet);
+            float warm=smoothstep(.22,.78,rad);
+            vec3 dryTone=vec3(0.95,0.67,0.34);
+            vec3 wetTone=vec3(0.27,0.56,0.43);
+            vec3 tone=mix(vec3(0.61,0.62,0.55),mix(wetTone,dryTone,dry),0.58);
+            tone=mix(tone,coverTone,coverStrength);
+            // Climate base: warm/dry regions lean mineral/golden; humid/wet
+            // regions retain cooler living tones. Soil moisture prevents
+            // rainfall alone from making every rainy region look saturated.
+            tone=mix(tone,vec3(0.64,0.48,0.28),heatDry*0.10);
+            tone=mix(tone,vec3(0.32,0.55,0.43),waterBalance*0.08);
+            vec3 greyRock=vec3(0.47,0.46,0.43);
+            float redRock=rockSignal*heatDry*smoothstep(0.30,0.78,thermal)*(1.0-smoothstep(0.18,0.62,vegetation));
+            tone=mix(tone,greyRock,rockSignal*0.34);
+            tone=mix(tone,vec3(0.62,0.30,0.14),redRock*0.28);
+            float amount=(0.07 + 0.10*abs(warm-.5)*2.0)*u_radStrength;
+            amount += (0.06 + 0.09*abs(dry-.5)*2.0)*u_wetStrength;
+            // Night keeps the climate material but suppresses the daytime
+            // chroma so the separate warm artificial-light field remains clear.
+            if(u_night>0.5){ tone=mix(vec3(0.48,0.58,0.60),tone,0.42); amount*=0.72; }
+            // Artificial light is a material emission contribution, not a
+            // colored raster painted above the terrain. It only exists in
+            // night mode and remains warmer than the cool moonlight.
+            // VIIRS is deliberately pushed hard here: preserve the real
+            // spatial distribution, but bring up the low/mid radiance so
+            // populated regions read clearly on a phone-sized screen.
+            float lightLift=pow(max(artificial,0.0),0.30);
+            float lightPresence=smoothstep(0.0008,0.085,lightLift);
+            float emit=u_night*lightPresence*4.80;
+            vec3 orangeLight=vec3(1.0,0.24,0.018);
+            vec3 pinkLight=vec3(1.0,0.035,0.30);
+            float pinkBias=smoothstep(0.10,0.62,lightLift);
+            vec3 artificialColor=mix(orangeLight,pinkLight,pinkBias);
+            tone=mix(tone,artificialColor,min(0.92,emit*0.30));
+            amount += emit*2.10;
+            gl_FragColor=vec4(tone,amount);
+          }`;
+        const compile=(type,src)=>{const sh=gl.createShader(type);gl.shaderSource(sh,src);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
+        const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,vs)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); terrainMaterialProgram=p;
+        terrainMaterialLayer._gl=gl;
+      },
+      render(gl,args){
+        if(!terrainMaterialReady || !terrainMaterialProgram || !terrainMaterialTextures) return;
+        if(nightModeOn && !terrainMaterialTextures.night) { if(window.__loadTerrainNightTexture) window.__loadTerrainNightTexture(); return; }
+        const matrix=args.defaultProjectionData ? args.defaultProjectionData.mainMatrix : args.modelViewProjectionMatrix;
+        const n=1<<MATERIAL_Z, s=MATERIAL_SAMPLES;
+        gl.useProgram(terrainMaterialProgram);
+        const radTex=terrainMaterialTextures.radiation, wetTex=terrainMaterialTextures.precipitation;
+        if(!terrainMaterialLayer._rad){ terrainMaterialLayer._rad=gl.createTexture(); terrainMaterialLayer._wet=gl.createTexture(); terrainMaterialLayer._worldCover=gl.createTexture(); terrainMaterialLayer._canopy=gl.createTexture(); terrainMaterialLayer._climate=gl.createTexture(); terrainMaterialLayer._detail=gl.createTexture(); terrainMaterialLayer._night=gl.createTexture(); terrainMaterialLayer._land=gl.createTexture();
+          for(const [tex,bm] of [[terrainMaterialLayer._rad,radTex],[terrainMaterialLayer._wet,wetTex],[terrainMaterialLayer._worldCover,terrainMaterialTextures.worldCover],[terrainMaterialLayer._canopy,terrainMaterialTextures.canopy],[terrainMaterialLayer._climate,terrainMaterialTextures.climate],[terrainMaterialLayer._detail,terrainMaterialTextures.detail],[terrainMaterialLayer._night,terrainMaterialTextures.night],[terrainMaterialLayer._land,terrainMaterialLandMask]]){ gl.bindTexture(gl.TEXTURE_2D,tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bm); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); }
+        }
+        const aPos=gl.getAttribLocation(terrainMaterialProgram,'a_pos'), aUv=gl.getAttribLocation(terrainMaterialProgram,'a_uv'), aEnv=gl.getAttribLocation(terrainMaterialProgram,'a_env'), aSlope=gl.getAttribLocation(terrainMaterialProgram,'a_slope'), aAspect=gl.getAttribLocation(terrainMaterialProgram,'a_aspect');
+        const uMat=gl.getUniformLocation(terrainMaterialProgram,'u_matrix'), uRad=gl.getUniformLocation(terrainMaterialProgram,'u_radiation'), uWet=gl.getUniformLocation(terrainMaterialProgram,'u_precipitation'), uWorldCover=gl.getUniformLocation(terrainMaterialProgram,'u_worldCover'), uCanopy=gl.getUniformLocation(terrainMaterialProgram,'u_canopy'), uClimate=gl.getUniformLocation(terrainMaterialProgram,'u_climate'), uDetail=gl.getUniformLocation(terrainMaterialProgram,'u_detail'), uNight=gl.getUniformLocation(terrainMaterialProgram,'u_nightLights'), uLand=gl.getUniformLocation(terrainMaterialProgram,'u_landMask');
+        gl.uniformMatrix4fv(uMat,false,matrix); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_radStrength'),1.30); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_wetStrength'),1.35); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_night'),nightModeOn?1:0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_materialZoom'),terrainMapInstance?terrainMapInstance.getZoom():0); gl.uniform1f(gl.getUniformLocation(terrainMaterialProgram,'u_agricultureStrength'),0.85);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._rad); gl.uniform1i(uRad,0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._wet); gl.uniform1i(uWet,1); gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._worldCover); gl.uniform1i(uWorldCover,2); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._canopy); gl.uniform1i(uCanopy,3); gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._climate); gl.uniform1i(uClimate,4); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._detail); gl.uniform1i(uDetail,5); gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._night); gl.uniform1i(uNight,6); gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D,terrainMaterialLayer._land); gl.uniform1i(uLand,7);
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
+        // Cache the static custom-layer mesh on each DEM tile. Rebuilding and deleting
+        // WebGL buffers every frame creates needless driver/GC pressure on iPhone.
+        if(!terrainMaterialLayer._glBuffers || terrainMaterialLayer._glBuffers.gl!==gl){
+          terrainMaterialLayer._glBuffers={gl,tiles:new WeakMap()};
+        }
+        const bufferCache=terrainMaterialLayer._glBuffers.tiles;
+        for(const t of terrainMaterialTiles){
+          let cached=bufferCache.get(t);
+          if(!cached){
+            const verts=new Float32Array(s*s*8), inds=new Uint16Array((s-1)*(s-1)*6); let vi=0;
+            for(let j=0;j<s;j++) for(let i=0;i<s;i++){
+              const gx=t.x+(i/(s-1)), gy=t.y+(j/(s-1)); const wx=gx/n, wy=gy/n; const lat=materialLatFromY(wy); const z=materialZFromElevation(t.dem[j*s+i],lat);
+              const im=Math.max(0,i-1), ip=Math.min(s-1,i+1), jm=Math.max(0,j-1), jp=Math.min(s-1,j+1);
+              const dzdx=t.dem[j*s+ip]-t.dem[j*s+im], dzdy=t.dem[jp*s+i]-t.dem[jm*s+i];
+              const dLon=(2/n/(s-1))*360.0, dLat=(2/n/(s-1))*180.0;
+              const metersLon=Math.max(1.0,dLon*111320.0*Math.cos(lat*0.01745329252));
+              const metersLat=Math.max(1.0,dLat*111320.0);
+              const sx=dzdx/metersLon, sy=dzdy/metersLat;
+              const slopeDeg=Math.atan(Math.sqrt(sx*sx+sy*sy))*57.2957795;
+              const aspect=Math.atan2(-sx,sy);
+              verts[vi++]=wx; verts[vi++]=wy; verts[vi++]=z; verts[vi++]=wx; verts[vi++]=(1.0-wy); verts[vi++]=(t.dem[j*s+i] > 0.0 ? 1.0 : 0.0); verts[vi++]=slopeDeg; verts[vi++]=aspect;
+            }
+            let ii=0; for(let j=0;j<s-1;j++) for(let i=0;i<s-1;i++){ const a=j*s+i,b=a+1,c=a+s,d=c+1; inds[ii++]=a;inds[ii++]=c;inds[ii++]=b;inds[ii++]=b;inds[ii++]=c;inds[ii++]=d; }
+            const vb=gl.createBuffer(), ib=gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,inds,gl.STATIC_DRAW);
+            cached={vb,ib,count:inds.length}; bufferCache.set(t,cached);
+          }
+          gl.bindBuffer(gl.ARRAY_BUFFER,cached.vb); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,32,0); gl.enableVertexAttribArray(aUv); gl.vertexAttribPointer(aUv,2,gl.FLOAT,false,32,12); gl.enableVertexAttribArray(aEnv); gl.vertexAttribPointer(aEnv,1,gl.FLOAT,false,32,20); gl.enableVertexAttribArray(aSlope); gl.vertexAttribPointer(aSlope,1,gl.FLOAT,false,32,24); gl.enableVertexAttribArray(aAspect); gl.vertexAttribPointer(aAspect,1,gl.FLOAT,false,32,28); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,cached.ib); gl.drawElements(gl.TRIANGLES,cached.count,gl.UNSIGNED_SHORT,0);
+          gl.disableVertexAttribArray(aPos); gl.disableVertexAttribArray(aUv); gl.disableVertexAttribArray(aEnv); if(aSlope>=0) gl.disableVertexAttribArray(aSlope); if(aAspect>=0) gl.disableVertexAttribArray(aAspect);
+        }
+        gl.depthMask(true); gl.disable(gl.BLEND);
+      },
+      onRemove(map,gl){ if(terrainMaterialLayer._rad)gl.deleteTexture(terrainMaterialLayer._rad); if(terrainMaterialLayer._wet)gl.deleteTexture(terrainMaterialLayer._wet); if(terrainMaterialLayer._worldCover)gl.deleteTexture(terrainMaterialLayer._worldCover); if(terrainMaterialLayer._canopy)gl.deleteTexture(terrainMaterialLayer._canopy); if(terrainMaterialLayer._climate)gl.deleteTexture(terrainMaterialLayer._climate); if(terrainMaterialLayer._detail)gl.deleteTexture(terrainMaterialLayer._detail); if(terrainMaterialLayer._night)gl.deleteTexture(terrainMaterialLayer._night); if(terrainMaterialLayer._land)gl.deleteTexture(terrainMaterialLayer._land); if(terrainMaterialProgram)gl.deleteProgram(terrainMaterialProgram); terrainMaterialLayer._rad=null;terrainMaterialLayer._wet=null;terrainMaterialLayer._worldCover=null;terrainMaterialLayer._canopy=null;terrainMaterialLayer._climate=null;terrainMaterialLayer._detail=null;terrainMaterialLayer._night=null;terrainMaterialLayer._land=null;
+          if(terrainMaterialLayer._glBuffers && terrainMaterialLayer._glBuffers.gl===gl){
+            terrainMaterialLayer._glBuffers.tiles && terrainMaterialTiles.forEach(t=>{ const b=terrainMaterialLayer._glBuffers.tiles.get(t); if(b){gl.deleteBuffer(b.vb);gl.deleteBuffer(b.ib);} });
+          }
+          terrainMaterialLayer._glBuffers=null; terrainMaterialProgram=null;terrainMaterialReady=false; }
+    };
+    return terrainMaterialLayer;
+  }
+
+  terrainMaterialLayer=makeTerrainMaterialLayer();
+  window.__terrainMaterialLayer=terrainMaterialLayer;
+  window.__loadTerrainMaterial=()=>loadTerrainMaterial(terrainMapInstance);
+  window.__loadTerrainNightTexture=()=>loadTerrainNightTexture();
+}
+
 // Agriculture roadmap / base morphology:
 // - flat mechanized fields: large orthogonal/anisotropic parcels, mostly on
 //   low slopes; orientation will eventually come from observed field edges.
@@ -1561,10 +2177,10 @@ function applyBuildingPalette() {
     opacity = 0.72;
   } else if (night) {
     color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
-      0, '#9fdcff',
-      50, '#a9e0ff',
-      160, '#b4e5ff',
-      350, '#c1eaff'
+      0, '#6f3f32',
+      50, '#824a38',
+      160, '#a66048',
+      350, '#c98465'
     ];
     opacity = 0.98;
   } else {
@@ -1594,8 +2210,10 @@ function setNightPalette(on) {
     terrainMapInstance.setLight(c.light);
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility','none');
     const material=window.__terrainMaterialLayer;
+    if(on && window.__loadTerrainNightTexture) window.__loadTerrainNightTexture();
     if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
     if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
+    if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setPaintProperty('night-lights','raster-opacity',0);
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
     applyBuildingPalette();
   } catch(err) {
@@ -1840,31 +2458,10 @@ function installAntarcticTerrainProtocol() {
 
 
 
-function getSafeMapLibreCanvasLimit() {
-  // MapLibre requires maxCanvasSize to stay at or below WebGL
-  // MAX_TEXTURE_SIZE. Query the actual device limit first instead of
-  // hard-coding 8192, which can be too large on some iPhones and can make
-  // the WebGL context fail during 3D initialization.
-  try {
-    const probe = document.createElement('canvas');
-    const gl = probe.getContext('webgl2') || probe.getContext('webgl');
-    const maxTextureSize = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096;
-    const limit = Math.max(2048, Math.min(16384, Number(maxTextureSize) || 4096));
-    probe.width = probe.height = 1;
-    return [limit, limit];
-  } catch (err) {
-    console.warn('gallery: WebGL MAX_TEXTURE_SIZE probe failed; using 4096', err);
-    return [4096, 4096];
-  }
-}
-
 function initTerrainMap() {
   if (terrainMapInstance) return terrainMapInstance;
   terrainMapInstance = new maplibregl.Map({
     container: 'terrainMap',
-    // Use the actual hardware MAX_TEXTURE_SIZE so MapLibre can retain the
-    // highest possible device pixel ratio without exceeding WebGL limits.
-    maxCanvasSize: getSafeMapLibreCanvasLimit(),
     renderWorldCopies: true,
     style: {
       version: 8,
@@ -1956,7 +2553,7 @@ function initTerrainMap() {
           type: 'fill-extrusion',
           source: 'maptilerBuildings',
           'source-layer': 'building',
-          minzoom: 12,
+          minzoom: 14,
           // Do NOT require the optional `extrude` flag here. MapTiler's
           // OpenMapTiles building data exposes the rendered building geometry
           // through render_height/render_min_height, and the official MapTiler
@@ -1973,8 +2570,8 @@ function initTerrainMap() {
             // large collection of polygons on at one zoom boundary.
             'fill-extrusion-height': [
               'interpolate', ['linear'], ['zoom'],
-              12, 0,
-              13, ['coalesce', ['get', 'render_height'], ['get', 'height'], 0]
+              14, 0,
+              15, ['coalesce', ['get', 'render_height'], ['get', 'height'], 0]
             ],
             'fill-extrusion-base': [
               'coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0

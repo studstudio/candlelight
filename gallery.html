@@ -1044,9 +1044,6 @@ function applyLayerToggles() {
       // over the Classic beige/charcoal terrain as well.
       terrainMapInstance.setLayoutProperty('maptiler-3d-buildings', 'visibility', buildingsOn ? 'visible' : 'none');
     }
-    if (terrainMapInstance.getLayer('night-building-lights')) {
-      terrainMapInstance.setLayoutProperty('night-building-lights', 'visibility', (buildingsOn && nightModeOn) ? 'visible' : 'none');
-    }
     if (terrainMapInstance.getLayer('color-relief')) {
       terrainMapInstance.setLayoutProperty('color-relief', 'visibility', maptilerSatelliteOn ? 'none' : 'visible');
     }
@@ -1499,46 +1496,6 @@ function installEnvironmentalProtocols() {
     return { data: await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer() };
   });
 }
-// Night illumination is derived directly from the same real building vector data used by the 3D city layer.
-// At z12-15 the MapTiler/OpenMapTiles building source provides generalized building geometry first,
-// then progressively more detailed footprints. We use that geometry as a luminous urban-density field
-// at night and hand it back to the normal building material as the camera gets close.
-function ensureNightBuildingLightLayer(){
-  if(!terrainMapInstance || !terrainMapInstance.isStyleLoaded()) return;
-  if(!terrainMapInstance.getLayer('night-building-lights')){
-    const before = terrainMapInstance.getLayer('maptiler-3d-buildings') ? 'maptiler-3d-buildings' : undefined;
-    const layer={
-      id:'night-building-lights',
-      type:'fill-extrusion',
-      source:'maptilerBuildings',
-      'source-layer':'building',
-      minzoom:12,
-      maxzoom:15,
-      filter:['!=',['get','hide_3d'],true],
-      layout:{visibility:nightModeOn?'visible':'none'},
-      paint:{
-        'fill-extrusion-color':['interpolate',['linear'],['zoom'],
-          12,'#fff4bd',13,'#ffe8a0',14,'#e8b96a',15,'#b56d4d'],
-        'fill-extrusion-height':['interpolate',['linear'],['zoom'],
-          12,2.5,13,5.5,14,9,15,12],
-        'fill-extrusion-base':0,
-        'fill-extrusion-opacity':['interpolate',['linear'],['zoom'],
-          12,0.90,12.8,0.84,13.6,0.68,14.35,0.38,15,0],
-        'fill-extrusion-vertical-gradient':false
-      }
-    };
-    if(before) terrainMapInstance.addLayer(layer,before); else terrainMapInstance.addLayer(layer);
-  }
-}
-
-function setNightBuildingLightVisibility(on){
-  if(!terrainMapInstance) return;
-  ensureNightBuildingLightLayer();
-  if(terrainMapInstance.getLayer('night-building-lights')){
-    terrainMapInstance.setLayoutProperty('night-building-lights','visibility',on?'visible':'none');
-  }
-}
-
 // Agriculture roadmap / base morphology:
 // - flat mechanized fields: large orthogonal/anisotropic parcels, mostly on
 //   low slopes; orientation will eventually come from observed field edges.
@@ -1604,10 +1561,10 @@ function applyBuildingPalette() {
     opacity = 0.72;
   } else if (night) {
     color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
-      0, '#6f3f32',
-      50, '#824a38',
-      160, '#a66048',
-      350, '#c98465'
+      0, '#9fdcff',
+      50, '#a9e0ff',
+      160, '#b4e5ff',
+      350, '#c1eaff'
     ];
     opacity = 0.98;
   } else {
@@ -1636,10 +1593,7 @@ function setNightPalette(on) {
     terrainMapInstance.setSky(c.sky);
     terrainMapInstance.setLight(c.light);
     if(terrainMapInstance.getLayer('night-lights')) terrainMapInstance.setLayoutProperty('night-lights','visibility','none');
-    setNightBuildingLightVisibility(on && buildingsOn);
     const material=window.__terrainMaterialLayer;
-    // Keep the old experimental material texture dormant; night illumination
-    // now comes directly from the building vector field.
     if(terrainMapInstance.getLayer('terrain-radiation')) terrainMapInstance.setLayoutProperty('terrain-radiation','visibility','none');
     if(terrainMapInstance.getLayer('terrain-climate')) terrainMapInstance.setLayoutProperty('terrain-climate','visibility','none');
     if(terrainMapInstance.getLayer('snow-terrain')) terrainMapInstance.setPaintProperty('snow-terrain','raster-opacity',on?0.92:1.0);
@@ -1981,7 +1935,7 @@ function initTerrainMap() {
           type: 'fill-extrusion',
           source: 'maptilerBuildings',
           'source-layer': 'building',
-          minzoom: 14,
+          minzoom: 12,
           // Do NOT require the optional `extrude` flag here. MapTiler's
           // OpenMapTiles building data exposes the rendered building geometry
           // through render_height/render_min_height, and the official MapTiler
@@ -1998,8 +1952,8 @@ function initTerrainMap() {
             // large collection of polygons on at one zoom boundary.
             'fill-extrusion-height': [
               'interpolate', ['linear'], ['zoom'],
-              14, 0,
-              15, ['coalesce', ['get', 'render_height'], ['get', 'height'], 0]
+              12, 0,
+              13, ['coalesce', ['get', 'render_height'], ['get', 'height'], 0]
             ],
             'fill-extrusion-base': [
               'coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0
@@ -2099,8 +2053,6 @@ function initTerrainMap() {
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
     applyLayerToggles();
-    // Build the night-density building layer only after the MapLibre style is ready.
-    if (nightModeOn) setNightBuildingLightVisibility(buildingsOn);
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {
         if (terrainMapInstance.getLayer(id)) terrainMapInstance.removeLayer(id);

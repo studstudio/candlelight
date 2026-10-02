@@ -3,10 +3,13 @@ name: Build firmware
 on:
   push:
     paths:
-      - "src/**"
-      - "platformio.ini"
-      - ".github/workflows/build.yml"
+      - "firmware/fw/**"
+      - ".github/workflows/build-firmware.yml"
   workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: firmware/fw
 
 jobs:
   build:
@@ -19,16 +22,14 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
-          key: pio-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ hashFiles('firmware/fw/platformio.ini') }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install platformio
+      - run: pip install platformio esptool
 
-      # CI has no secrets.h (it's gitignored), so use the example values.
-      # Put real credentials in your local copy only.
       - name: Create placeholder secrets
         run: cp src/secrets.example.h src/secrets.h
 
@@ -48,4 +49,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: merged.bin
+          path: firmware/fw/merged.bin

@@ -5,6 +5,7 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include "secrets.h"
+#include "epd_png.h"
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
 const char* LAMP_ID = "test-lamp-1";  // must match the lampId the sender page uploads to
@@ -14,7 +15,8 @@ const char* MANIFEST_PATH = "/manifest.json";
 const char* TMP_PATH = "/tmp.png";
 
 // manifest.json is an array, oldest first, one entry per stored image:
-//   { "id": itemId, "sentAt": ms epoch, "geo": { city, region, country, lat, lon, ... } }
+//   { "id": itemId, "sentAt": ms epoch, "geo": { city, region, country, lat, lon, ... },
+//     "frames": 1 for a still, "intervalMs": per-frame delay for animations }
 // the PNG itself lives at "/" + itemId
 
 String lampUrl(const String& rest) {
@@ -133,6 +135,20 @@ void syncQueue() {
 
     if (!downloadItem(client, itemId, item["size"] | 0)) break;
 
+    // make sure the e-ink chunks inside the PNG are intact before it takes a slot
+    EpdImage img;
+    File tf = LittleFS.open(TMP_PATH, "r");
+    bool valid = tf && epdParse(tf, img);
+    if (tf) tf.close();
+    if (!valid) {
+      // can never be shown, and leaving it queued would block everything behind it
+      Serial.println("  no valid epRb/epRa payload, discarding");
+      LittleFS.remove(TMP_PATH);
+      ackItem(client, itemId);
+      continue;
+    }
+    Serial.printf("  %ux%u, %u-bpp, %u frame(s)\n", img.w, img.h, img.bpp, img.frames);
+
     // device holds MAX_IMAGES at most: the oldest image makes room for this one
     if ((int)stored.size() >= MAX_IMAGES) {
       String oldId = stored[0]["id"] | "";
@@ -146,6 +162,8 @@ void syncQueue() {
     entry["id"] = itemId;
     entry["sentAt"] = item["sentAt"];
     entry["geo"] = item["sentGeo"];
+    entry["frames"] = img.frames;
+    entry["intervalMs"] = img.intervalMs;
     if (!saveManifest(manifestDoc)) {
       Serial.println("  manifest write failed");
       break;

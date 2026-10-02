@@ -23,7 +23,7 @@ const int EPD_CS = D6;    // GPIO14
 GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
     GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-const uint32_t STILL_HOLD_MS = 30000;  // how long each still stays up before the next image
+const uint32_t STILL_HOLD_MS = 5000;   // how long each image stays up during the automatic pass
 const int ANIM_LOOPS = 3;              // times an animation plays through before moving on
 
 const int MAX_IMAGES = 12;                // most images the device keeps at once
@@ -278,7 +278,11 @@ void drawFrame(const EpdImage& img, bool partial) {
   } while (display.nextPage());
 }
 
-void showImage(const String& itemId) {
+// set by buttonTask on each press of the NEXT button, cleared when consumed
+volatile bool nextPressed = false;
+
+// full = flashing full-screen refresh (clears ghosting); otherwise a fast partial one
+void showImage(const String& itemId, size_t num, size_t total, bool full) {
   File f = LittleFS.open("/" + itemId, "r");
   EpdImage img;
   if (!f || !epdParse(f, img)) {
@@ -286,19 +290,19 @@ void showImage(const String& itemId) {
     if (f) f.close();
     return;
   }
-  Serial.printf("Showing %s (%u frame(s))\n", itemId.c_str(), img.frames);
+  Serial.printf("Image %u/%u: %s (%u frame(s))\n", (unsigned)num, (unsigned)total, itemId.c_str(), img.frames);
 
   if (img.frames == 1) {
-    if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, false);
+    if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, !full);
     f.close();
-    delay(STILL_HOLD_MS);
     return;
   }
 
-  // animation: first frame does a full refresh to clear ghosting, the rest are partial
-  bool first = true;
+  // animation: only the first frame can be a full refresh, the rest are partial
+  bool first = full;
   for (int loop = 0; loop < ANIM_LOOPS; loop++) {
     for (uint8_t i = 0; i < img.frames; i++) {
+      if (nextPressed) { f.close(); return; }  // button skips the rest of the animation
       uint32_t t0 = millis();
       if (!epdReadFrame(f, img, i, frameBuf)) break;
       drawFrame(img, !first);
@@ -322,6 +326,7 @@ void loadStoredIds() {
 // ---------- WiFi setup (captive portal) ----------
 
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
+const int NEXT_BUTTON = 25;                  // GPIO25 (labelled D2): momentary switch to GND
 const uint32_t RESET_HOLD_MS = 8000;         // hold this long to forget the saved WiFi
 const uint32_t PORTAL_TIMEOUT_S = 180;       // setup mode stays open this long, then retries the saved network
 
@@ -378,8 +383,14 @@ void drawSetupScreen(const String& apName) {
 // forget the saved WiFi and restart into setup mode
 void buttonTask(void*) {
   pinMode(RESET_BUTTON, INPUT_PULLUP);
+  pinMode(NEXT_BUTTON, INPUT_PULLUP);
   uint32_t heldSince = 0;
+  bool nextWasDown = false;
   for (;;) {
+    bool nextDown = digitalRead(NEXT_BUTTON) == LOW;  // polled every 50 ms, which also debounces
+    if (nextDown && !nextWasDown) nextPressed = true;
+    nextWasDown = nextDown;
+
     if (digitalRead(RESET_BUTTON) == LOW) {
       if (!heldSince) heldSince = millis();
       if (millis() - heldSince >= RESET_HOLD_MS) {
@@ -438,12 +449,48 @@ void setup() {
   loadStoredIds();
 }
 
+// waits up to ms (0 = forever) for a press of the NEXT button; true if pressed
+bool waitForNext(uint32_t ms) {
+  uint32_t t0 = millis();
+  while (!nextPressed) {
+    if (ms && millis() - t0 >= ms) return false;
+    delay(20);
+  }
+  nextPressed = false;
+  return true;
+}
+
 void loop() {
-  // cycles through everything stored, oldest to newest
   if (storedIds.empty()) {
     Serial.println("Nothing stored to show");
     delay(5000);
     return;
   }
-  for (const String& id : storedIds) showImage(id);
+  // one automatic pass through everything stored, oldest to newest, then it
+  // rests on the first image; from there (or after any press during the pass)
+  // the NEXT button steps through the images, wrapping around
+  static size_t idx = 0;
+  static bool autoPass = true;
+  size_t total = storedIds.size();
+  if (idx >= total) idx = 0;
+
+  // partial refreshes all the way round; the full refresh happens when the
+  // cycle comes back to the first image (and on the first draw after boot)
+  showImage(storedIds[idx], idx + 1, total, idx == 0);
+
+  if (autoPass) {
+    if (waitForNext(STILL_HOLD_MS)) {
+      autoPass = false;
+      idx = (idx + 1) % total;
+    } else if (idx + 1 < total) {
+      idx++;
+    } else {
+      autoPass = false;
+      idx = 0;
+      Serial.println("Pass complete, resting on first image (press button to step)");
+    }
+  } else {
+    waitForNext(0);
+    idx = (idx + 1) % total;
+  }
 }

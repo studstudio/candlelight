@@ -324,6 +324,8 @@ void drawSetupScreen(const String& apName) {
     }
     display.setCursor(50, 250);
     display.print("Network: " + apName);
+    display.setCursor(50, 275);
+    display.print("No popup? Open 192.168.4.1");
   } while (display.nextPage());
 }
 

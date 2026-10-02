@@ -382,6 +382,49 @@ export default {
       }
     }
 
+    // ---- firmware OTA: one image shared by every lamp, stored in R2 at
+    // firmware/latest.bin with its version in the object's custom metadata.
+    // CI uploads it (PUT, bearer token); lamps check /firmware/version on boot
+    // and pull /firmware/latest.bin when the version differs from their own ----
+    if (parts[0] === 'firmware') {
+      const KEY = 'firmware/latest.bin';
+
+      if (parts[1] === 'version' && request.method === 'GET') {
+        const head = await env.LAMP_IMAGES.head(KEY);
+        if (!head) return new Response('No firmware published', { status: 404, headers: CORS_HEADERS });
+        return json({ version: head.customMetadata?.version || '', size: head.size });
+      }
+
+      if (parts[1] === 'latest.bin' && request.method === 'GET') {
+        const obj = await env.LAMP_IMAGES.get(KEY);
+        if (!obj) return new Response('No firmware published', { status: 404, headers: CORS_HEADERS });
+        return new Response(obj.body, {
+          headers: {
+            ...CORS_HEADERS,
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': String(obj.size), // the lamp's updater needs a known length
+          },
+        });
+      }
+
+      if (parts.length === 1 && request.method === 'PUT') {
+        const token = env.FIRMWARE_TOKEN;
+        if (!token || request.headers.get('Authorization') !== `Bearer ${token}`) {
+          return new Response('Unauthorized', { status: 401, headers: CORS_HEADERS });
+        }
+        const version = request.headers.get('X-Firmware-Version');
+        if (!version) return json({ error: 'X-Firmware-Version header required' }, 400);
+        const bin = await request.arrayBuffer();
+        if (bin.byteLength < 100000 || new Uint8Array(bin)[0] !== 0xe9) {
+          return json({ error: 'not an ESP32 app image' }, 400); // 0xE9 is the ESP image magic byte
+        }
+        await env.LAMP_IMAGES.put(KEY, bin, { customMetadata: { version } });
+        return json({ ok: true, version, size: bin.byteLength });
+      }
+
+      return new Response('Not found', { status: 404, headers: CORS_HEADERS });
+    }
+
     if (parts[0] !== 'lamp' || parts.length < 3) {
       return new Response('Not found', { status: 404, headers: CORS_HEADERS });
     }

@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h>
@@ -11,6 +12,11 @@
 #include "epd_png.h"
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
+// stamped in by CI (-DFW_VERSION="<git sha>"); an unstamped local build is "dev"
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+
 const char* LAMP_ID = "test-lamp-1";  // must match the lampId the sender page uploads to
 
 // panel wiring (GDEY042T81, 400x300). SCK/MOSI are the board's default SPI pins
@@ -142,6 +148,45 @@ void printSentInfo(JsonVariantConst sentAt, JsonVariantConst geo) {
   } else {
     Serial.printf("             lat=%.4f lon=%.4f tz=%s colo=%s\n", geo["lat"].as<double>(),
                   geo["lon"].as<double>(), geo["timezone"] | "-", geo["colo"] | "-");
+  }
+}
+
+// asks the worker which firmware is current; if it isn't the one running, pulls
+// it into the spare OTA slot and reboots into it (never returns on success)
+void checkForUpdate() {
+  Serial.printf("Firmware: %s\n", FW_VERSION);
+
+  WiFiClientSecure client;
+  client.setInsecure();  // prototype only
+  HTTPClient http;
+  http.setReuse(false);
+  http.setTimeout(10000);
+  http.begin(client, String(BASE_URL) + "/firmware/version");
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("Update check: HTTP %d\n", code);
+    http.end();
+    return;
+  }
+  String body = http.getString();
+  http.end();
+  client.stop();
+
+  JsonDocument doc;
+  if (deserializeJson(doc, body)) return;
+  String latest = doc["version"] | "";
+  if (latest.isEmpty() || latest == FW_VERSION) {
+    Serial.println("Firmware is up to date");
+    return;
+  }
+
+  Serial.printf("Updating firmware %s -> %s (%u bytes)\n", FW_VERSION, latest.c_str(), (unsigned)(doc["size"] | 0));
+  WiFiClientSecure updateClient;
+  updateClient.setInsecure();  // prototype only
+  httpUpdate.rebootOnUpdate(true);
+  t_httpUpdate_return ret = httpUpdate.update(updateClient, String(BASE_URL) + "/firmware/latest.bin");
+  if (ret == HTTP_UPDATE_FAILED) {
+    Serial.printf("Update failed (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
   }
 }
 
@@ -445,6 +490,7 @@ void setup() {
   xTaskCreate(buttonTask, "button", 4096, nullptr, 1, nullptr);
 
   connectWiFi();
+  checkForUpdate();
   syncQueue();
   loadStoredIds();
 }

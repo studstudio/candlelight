@@ -30,7 +30,7 @@ GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
     GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
 const uint32_t STILL_HOLD_MS = 5000;   // how long each image stays up during the automatic pass
-const int ANIM_LOOPS = 3;              // times an animation plays through before moving on
+const int ANIM_LOOPS = 1;              // times an animation plays through before moving on
 
 const int MAX_IMAGES = 12;                // most images the device keeps at once
 const char* MANIFEST_PATH = "/manifest.json";
@@ -361,13 +361,13 @@ void showImage(const String& itemId, size_t num, size_t total, bool full) {
   f.close();
 }
 
-std::vector<String> storedIds;  // oldest first, same order as the manifest
+std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
 
 void loadStoredIds() {
   storedIds.clear();
   JsonDocument doc;
   loadManifest(doc);
-  for (JsonObject e : doc.as<JsonArray>()) storedIds.push_back(e["id"].as<String>());
+  for (JsonObject e : doc.as<JsonArray>()) storedIds.insert(storedIds.begin(), e["id"].as<String>());
 }
 
 // ---------- WiFi setup (captive portal) ----------
@@ -523,7 +523,7 @@ bool waitForNext(uint32_t ms) {
 }
 
 void loop() {
-  // one automatic pass through everything stored, oldest to newest, then it
+  // one automatic pass through everything stored, newest to oldest, then it
   // rests on the first image; from there (or after any press during the pass)
   // the NEXT button steps through the images, wrapping around
   static size_t idx = 0;

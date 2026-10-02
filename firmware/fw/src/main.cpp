@@ -67,34 +67,50 @@ bool inManifest(JsonArray arr, const char* id) {
   return false;
 }
 
-// streams one queue item straight into flash; true only if the whole file arrived
-bool downloadItem(WiFiClientSecure& client, const char* itemId, size_t expectedSize) {
-  HTTPClient http;
-  http.setTimeout(20000);
-  http.begin(client, lampUrl(String("/items/") + itemId));
-  int code = http.GET();
-  if (code != 200) {
-    Serial.printf("  download HTTP %d\n", code);
+// streams one queue item straight into flash; true only if the whole file arrived.
+// every attempt gets its own fresh TLS connection (a connection left over from
+// an earlier request can hand back an empty body), and a short or failed
+// transfer is retried
+bool downloadItem(const char* itemId, size_t expectedSize) {
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    WiFiClientSecure client;
+    client.setInsecure();  // prototype only
+    HTTPClient http;
+    http.setReuse(false);
+    http.setTimeout(20000);
+    http.begin(client, lampUrl(String("/items/") + itemId));
+    int code = http.GET();
+    if (code != 200) {
+      Serial.printf("  attempt %d: HTTP %d\n", attempt, code);
+      http.end();
+      continue;
+    }
+    int contentLen = http.getSize();  // -1 when the server streams it chunked
+    File f = LittleFS.open(TMP_PATH, "w");
+    if (!f) { http.end(); return false; }
+    int written = http.writeToStream(&f);  // bytes written, or a negative HTTPClient error
+    f.close();
     http.end();
-    return false;
-  }
-  File f = LittleFS.open(TMP_PATH, "w");
-  if (!f) { http.end(); return false; }
-  http.writeToStream(&f);
-  size_t got = f.size();
-  f.close();
-  http.end();
-  if (expectedSize && got != expectedSize) {
-    Serial.printf("  size mismatch: got %u, expected %u\n", (unsigned)got, (unsigned)expectedSize);
+
+    File check = LittleFS.open(TMP_PATH, "r");  // measure the closed file, not the open handle
+    size_t got = check ? check.size() : 0;
+    if (check) check.close();
+
+    if (!expectedSize || got == expectedSize) return true;
+    Serial.printf("  attempt %d: got %u of %u bytes (content-length %d, writeToStream %d)\n",
+                  attempt, (unsigned)got, (unsigned)expectedSize, contentLen, written);
     LittleFS.remove(TMP_PATH);
-    return false;
+    delay(500);
   }
-  return true;
+  return false;
 }
 
 // tells the worker the item is safely on the device so it frees the queue slot
-bool ackItem(WiFiClientSecure& client, const char* itemId) {
+bool ackItem(const char* itemId) {
+  WiFiClientSecure client;
+  client.setInsecure();  // prototype only
   HTTPClient http;
+  http.setReuse(false);
   http.setTimeout(10000);
   http.begin(client, lampUrl(String("/items/") + itemId));
   int code = http.sendRequest("DELETE");
@@ -103,13 +119,13 @@ bool ackItem(WiFiClientSecure& client, const char* itemId) {
 }
 
 void syncQueue() {
-  WiFiClientSecure client;
-  client.setInsecure();  // prototype only
-
   // 1. what's waiting, oldest first, with sentAt/sentGeo for each
+  WiFiClientSecure queueClient;
+  queueClient.setInsecure();  // prototype only
   HTTPClient http;
+  http.setReuse(false);
   http.setTimeout(10000);
-  http.begin(client, lampUrl("/queue"));
+  http.begin(queueClient, lampUrl("/queue"));
   int code = http.GET();
   if (code != 200) {
     Serial.printf("Queue request failed: %d %s\n", code, http.errorToString(code).c_str());
@@ -118,6 +134,7 @@ void syncQueue() {
   }
   String body = http.getString();
   http.end();
+  queueClient.stop();  // free its TLS session before the per-item downloads open their own
 
   JsonDocument queueDoc;
   if (deserializeJson(queueDoc, body)) {
@@ -145,11 +162,11 @@ void syncQueue() {
     // an earlier ack may have failed after the image was already saved
     if (inManifest(stored, itemId)) {
       Serial.println("  already stored, acking only");
-      ackItem(client, itemId);
+      ackItem(itemId);
       continue;
     }
 
-    if (!downloadItem(client, itemId, item["size"] | 0)) break;
+    if (!downloadItem(itemId, item["size"] | 0)) break;
 
     // make sure the e-ink chunks inside the PNG are intact before it takes a slot
     EpdImage img;
@@ -160,7 +177,7 @@ void syncQueue() {
       // can never be shown, and leaving it queued would block everything behind it
       Serial.println("  no valid epRb/epRa payload, discarding");
       LittleFS.remove(TMP_PATH);
-      ackItem(client, itemId);
+      ackItem(itemId);
       continue;
     }
     Serial.printf("  %ux%u, %u-bpp, %u frame(s)\n", img.w, img.h, img.bpp, img.frames);
@@ -185,7 +202,7 @@ void syncQueue() {
       break;
     }
 
-    if (!ackItem(client, itemId)) Serial.println("  ack failed (will dedupe next sync)");
+    if (!ackItem(itemId)) Serial.println("  ack failed (will dedupe next sync)");
   }
 
   // 3. what the device ended up with, oldest -> newest

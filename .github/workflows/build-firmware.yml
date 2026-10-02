@@ -30,9 +30,6 @@ jobs:
 
       - run: pip install platformio esptool
 
-      - name: Create placeholder secrets
-        run: cp src/secrets.example.h src/secrets.h
-
       - run: pio run
 
       - name: Merge into one flashable image (flash at 0x0)

@@ -6,7 +6,8 @@
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h>
 #include <vector>
-#include "secrets.h"
+#include <WiFiManager.h>
+#include <qrcode.h>
 #include "epd_png.h"
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
@@ -274,6 +275,107 @@ void loadStoredIds() {
   for (JsonObject e : doc.as<JsonArray>()) storedIds.push_back(e["id"].as<String>());
 }
 
+// ---------- WiFi setup (captive portal) ----------
+
+const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
+const uint32_t RESET_HOLD_MS = 5000;         // hold this long to forget the saved WiFi
+const uint32_t PORTAL_TIMEOUT_S = 180;       // setup mode stays open this long, then retries the saved network
+
+String setupApName() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char name[24];
+  snprintf(name, sizeof(name), "Candlelight-%02X%02X", mac[4], mac[5]);
+  return String(name);
+}
+
+// instructions + a QR code that joins the setup network when scanned
+void drawSetupScreen(const String& apName) {
+  QRCode qr;
+  uint8_t qrData[qrcode_getBufferSize(3)];
+  String payload = "WIFI:S:" + apName + ";T:nopass;;";
+  qrcode_initText(&qr, qrData, 3, ECC_LOW, payload.c_str());
+  const int scale = 6, qx = 20, qy = 50;
+
+  display.setRotation(0);
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+
+    display.setTextSize(3);
+    display.setCursor(20, 10);
+    display.print("Candlelight setup");
+
+    for (int y = 0; y < qr.size; y++)
+      for (int x = 0; x < qr.size; x++)
+        if (qrcode_getModule(&qr, x, y)) display.fillRect(qx + x * scale, qy + y * scale, scale, scale, GxEPD_BLACK);
+
+    display.setTextSize(2);
+    static const char* LINES[][2] = {
+      {"60", "1. Scan this"}, {"80", "   code with"}, {"100", "   your phone"},
+      {"140", "2. Pick your"}, {"160", "   WiFi (2.4"}, {"180", "   GHz) and"},
+      {"200", "   enter its"}, {"220", "   password"},
+    };
+    for (auto& l : LINES) {
+      display.setCursor(215, atoi(l[0]));
+      display.print(l[1]);
+    }
+    display.setCursor(50, 250);
+    display.print("Network: " + apName);
+  } while (display.nextPage());
+}
+
+// long-press BOOT at any time (after the board has started: holding it
+// during power-up would put the chip in flash-download mode instead) to
+// forget the saved WiFi and restart into setup mode
+void buttonTask(void*) {
+  pinMode(RESET_BUTTON, INPUT_PULLUP);
+  uint32_t heldSince = 0;
+  for (;;) {
+    if (digitalRead(RESET_BUTTON) == LOW) {
+      if (!heldSince) heldSince = millis();
+      if (millis() - heldSince >= RESET_HOLD_MS) {
+        Serial.println("BOOT held: forgetting saved WiFi");
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect(true, true);  // erase stored credentials
+        delay(200);
+        ESP.restart();
+      }
+    } else {
+      heldSince = 0;
+    }
+    delay(50);
+  }
+}
+
+// blocks until the board is on WiFi. With saved credentials it just joins;
+// with none, or if they stop working, it opens the Candlelight-XXXX setup
+// network (and keeps the saved credentials, so a router that is only
+// temporarily down gets rejoined after the portal times out and retries)
+void connectWiFi() {
+  String apName = setupApName();
+  WiFiManager wm;
+  wm.setConnectTimeout(20);
+  wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
+  wm.setTitle("Candlelight");
+  bool screenDrawn = false;
+  wm.setAPCallback([&](WiFiManager* w) {
+    Serial.println("Setup mode: join " + apName);
+    // only take over the screen on a fresh lamp; one that merely lost its
+    // network keeps showing its last image while it retries
+    if (!screenDrawn && !w->getWiFiIsSaved()) {
+      drawSetupScreen(apName);
+      screenDrawn = true;
+    }
+  });
+  while (!wm.autoConnect(apName.c_str())) {
+    Serial.println("No WiFi yet, retrying");
+  }
+  Serial.println("Connected: " + WiFi.localIP().toString());
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -283,23 +385,11 @@ void setup() {
     return;
   }
   display.init(115200);
+  xTaskCreate(buttonTask, "button", 4096, nullptr, 1, nullptr);
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("Connecting");
-  int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 40) {
-    delay(500);
-    Serial.print(".");
-    tries++;
-  }
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\nWiFi failed. Check name/password and that it's 2.4 GHz.");
-  } else {
-    Serial.println("\nConnected: " + WiFi.localIP().toString());
-    syncQueue();
-  }
-  loadStoredIds();  // show whatever is stored even if the sync failed
+  connectWiFi();
+  syncQueue();
+  loadStoredIds();
 }
 
 void loop() {

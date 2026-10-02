@@ -325,6 +325,8 @@ void drawFrame(const EpdImage& img, bool partial) {
 
 // set by buttonTask on each press of the NEXT button, cleared when consumed
 volatile bool nextPressed = false;
+// set by buttonTask when the NEXT button is held for SYNC_HOLD_MS, cleared when handled
+volatile bool syncRequested = false;
 
 // full = flashing full-screen refresh (clears ghosting); otherwise a fast partial one
 void showImage(const String& itemId, size_t num, size_t total, bool full) {
@@ -347,7 +349,7 @@ void showImage(const String& itemId, size_t num, size_t total, bool full) {
   bool first = full;
   for (int loop = 0; loop < ANIM_LOOPS; loop++) {
     for (uint8_t i = 0; i < img.frames; i++) {
-      if (nextPressed) { f.close(); return; }  // button skips the rest of the animation
+      if (nextPressed || syncRequested) { f.close(); return; }  // button skips the rest of the animation
       uint32_t t0 = millis();
       if (!epdReadFrame(f, img, i, frameBuf)) break;
       drawFrame(img, !first);
@@ -372,6 +374,7 @@ void loadStoredIds() {
 
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
 const int NEXT_BUTTON = 25;                  // GPIO25 (labelled D2): momentary switch to GND
+const uint32_t SYNC_HOLD_MS = 4000;          // hold NEXT this long to re-check the worker for new images/firmware
 const uint32_t RESET_HOLD_MS = 8000;         // hold this long to forget the saved WiFi
 const uint32_t PORTAL_TIMEOUT_S = 180;       // setup mode stays open this long, then retries the saved network
 
@@ -430,11 +433,22 @@ void buttonTask(void*) {
   pinMode(RESET_BUTTON, INPUT_PULLUP);
   pinMode(NEXT_BUTTON, INPUT_PULLUP);
   uint32_t heldSince = 0;
-  bool nextWasDown = false;
+  uint32_t nextHeldSince = 0;
+  bool syncFired = false;
   for (;;) {
-    bool nextDown = digitalRead(NEXT_BUTTON) == LOW;  // polled every 50 ms, which also debounces
-    if (nextDown && !nextWasDown) nextPressed = true;
-    nextWasDown = nextDown;
+    // polled every 50 ms, which also debounces. A short press counts as "next"
+    // when released; holding for SYNC_HOLD_MS asks for a sync instead
+    if (digitalRead(NEXT_BUTTON) == LOW) {
+      if (!nextHeldSince) nextHeldSince = millis();
+      if (!syncFired && millis() - nextHeldSince >= SYNC_HOLD_MS) {
+        syncFired = true;
+        syncRequested = true;
+      }
+    } else {
+      if (nextHeldSince && !syncFired) nextPressed = true;
+      nextHeldSince = 0;
+      syncFired = false;
+    }
 
     if (digitalRead(RESET_BUTTON) == LOW) {
       if (!heldSince) heldSince = millis();
@@ -495,10 +509,12 @@ void setup() {
   loadStoredIds();
 }
 
-// waits up to ms (0 = forever) for a press of the NEXT button; true if pressed
+// waits up to ms (0 = forever) for a press of the NEXT button; true if pressed.
+// Returns false early if a sync was requested
 bool waitForNext(uint32_t ms) {
   uint32_t t0 = millis();
   while (!nextPressed) {
+    if (syncRequested) return false;
     if (ms && millis() - t0 >= ms) return false;
     delay(20);
   }
@@ -507,16 +523,28 @@ bool waitForNext(uint32_t ms) {
 }
 
 void loop() {
-  if (storedIds.empty()) {
-    Serial.println("Nothing stored to show");
-    delay(5000);
-    return;
-  }
   // one automatic pass through everything stored, oldest to newest, then it
   // rests on the first image; from there (or after any press during the pass)
   // the NEXT button steps through the images, wrapping around
   static size_t idx = 0;
   static bool autoPass = true;
+
+  if (syncRequested) {
+    Serial.println("NEXT held: syncing with the worker");
+    checkForUpdate();  // reboots into new firmware if there is one
+    syncQueue();
+    loadStoredIds();
+    nextPressed = false;
+    syncRequested = false;
+    idx = 0;
+    autoPass = true;  // show everything again from the first image
+  }
+
+  if (storedIds.empty()) {
+    Serial.println("Nothing stored to show");
+    delay(5000);
+    return;
+  }
   size_t total = storedIds.size();
   if (idx >= total) idx = 0;
 

@@ -17,8 +17,8 @@ function json(data, status = 200) {
 // every queued item for a lamp lives at queue/{lampId}/{itemId}.png, where
 // itemId starts with a millisecond timestamp — so a plain lexicographic
 // sort on the R2 key doubles as chronological order, oldest first
-async function getQueueItems(env, lampId) {
-  const listing = await env.LAMP_IMAGES.list({ prefix: `queue/${lampId}/` });
+async function getQueueItems(env, lampId, opts = {}) {
+  const listing = await env.LAMP_IMAGES.list({ prefix: `queue/${lampId}/`, ...opts });
   return listing.objects.slice().sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
@@ -399,8 +399,11 @@ export default {
       const bytes = await request.arrayBuffer();
       const sentAt = Date.now();
       const itemId = `${sentAt}-${crypto.randomUUID().slice(0, 8)}.png`;
+      // sentAt/sentGeo ride along on the R2 object itself so /queue can hand
+      // them to the firmware in one call (customMetadata values must be strings)
       await env.LAMP_IMAGES.put(`queue/${lampId}/${itemId}`, bytes, {
         httpMetadata: { contentType: 'image/png' },
+        customMetadata: { sentAt: String(sentAt), sentGeo: JSON.stringify(geoFromRequest(request)) },
       });
       await env.LAMP_KV.put(`meta:${lampId}`, JSON.stringify({ lastUpload: sentAt }));
       await recordSentEvent(env, lampId, itemId, request, sentAt);
@@ -425,13 +428,18 @@ export default {
     // usage should still ack one real download at a time via DELETE
     // /items/{itemId}, not wipe everything blind. ----
     if (action === 'queue' && request.method === 'GET') {
-      const items = await getQueueItems(env, lampId);
+      const items = await getQueueItems(env, lampId, { include: ['customMetadata'] });
       return json({
         queueDepth: items.length,
-        items: items.map(obj => ({
-          itemId: obj.key.slice(`queue/${lampId}/`.length),
-          size: obj.size,
-        })),
+        items: items.map(obj => {
+          const md = obj.customMetadata || {};
+          return {
+            itemId: obj.key.slice(`queue/${lampId}/`.length),
+            size: obj.size,
+            sentAt: md.sentAt ? parseInt(md.sentAt, 10) : null,
+            sentGeo: md.sentGeo ? JSON.parse(md.sentGeo) : null,
+          };
+        }),
       });
     }
 

@@ -278,7 +278,7 @@ void loadStoredIds() {
 // ---------- WiFi setup (captive portal) ----------
 
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
-const uint32_t RESET_HOLD_MS = 5000;         // hold this long to forget the saved WiFi
+const uint32_t RESET_HOLD_MS = 8000;         // hold this long to forget the saved WiFi
 const uint32_t PORTAL_TIMEOUT_S = 180;       // setup mode stays open this long, then retries the saved network
 
 String setupApName() {

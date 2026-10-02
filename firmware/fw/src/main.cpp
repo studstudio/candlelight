@@ -118,6 +118,33 @@ bool ackItem(const char* itemId) {
   return code == 200;
 }
 
+// prints an item's sentAt (epoch ms, shown as UTC too) and every sentGeo field
+void printSentInfo(JsonVariantConst sentAt, JsonVariantConst geo) {
+  if (sentAt.isNull()) {
+    Serial.println("    sentAt:  (none, queued before sentAt was recorded)");
+  } else {
+    long long ms = sentAt.as<long long>();
+    time_t secs = (time_t)(ms / 1000);
+    struct tm tm;
+    gmtime_r(&secs, &tm);
+    char when[24];
+    strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
+    Serial.printf("    sentAt:  %lld  (%s UTC)\n", ms, when);
+  }
+  if (geo.isNull()) {
+    Serial.println("    sentGeo: (none)");
+    return;
+  }
+  Serial.printf("    sentGeo: city=%s region=%s country=%s postal=%s\n",
+                geo["city"] | "-", geo["region"] | "-", geo["country"] | "-", geo["postalCode"] | "-");
+  if (geo["lat"].isNull() || geo["lon"].isNull()) {
+    Serial.printf("             lat/lon=- tz=%s colo=%s\n", geo["timezone"] | "-", geo["colo"] | "-");
+  } else {
+    Serial.printf("             lat=%.4f lon=%.4f tz=%s colo=%s\n", geo["lat"].as<double>(),
+                  geo["lon"].as<double>(), geo["timezone"] | "-", geo["colo"] | "-");
+  }
+}
+
 void syncQueue() {
   // 1. what's waiting, oldest first, with sentAt/sentGeo for each
   WiFiClientSecure queueClient;
@@ -158,6 +185,7 @@ void syncQueue() {
     const char* itemId = item["itemId"] | "";
     if (!*itemId) continue;
     Serial.printf("- %s\n", itemId);
+    printSentInfo(item["sentAt"], item["sentGeo"]);
 
     // an earlier ack may have failed after the image was already saved
     if (inManifest(stored, itemId)) {
@@ -208,9 +236,8 @@ void syncQueue() {
   // 3. what the device ended up with, oldest -> newest
   Serial.printf("Stored now (%u/%d):\n", (unsigned)stored.size(), MAX_IMAGES);
   for (JsonObject e : stored) {
-    Serial.printf("  %s  sentAt=%lld  %s, %s\n", e["id"].as<const char*>(),
-                  e["sentAt"].as<long long>(),
-                  e["geo"]["city"] | "?", e["geo"]["country"] | "?");
+    Serial.printf("  %s\n", e["id"].as<const char*>());
+    printSentInfo(e["sentAt"], e["geo"]);
   }
 }
 

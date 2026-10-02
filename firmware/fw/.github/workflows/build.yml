@@ -1,0 +1,51 @@
+name: Build firmware
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "platformio.ini"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: pio-${{ hashFiles('platformio.ini') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install platformio
+
+      # CI has no secrets.h (it's gitignored), so use the example values.
+      # Put real credentials in your local copy only.
+      - name: Create placeholder secrets
+        run: cp src/secrets.example.h src/secrets.h
+
+      - run: pio run
+
+      - name: Merge into one flashable image (flash at 0x0)
+        run: |
+          B=.pio/build/firebeetle2
+          BOOT_APP0=$(find ~/.platformio -name boot_app0.bin | head -n 1)
+          python -m esptool --chip esp32 merge_bin -o merged.bin \
+            --flash_mode dio --flash_size 4MB \
+            0x1000 $B/bootloader.bin \
+            0x8000 $B/partitions.bin \
+            0xe000 $BOOT_APP0 \
+            0x10000 $B/firmware.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: merged.bin

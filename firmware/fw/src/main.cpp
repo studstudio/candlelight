@@ -4,11 +4,26 @@
 #include <HTTPClient.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <GxEPD2_BW.h>
+#include <vector>
 #include "secrets.h"
 #include "epd_png.h"
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
 const char* LAMP_ID = "test-lamp-1";  // must match the lampId the sender page uploads to
+
+// panel wiring (GDEY042T81, 400x300). SCK/MOSI are the board's default SPI pins
+// (SCK = 18, MO = 23), which GxEPD2 uses automatically
+const int EPD_BUSY = A3;  // GPIO35
+const int EPD_RST = D12;  // GPIO4
+const int EPD_DC = D7;    // GPIO13
+const int EPD_CS = D6;    // GPIO14
+
+GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
+    GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
+
+const uint32_t STILL_HOLD_MS = 30000;  // how long each still stays up before the next image
+const int ANIM_LOOPS = 3;              // times an animation plays through before moving on
 
 const int MAX_IMAGES = 12;                // most images the device keeps at once
 const char* MANIFEST_PATH = "/manifest.json";
@@ -181,6 +196,84 @@ void syncQueue() {
   }
 }
 
+// ---------- drawing ----------
+
+uint8_t frameBuf[30000];  // one packed frame: 400x300 at 2 bpp is the largest (30000 bytes)
+
+// stills carry 4 gray levels but this first pass drives the panel black/white
+// only, so the two middle grays are halftoned with a 2x2 ordered pattern
+bool pixelIsBlack(uint8_t code, uint8_t bpp, int x, int y) {
+  if (bpp == 1) return code == 0;
+  static const uint8_t BAYER[2][2] = {{0, 2}, {3, 1}};
+  switch (code) {
+    case 0: return true;
+    case 1: return BAYER[y & 1][x & 1] >= 1;  // ~25% white
+    case 2: return BAYER[y & 1][x & 1] >= 3;  // ~75% white
+    default: return false;
+  }
+}
+
+// draws one packed frame; partial = fast refresh without the full-screen flash
+void drawFrame(const EpdImage& img, bool partial) {
+  display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
+  if (display.width() != img.w || display.height() != img.h) {
+    Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
+    return;
+  }
+  if (partial) display.setPartialWindow(0, 0, img.w, img.h);
+  else display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    for (uint16_t y = 0; y < img.h; y++) {
+      for (uint16_t x = 0; x < img.w; x++) {
+        if (pixelIsBlack(epdPixel(frameBuf, img, x, y), img.bpp, x, y)) display.drawPixel(x, y, GxEPD_BLACK);
+      }
+    }
+  } while (display.nextPage());
+}
+
+void showImage(const String& itemId) {
+  File f = LittleFS.open("/" + itemId, "r");
+  EpdImage img;
+  if (!f || !epdParse(f, img)) {
+    Serial.printf("Can't open %s\n", itemId.c_str());
+    if (f) f.close();
+    return;
+  }
+  Serial.printf("Showing %s (%u frame(s))\n", itemId.c_str(), img.frames);
+
+  if (img.frames == 1) {
+    if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, false);
+    f.close();
+    delay(STILL_HOLD_MS);
+    return;
+  }
+
+  // animation: first frame does a full refresh to clear ghosting, the rest are partial
+  bool first = true;
+  for (int loop = 0; loop < ANIM_LOOPS; loop++) {
+    for (uint8_t i = 0; i < img.frames; i++) {
+      uint32_t t0 = millis();
+      if (!epdReadFrame(f, img, i, frameBuf)) break;
+      drawFrame(img, !first);
+      first = false;
+      uint32_t spent = millis() - t0;
+      if (spent < img.intervalMs) delay(img.intervalMs - spent);
+    }
+  }
+  f.close();
+}
+
+std::vector<String> storedIds;  // oldest first, same order as the manifest
+
+void loadStoredIds() {
+  storedIds.clear();
+  JsonDocument doc;
+  loadManifest(doc);
+  for (JsonObject e : doc.as<JsonArray>()) storedIds.push_back(e["id"].as<String>());
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -189,6 +282,7 @@ void setup() {
     Serial.println("LittleFS mount failed");
     return;
   }
+  display.init(115200);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -201,14 +295,19 @@ void setup() {
   }
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("\nWiFi failed. Check name/password and that it's 2.4 GHz.");
-    return;
+  } else {
+    Serial.println("\nConnected: " + WiFi.localIP().toString());
+    syncQueue();
   }
-  Serial.println("\nConnected: " + WiFi.localIP().toString());
-
-  syncQueue();
+  loadStoredIds();  // show whatever is stored even if the sync failed
 }
 
 void loop() {
-  Serial.printf("A0: %d mV\n", analogReadMilliVolts(A0));
-  delay(1000);
+  // cycles through everything stored, oldest to newest
+  if (storedIds.empty()) {
+    Serial.println("Nothing stored to show");
+    delay(5000);
+    return;
+  }
+  for (const String& id : storedIds) showImage(id);
 }

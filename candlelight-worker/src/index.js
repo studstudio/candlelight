@@ -284,6 +284,14 @@ export default {
     const url = new URL(request.url);
     const parts = url.pathname.split('/').filter(Boolean);
 
+    // ---- speedtest?n=bytes [DIAGNOSTIC]: n zero bytes (max 512 KB) with an
+    // exact Content-Length, over HTTPS or plain HTTP, so the lamp can measure
+    // time to first byte and throughput with and without TLS ----
+    if (parts[0] === 'speedtest' && request.method === 'GET') {
+      const n = Math.min(524288, Math.max(0, parseInt(url.searchParams.get('n') || '0', 10) || 0));
+      return new Response(new Uint8Array(n), { headers: { 'Content-Type': 'application/octet-stream' } });
+    }
+
     // ---- gallery/events: recent delivery events across ALL lamps, most
     // recent first — the data feed the future Gallery/map page will read.
     // Shape of this may evolve once that page actually gets designed. ----

@@ -329,7 +329,7 @@ bool downloadFirmware(WiFiClientSecure& client, const String& url) {
     } else if (millis() - lastData > OTA_STALL_MS) {
       failure = "stalled";
     } else if (int avail = stream->available()) {
-      int n = stream->readBytes(buf, min(avail, (int)sizeof(buf)));
+      int n = stream->read(buf, min(avail, (int)sizeof(buf)));  // one bulk read (readBytes goes byte by byte)
       if (n > 0) {
         if (Update.write(buf, n) != (size_t)n) failure = "flash write failed";
         written += n;
@@ -398,7 +398,8 @@ bool seenDirty = false;            // storedSeen changed and isn't in the manife
 // after it. passQueue holds the ids still to draw; passTick() (called from the
 // download loop) draws the next once the one on screen has been up
 // STILL_HOLD_MS. The last one waiting when nothing more is coming is held back:
-// quickPass() puts the newest up as the resting image (full refresh, badge)
+// quickPass() puts the newest up as the resting image (with the badge)
+bool speedTestPending = false;  // [DIAGNOSTIC] run the link test at the end of this wake (see speedTest)
 std::vector<String> passQueue;
 bool passRunning = false;     // a pass is playing (a press stops it)
 bool passMoreComing = false;  // the sync still has images to deliver
@@ -544,7 +545,9 @@ bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline, uint8_t* mem
     }
     size_t want = min((size_t)avail, n);
     if (!mem) want = min(want, sizeof(buf));
-    int got = s->readBytes(mem ? mem : buf, want);
+    // one bulk read: Stream::readBytes would fetch byte by byte, each byte two
+    // calls into the TLS library (~30,000 per image)
+    int got = s->read(mem ? mem : buf, want);
     if (got <= 0) continue;
     if (mem) {
       mem += got;
@@ -1577,6 +1580,14 @@ void updateBeforeSleep() {
   WiFi.mode(WIFI_OFF);
 }
 
+// logs when the first image of this wake goes up (once)
+void logFirstDraw() {
+  static bool logged = false;
+  if (logged) return;
+  logged = true;
+  Serial.printf("First draw starts %u ms after wake\n", (unsigned)millis());
+}
+
 // reads the first frame of image id into frameBuf (from PSRAM if it is still there)
 bool loadFirstFrame(const String& id, EpdImage& img) {
   if (const MemImage* m = findMemImage(id)) {
@@ -1591,6 +1602,7 @@ bool loadFirstFrame(const String& id, EpdImage& img) {
 
 // draws image idx as a still: an animation shows its first frame without playing
 void drawIndexStill(int idx, int badge, bool full) {
+  logFirstDraw();
   EpdImage img;
   if (loadFirstFrame(storedIds[idx], img)) drawFrame(img, !full, badge);
   rtcViewIdx = idx;
@@ -1600,11 +1612,7 @@ void drawIndexStill(int idx, int badge, bool full) {
 
 // draws image idx (newest-first); full = flashing full refresh (clears ghosting)
 void drawIndex(int idx, int badge, bool full) {
-  static bool logged = false;
-  if (!logged) {
-    logged = true;
-    Serial.printf("First draw starts %u ms after wake\n", (unsigned)millis());
-  }
+  logFirstDraw();
   showImage(storedIds[idx], idx + 1, storedIds.size(), full, badge);
   rtcViewIdx = idx;
   rtcBadge = badge;
@@ -1625,11 +1633,12 @@ void passTick() {
   if (passDrawn > 0 && millis() - passLastDraw < STILL_HOLD_MS) return;
   String id = passQueue.front();
   passQueue.erase(passQueue.begin());
-  if (passDrawn == 0) Serial.printf("First draw starts %u ms after wake\n", (unsigned)millis());
+  logFirstDraw();
   EpdImage img;
   if (loadFirstFrame(id, img)) drawFrame(img, true);  // a still (an animation's first frame), fast partial refresh, no badge
   passDrawn++;
-  Serial.printf("Pass image %d: %s\n", passDrawn, id.c_str());
+  Serial.printf("Auto pass, %s new image: %s (%u ms after wake)\n", passDrawn == 1 ? "oldest" : "next", id.c_str(),
+                (unsigned)millis());
   passLastDraw = millis();  // the hold counts from when it is fully up
   cycleOk = true;
 }
@@ -1637,9 +1646,9 @@ void passTick() {
 void stepNext();
 
 // finishes the pass of the images this sync brought (oldest first; most of it
-// already played during the download) and rests on the newest, image 1: full
-// refresh, a still, and the badge counting every unseen image. A press ends the
-// pass on image 1; a sync request ends it too and is left for the caller.
+// already played during the download) and rests on the newest, image 1: a
+// partial refresh, a still, and the badge counting every unseen image. A press
+// ends the pass on image 1; a sync request ends it too and is left for the caller.
 // With nothing new it just draws image 1
 void quickPass() {
   passMoreComing = false;
@@ -1668,10 +1677,10 @@ void quickPass() {
   int unseen = countUnseen();
   rtcInTour = unseen > 0;
   if (passDrawn > 0) {
-    Serial.println("Pass complete, resting on the newest image (press the button to step)");
+    Serial.println("Auto pass complete, resting on image 1, the newest (press the button to step)");
     if (millis() - passLastDraw < STILL_HOLD_MS) delay(STILL_HOLD_MS - (millis() - passLastDraw));
   }
-  drawIndexStill(0, unseen, true);
+  drawIndexStill(0, unseen, false);  // fast partial refresh (after power-up the library makes the first one full itself)
 }
 
 // redraws the image on screen as a still (first frame) with or without the
@@ -1687,11 +1696,13 @@ void redrawCurrent(bool syncBadge) {
 // so does the image it steps to. While unseen images remain it steps only
 // through those, the badge counting the unseen ones left including the one
 // shown (4, 3, 2, 1); after the last one it wraps back to image 1 without a
-// badge, and from there it is plain 1, 2 ... 12, 1 again
+// badge (the one full refresh), and from there it is plain 1, 2 ... 12, 1 again
+// (all partial refreshes)
 void stepNext() {
   int total = storedIds.size();
   markSeen(rtcViewIdx);
   int next = nextUnseenAfter(rtcViewIdx);
+  bool full = false;
   if (next >= 0) {
     rtcInTour = true;
   } else if (rtcInTour) {
@@ -1703,12 +1714,13 @@ void stepNext() {
       return;
     }
     next = 0;
+    full = true;  // the only full refresh: back on image 1 after flipping through the unseen ones
   } else {
     next = (rtcViewIdx + 1) % total;
   }
   int badge = rtcInTour ? countUnseen() : 0;  // counted before the one shown is marked seen
   markSeen(next);
-  drawIndex(next, badge, next == 0);  // full refresh whenever it lands on image 1
+  drawIndex(next, badge, full);
 }
 
 // plays the animation on screen again (it rests on its first frame afterwards)
@@ -1739,6 +1751,7 @@ void manualSync() {
   if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
   redrawCurrent(true);  // "Syncing..." top-left: the hold registered
   syncRequested = false;  // handled: left set, the pass would read it as a press and stop
+  speedTestPending = true;  // [DIAGNOSTIC] link test at the end of this wake
   otaguard::clearBad();
   int added = 0;
   if (!doSync(false, added)) {
@@ -1785,12 +1798,97 @@ void idleWindow() {
   }
 }
 
+// [DIAGNOSTIC, temporary] after a manual sync, at the very end of the wake
+// (nobody waits for it): fetches 100 KB from the worker over HTTPS and then
+// plain HTTP, with raw requests (no HTTPClient) and bulk reads, and logs the
+// connect time, time to first byte and throughput of each. Tells the ESP32's
+// TLS apart from its network stack. Remove once answered
+void speedTestOne(Client& c, bool tls) {
+  String host = String(BASE_URL).substring(8);  // after "https://"
+  const char* name = tls ? "HTTPS" : "HTTP";
+  uint32_t t0 = millis();
+  if (!c.connect(host.c_str(), tls ? 443 : 80)) {
+    Serial.printf("[speed %s] connect failed\n", name);
+    return;
+  }
+  Serial.printf("[speed %s] connect %u ms\n", name, (unsigned)(millis() - t0));
+  for (long n : {0L, 100000L}) {
+    String req = "GET /speedtest?n=" + String(n) + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: keep-alive\r\n\r\n";
+    uint32_t t1 = millis(), tFirst = 0, tBody = 0;
+    c.write((const uint8_t*)req.c_str(), req.length());
+    long len = -1, got = 0;
+    bool headersDone = false;
+    String line;
+    uint8_t buf[2048];
+    uint32_t last = millis();
+    while (millis() - last < 10000) {
+      otaguard::tick();
+      int a = c.available();
+      if (a <= 0) {
+        if (!c.connected()) break;
+        delay(1);
+        continue;
+      }
+      if (!tFirst) tFirst = millis();
+      last = millis();
+      if (!headersDone) {
+        int ch = c.read();
+        if (ch < 0) continue;
+        if (ch == '\n') {
+          if (!line.length()) {
+            headersDone = true;
+            tBody = millis();
+            if (len <= 0) break;
+          } else {
+            String l = line;
+            l.toLowerCase();
+            if (l.startsWith("content-length:")) len = l.substring(15).toInt();
+            line = "";
+          }
+        } else if (ch != '\r') {
+          line += (char)ch;
+        }
+      } else {
+        int r = c.read(buf, (size_t)min((long)sizeof(buf), len - got));
+        if (r > 0) got += r;
+        if (got >= len) break;
+      }
+    }
+    uint32_t tEnd = millis();
+    if (n == 0) {
+      Serial.printf("[speed %s] empty response: first byte after %u ms\n", name, (unsigned)(tFirst ? tFirst - t1 : 0));
+    } else {
+      uint32_t bodyMs = tBody ? tEnd - tBody : 0;
+      Serial.printf("[speed %s] %ld of %ld bytes: first byte after %u ms, body %u ms = %.0f KB/s\n", name, got, len,
+                    (unsigned)(tFirst ? tFirst - t1 : 0), (unsigned)bodyMs, bodyMs ? got / 1.024 / bodyMs : 0.0);
+    }
+  }
+  c.stop();
+}
+
+void speedTest() {
+  Serial.println("[speed] link test (diagnostic)");
+  if (!connectForSync(false)) return;
+  {
+    WiFiClientSecure sc;
+    sc.setInsecure();
+    speedTestOne(sc, true);
+  }
+  {
+    WiFiClient pc;
+    speedTestOne(pc, false);
+  }
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
 [[noreturn]] void goToSleep() {
   waitForWriter();                     // the images must be on flash (and acked) before sleep wipes PSRAM
   if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
 
   saveSeenFlags();  // before a firmware update's reboot, too
+  if (cycleOk && speedTestPending) speedTest();
   if (cycleOk) updateBeforeSleep();
 
   // a button still held would wake us again at once

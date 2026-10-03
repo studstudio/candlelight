@@ -30,7 +30,7 @@ const int EPD_CS = D6;    // GPIO14
 GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
     GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-const uint32_t STILL_HOLD_MS = 5000;   // how long each image stays up during the automatic pass
+const uint32_t STILL_HOLD_MS = 1000;   // how long each image stays up during the automatic pass
 const int ANIM_LOOPS = 1;              // times an animation plays through before moving on
 
 const int MAX_IMAGES = 12;                // most images the device keeps at once
@@ -200,7 +200,8 @@ void checkForUpdate() {
   }
 }
 
-void syncQueue() {
+// returns how many new images were stored
+int syncQueue() {
   // 1. what's waiting, oldest first, with sentAt/sentGeo for each
   WiFiClientSecure queueClient;
   queueClient.setInsecure();  // prototype only
@@ -212,7 +213,7 @@ void syncQueue() {
   if (code != 200) {
     Serial.printf("Queue request failed: %d %s\n", code, http.errorToString(code).c_str());
     http.end();
-    return;
+    return 0;
   }
   String body = http.getString();
   http.end();
@@ -221,7 +222,7 @@ void syncQueue() {
   JsonDocument queueDoc;
   if (deserializeJson(queueDoc, body)) {
     Serial.println("Queue JSON parse failed");
-    return;
+    return 0;
   }
   JsonArray queue = queueDoc["items"].as<JsonArray>();
   Serial.printf("Queue: %u item(s) waiting\n", (unsigned)queue.size());
@@ -232,6 +233,7 @@ void syncQueue() {
   Serial.printf("Device: %u image(s) stored\n", (unsigned)stored.size());
 
   LittleFS.remove(TMP_PATH);  // leftover from an interrupted sync
+  int added = 0;
 
   // 2. pull each one in order. every item is committed on its own (download ->
   // evict oldest if full -> manifest -> ack), so a dropped connection mid-sync
@@ -286,6 +288,7 @@ void syncQueue() {
       break;
     }
 
+    added++;
     if (!ackItem(itemId)) Serial.println("  ack failed (will dedupe next sync)");
   }
 
@@ -295,6 +298,8 @@ void syncQueue() {
     Serial.printf("  %s\n", e["id"].as<const char*>());
     printSentInfo(e["sentAt"], e["geo"]);
   }
+  Serial.printf("Downloaded %d new image(s)\n", added);
+  return added;
 }
 
 // ---------- drawing ----------
@@ -314,8 +319,28 @@ bool pixelIsBlack(uint8_t code, uint8_t bpp, int x, int y) {
   }
 }
 
-// draws one packed frame; partial = fast refresh without the full-screen flash
-void drawFrame(const EpdImage& img, bool partial) {
+// small boxed number in the bottom-right corner (white box so it reads over any image)
+void drawBadge(int n) {
+  char txt[8];
+  snprintf(txt, sizeof(txt), "%d", n);
+  display.setTextSize(2);
+  display.setTextColor(GxEPD_BLACK);
+  int16_t bx, by;
+  uint16_t bw, bh;
+  display.getTextBounds(txt, 0, 0, &bx, &by, &bw, &bh);
+  const int pad = 5, margin = 6;
+  int w = bw + 2 * pad, h = bh + 2 * pad;
+  int x = display.width() - w - margin, y = display.height() - h - margin;
+  display.fillRect(x, y, w, h, GxEPD_WHITE);
+  display.drawRect(x, y, w, h, GxEPD_BLACK);
+  display.drawRect(x + 1, y + 1, w - 2, h - 2, GxEPD_BLACK);
+  display.setCursor(x + pad - bx, y + pad - by);
+  display.print(txt);
+}
+
+// draws one packed frame; partial = fast refresh without the full-screen flash.
+// badge > 0 also draws that number in the bottom-right corner
+void drawFrame(const EpdImage& img, bool partial, int badge = 0) {
   display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
   if (display.width() != img.w || display.height() != img.h) {
     Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
@@ -331,6 +356,7 @@ void drawFrame(const EpdImage& img, bool partial) {
         if (pixelIsBlack(epdPixel(frameBuf, img, x, y), img.bpp, x, y)) display.drawPixel(x, y, GxEPD_BLACK);
       }
     }
+    if (badge > 0) drawBadge(badge);
   } while (display.nextPage());
 }
 
@@ -340,7 +366,8 @@ volatile bool nextPressed = false;
 volatile bool syncRequested = false;
 
 // full = flashing full-screen refresh (clears ghosting); otherwise a fast partial one
-void showImage(const String& itemId, size_t num, size_t total, bool full) {
+// badge > 0 puts that number in the bottom-right corner (on an animation, its resting first frame)
+void showImage(const String& itemId, size_t num, size_t total, bool full, int badge = 0) {
   File f = LittleFS.open("/" + itemId, "r");
   EpdImage img;
   if (!f || !epdParse(f, img)) {
@@ -348,10 +375,11 @@ void showImage(const String& itemId, size_t num, size_t total, bool full) {
     if (f) f.close();
     return;
   }
-  Serial.printf("Image %u/%u: %s (%u frame(s))\n", (unsigned)num, (unsigned)total, itemId.c_str(), img.frames);
+  Serial.printf("Image %u/%u: %s (%u frame(s), %.1f KB)\n", (unsigned)num, (unsigned)total, itemId.c_str(),
+                img.frames, f.size() / 1024.0);
 
   if (img.frames == 1) {
-    if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, !full);
+    if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, !full, badge);
     f.close();
     return;
   }
@@ -369,8 +397,12 @@ void showImage(const String& itemId, size_t num, size_t total, bool full) {
       if (spent < img.intervalMs) delay(img.intervalMs - spent);
     }
   }
+  // come to rest on the first frame (with the badge, if any)
+  if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, true, badge);
   f.close();
 }
+
+int unseenCount = 0;  // images the last sync downloaded, shown as a badge once the lamp rests on the newest
 
 std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
 
@@ -523,7 +555,7 @@ void setup() {
 
   connectWiFi();
   checkForUpdate();
-  syncQueue();
+  unseenCount = syncQueue();
   loadStoredIds();
 }
 
@@ -553,7 +585,7 @@ void loop() {
     Serial.println("NEXT held: syncing with the worker");
     otaguard::clearBad();  // a manual sync retries a blocklisted firmware version too
     checkForUpdate();  // reboots into new firmware if there is one
-    syncQueue();
+    unseenCount = syncQueue();
     loadStoredIds();
     nextPressed = false;
     syncRequested = false;
@@ -573,12 +605,14 @@ void loop() {
   // partial refreshes all the way round; the full refresh happens when the
   // cycle comes back to the first image (and on the first draw after boot)
   if (otaguard::updatePending()) Serial.println("First run of a new firmware: proving the display path before keeping it");
-  showImage(storedIds[idx], idx + 1, total, idx == 0);
+  // the badge goes on the newest image once the automatic pass has come to rest on it
+  showImage(storedIds[idx], idx + 1, total, idx == 0, (!autoPass && idx == 0) ? unseenCount : 0);
   otaguard::markValid();  // booted, synced and drew an image: this firmware is good
 
   if (autoPass) {
     if (waitForNext(STILL_HOLD_MS)) {
       autoPass = false;
+      unseenCount = 0;  // they're looking through them now
       idx = (idx + 1) % total;
     } else if (idx + 1 < total) {
       idx++;
@@ -589,6 +623,7 @@ void loop() {
     }
   } else {
     waitForNext(0);
+    unseenCount = 0;
     idx = (idx + 1) % total;
   }
 }

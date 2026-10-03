@@ -7,6 +7,7 @@
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h>
 #include <vector>
+#include <memory>
 #include <WiFiManager.h>
 #include <esp_wifi.h>
 #include <esp_sleep.h>
@@ -62,7 +63,50 @@ String lampUrl(const String& rest) {
   return String(BASE_URL) + "/lamp/" + LAMP_ID + rest;
 }
 
+// Images received this wake stay in PSRAM until sleep, so they can be drawn at
+// once while the background writer (see syncBundle) is still putting them on flash
+struct MemImage { String id; uint8_t* data; size_t size; };
+std::vector<MemImage> memImages;
+
+const MemImage* findMemImage(const String& id) {
+  for (const MemImage& m : memImages) {
+    if (m.id == id) return &m;
+  }
+  return nullptr;
+}
+
+// reads an image held in memory through the same calls as a File, for epdParse/epdReadFrame
+struct MemFile {
+  const uint8_t* p;
+  size_t n;
+  size_t pos = 0;
+  MemFile(const uint8_t* data, size_t len) : p(data), n(len) {}
+  size_t size() const { return n; }
+  bool seek(uint32_t to) {
+    if (to > n) return false;
+    pos = to;
+    return true;
+  }
+  size_t read(uint8_t* buf, size_t len) {
+    len = min(len, n - pos);
+    memcpy(buf, p + pos, len);
+    pos += len;
+    return len;
+  }
+  void close() {}
+  explicit operator bool() const { return p != nullptr; }
+};
+
+// while the background writer runs, the manifest on flash is behind: the
+// up-to-date one is this copy in memory, and loadManifest() hands it out instead
+JsonDocument memManifest;
+volatile bool memManifestLive = false;
+
 bool loadManifest(JsonDocument& doc) {
+  if (memManifestLive) {
+    doc.set(memManifest);
+    return true;
+  }
   doc.to<JsonArray>();
   File f = LittleFS.open(MANIFEST_PATH, "r");
   if (!f) return true;  // first boot, nothing stored yet
@@ -131,10 +175,39 @@ bool downloadItem(const char* itemId, size_t expectedSize) {
 
 enum CommitResult { COMMIT_OK, COMMIT_INVALID, COMMIT_FAIL };
 
+// device holds MAX_IMAGES at most: the oldest image the user has already viewed
+// makes room for a new one (an unviewed one only if all are unviewed). Takes it
+// out of the manifest and returns its id ("" if there was room); the caller
+// removes the file
+String makeRoom(JsonArray stored) {
+  if ((int)stored.size() < MAX_IMAGES) return "";
+  size_t victim = 0;
+  for (size_t i = 0; i < stored.size(); i++) {
+    if (stored[i]["seen"] | true) { victim = i; break; }
+  }
+  String oldId = stored[victim]["id"] | "";
+  stored.remove(victim);
+  Serial.printf("  evicted: %s\n", oldId.c_str());
+  return oldId;
+}
+
+void addEntry(JsonArray stored, const char* itemId, JsonVariantConst sentAt, JsonVariantConst geo, const EpdImage& img) {
+  JsonObject entry = stored.add<JsonObject>();
+  entry["id"] = itemId;
+  entry["sentAt"] = sentAt;
+  entry["geo"] = geo;
+  entry["frames"] = img.frames;
+  entry["intervalMs"] = img.intervalMs;
+  entry["seen"] = false;  // not viewed with the button yet
+}
+
 // the image just written to TMP_PATH becomes a stored image: checks it, makes
-// room if the device is full, renames it into place and adds it to the manifest
+// room if the device is full, renames it into place and adds it to the manifest.
+// With `evicted` the caller saves the manifest once for a whole batch: evicted
+// files are only listed there, to be removed after that save, so a power cut
+// in between never leaves the manifest pointing at a missing file
 CommitResult commitTmpItem(JsonDocument& manifestDoc, JsonArray stored, const char* itemId, JsonVariantConst sentAt,
-                           JsonVariantConst geo) {
+                           JsonVariantConst geo, std::vector<String>* evicted = nullptr) {
   // make sure the e-ink chunks inside the PNG are intact before it takes a slot
   EpdImage img;
   File tf = LittleFS.open(TMP_PATH, "r");
@@ -148,27 +221,14 @@ CommitResult commitTmpItem(JsonDocument& manifestDoc, JsonArray stored, const ch
   }
   Serial.printf("  %ux%u, %u-bpp, %u frame(s)\n", img.w, img.h, img.bpp, img.frames);
 
-  // device holds MAX_IMAGES at most: the oldest image the user has already
-  // viewed makes room for this one (an unviewed one only if all are unviewed)
-  if ((int)stored.size() >= MAX_IMAGES) {
-    size_t victim = 0;
-    for (size_t i = 0; i < stored.size(); i++) {
-      if (stored[i]["seen"] | true) { victim = i; break; }
-    }
-    String oldId = stored[victim]["id"] | "";
-    LittleFS.remove("/" + oldId);
-    stored.remove(victim);
-    Serial.printf("  evicted: %s\n", oldId.c_str());
+  String oldId = makeRoom(stored);
+  if (oldId.length()) {
+    if (evicted) evicted->push_back(oldId);
+    else LittleFS.remove("/" + oldId);
   }
-
   LittleFS.rename(TMP_PATH, "/" + String(itemId));
-  JsonObject entry = stored.add<JsonObject>();
-  entry["id"] = itemId;
-  entry["sentAt"] = sentAt;
-  entry["geo"] = geo;
-  entry["frames"] = img.frames;
-  entry["intervalMs"] = img.intervalMs;
-  entry["seen"] = false;  // not viewed with the button yet
+  addEntry(stored, itemId, sentAt, geo, img);
+  if (evicted) return COMMIT_OK;  // the caller saves the manifest
   if (!saveManifest(manifestDoc)) {
     Serial.println("  manifest write failed");
     return COMMIT_FAIL;
@@ -469,6 +529,7 @@ bool ackOnClient(WiFiClientSecure& client, const std::vector<String>& ids) {
   HTTPClient http;
   http.setReuse(false);  // done with the connection after this
   http.setTimeout(10000);
+  Serial.printf("  ack: %s\n", client.connected() ? "reusing the sync connection" : "new connection (TLS handshake)");
   http.begin(client, lampUrl("/ack"));
   http.addHeader("Content-Type", "application/json");
   int code = http.POST(body);
@@ -483,15 +544,108 @@ bool ackItems(const std::vector<String>& ids) {
   return ackOnClient(client, ids);
 }
 
+// ---------- background flash writer ----------
+// After a sync that held everything in PSRAM, a task on the other core writes
+// the images to flash, saves the manifest once, removes evicted files, acks and
+// turns WiFi off, while the main task is already drawing from PSRAM. Nothing is
+// acked before the manifest is on flash, so a power cut still loses nothing:
+// the worker just sends the images again.
+
+// the sync's connection, kept open on the heap so the writer can ack on it.
+// HTTPClient stops its client when destroyed, hence both live together
+// (members are destroyed in reverse order: http first, then client)
+struct SyncConn {
+  WiFiClientSecure client;
+  HTTPClient http;
+};
+
+struct WriteJob {
+  std::vector<MemImage> images;  // the data stays owned by memImages
+  JsonDocument manifest;         // what the manifest on flash should become
+  std::vector<String> evicted;   // files to remove once the manifest is saved
+  std::vector<String> ackAlways; // already stored or unusable: acked whatever happens
+  std::vector<String> ackNew;    // acked only once they are safely on flash
+  SyncConn* conn;
+};
+
+volatile bool writerBusy = false;
+
+void runWriteJob(WriteJob* job) {
+  uint32_t t0 = millis();
+  bool ok = true;
+  for (const MemImage& m : job->images) {
+    uint32_t t = millis();
+    // straight to its final name: until the manifest lists it, a half-written
+    // file is just an orphan that the next download of it overwrites
+    File f = LittleFS.open("/" + m.id, "w");
+    bool written = f && f.write(m.data, m.size) == m.size;  // one call: LittleFS writes whole blocks
+    if (f) f.close();
+    Serial.printf("[writer] %s: %u ms (%.1f KB)\n", m.id.c_str(), (unsigned)(millis() - t), m.size / 1024.0);
+    if (!written) {
+      ok = false;
+      break;
+    }
+  }
+  if (ok) ok = saveManifest(job->manifest);
+  if (ok) {
+    for (const String& id : job->evicted) LittleFS.remove("/" + id);
+  } else {
+    // the manifest on flash stays as it was, and unacked, the images come again
+    // next sync. What is on screen now is still drawn from PSRAM
+    Serial.println("[writer] flash write FAILED, the new images will be downloaded again");
+  }
+  memManifestLive = false;  // either way the manifest on flash is the truth again
+  Serial.printf("[writer] flash done in %u ms (%u ms since wake)\n", (unsigned)(millis() - t0), (unsigned)millis());
+
+  std::vector<String> ids = job->ackAlways;
+  if (ok) ids.insert(ids.end(), job->ackNew.begin(), job->ackNew.end());
+  if (!ids.empty()) {
+    uint32_t tAck = millis();
+    bool acked = ackOnClient(job->conn->client, ids);
+    if (!acked) acked = ackItems(ids);
+    Serial.printf("[writer] ack of %u item(s) %s in %u ms\n", (unsigned)ids.size(), acked ? "done" : "FAILED (will dedupe next sync)",
+                  (unsigned)(millis() - tAck));
+  }
+  delete job->conn;
+  delete job;
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  Serial.printf("[writer] finished, WiFi off (%u ms since wake)\n", (unsigned)millis());
+  writerBusy = false;
+}
+
+void writerTask(void* arg) {
+  runWriteJob((WriteJob*)arg);
+  vTaskDelete(nullptr);
+}
+
+// anything that touches the manifest on flash (a new sync, saving seen flags,
+// sleeping) waits for the writer first
+void waitForWriter() {
+  if (!writerBusy) return;
+  uint32_t t0 = millis();
+  while (writerBusy) {
+    otaguard::tick();
+    delay(10);
+  }
+  Serial.printf("Waited %u ms for the background flash write\n", (unsigned)(millis() - t0));
+}
+
 // downloads everything waiting in a single response. added = images stored
+// (with PSRAM: drawable now, and on their way to flash in the background)
 SyncResult syncBundle(int& added) {
   added = 0;
-  WiFiClientSecure client;
+  std::unique_ptr<SyncConn> conn(new SyncConn);
+  WiFiClientSecure& client = conn->client;
+  HTTPClient& http = conn->http;
   client.setInsecure();  // prototype only
-  HTTPClient http;
   http.setReuse(true);  // keep the connection open afterwards for the ack
   http.setTimeout(10000);
   uint32_t tStart = millis();
+  // the TLS handshake on its own first (HTTPClient then uses the open
+  // connection), so the log tells it apart from the worker's own time
+  String host = String(BASE_URL).substring(8);  // after "https://"
+  if (client.connect(host.c_str(), 443)) Serial.printf("TLS handshake %u ms\n", (unsigned)(millis() - tStart));
   http.begin(client, lampUrl("/sync"));
   int code = http.GET();
   if (code != 200) {
@@ -523,34 +677,36 @@ SyncResult syncBundle(int& added) {
   std::vector<String> toAck;  // everything we're finished with, stored or not
   SyncResult result = SYNC_OK;
 
-  // With PSRAM the images are first received into memory at network speed and
-  // only written to flash once the stream is done. Written while receiving,
-  // every 4 KB flash erase (~45 ms, flash cache off, so the WiFi/TCP code mostly
-  // stalls too) also stalls the download, and the server backs off. Without
-  // PSRAM, or when it is full, an image is streamed straight to flash as before
+  // With PSRAM the images are received into memory at network speed. Written
+  // while receiving, every 4 KB flash erase (~45 ms, flash cache off, so the
+  // WiFi/TCP code mostly stalls too) also stalled the download. Without PSRAM,
+  // or when it is full, an image is streamed straight to flash as before
   struct Held { String id; uint8_t* data; size_t size; JsonDocument meta; };
   std::vector<Held> held;
   bool tank = psramFound();
   uint32_t netMs = 0, flashMs = 0;
-  // writes the held images to flash (oldest first, like the stream), commits and frees them
+  // the synchronous way (PSRAM full mid-stream, or the stream broke off): writes
+  // the held images to flash now, commits them with a single manifest save, and frees them
   auto flushHeld = [&]() -> bool {
     bool ok = true;
+    std::vector<String> evicted, done;
+    int batchAdded = 0;
     for (Held& h : held) {
       if (ok) {
         uint32_t t0 = millis();
         File f = LittleFS.open(TMP_PATH, "w");
-        bool written = f && f.write(h.data, h.size) == h.size;  // one call: LittleFS writes whole blocks
+        bool written = f && f.write(h.data, h.size) == h.size;
         if (f) f.close();
         uint32_t tWritten = millis();
-        CommitResult cr = written ? commitTmpItem(manifestDoc, stored, h.id.c_str(), h.meta["sentAt"], h.meta["sentGeo"])
+        CommitResult cr = written ? commitTmpItem(manifestDoc, stored, h.id.c_str(), h.meta["sentAt"], h.meta["sentGeo"], &evicted)
                                   : COMMIT_FAIL;
         if (cr == COMMIT_FAIL) {
           Serial.printf("- %s: flash write failed\n", h.id.c_str());
           LittleFS.remove(TMP_PATH);
           ok = false;
         } else {
-          if (cr == COMMIT_OK) added++;
-          toAck.push_back(h.id);
+          if (cr == COMMIT_OK) batchAdded++;
+          done.push_back(h.id);
           Serial.printf("- %s: flash write %u ms (%.1f KB), validate+store %u ms\n", h.id.c_str(), (unsigned)(tWritten - t0),
                         h.size / 1024.0, (unsigned)(millis() - tWritten));
         }
@@ -559,6 +715,22 @@ SyncResult syncBundle(int& added) {
       free(h.data);
     }
     held.clear();
+    // what was stored only counts (and is acked) once the manifest lists it.
+    // Renamed files a failed save leaves behind are overwritten when they come again
+    uint32_t t0 = millis();
+    if (done.empty() || saveManifest(manifestDoc)) {
+      for (const String& id : evicted) LittleFS.remove("/" + id);
+      added += batchAdded;
+      toAck.insert(toAck.end(), done.begin(), done.end());
+      Serial.printf("Manifest saved once for %u image(s), %u evicted, in %u ms\n", (unsigned)done.size(),
+                    (unsigned)evicted.size(), (unsigned)(millis() - t0));
+    } else {
+      Serial.println("  manifest write failed");
+      loadManifest(manifestDoc);  // back to what is really on flash
+      stored = manifestDoc.as<JsonArray>();
+      ok = false;
+    }
+    flashMs += millis() - t0;
     return ok;
   };
 
@@ -627,13 +799,54 @@ SyncResult syncBundle(int& added) {
     netMs += itemNetMs;
     flashMs += millis() - tItem - itemNetMs;
   }
+  http.end();  // the connection stays open for the ack
+
+  if (!held.empty() && result == SYNC_OK) {
+    // the fast way: check and list the held images in memory (no flash), hand
+    // the flash work and the ack to the writer task, and return so drawing can start
+    WriteJob* job = new WriteJob;
+    std::vector<String> evicted;
+    for (Held& h : held) {
+      MemFile mf(h.data, h.size);
+      EpdImage img;
+      if (!epdParse(mf, img)) {
+        // can never be shown, and leaving it queued would block everything behind it
+        Serial.printf("- %s: no valid epRb/epRa payload, discarding\n", h.id.c_str());
+        free(h.data);
+        job->ackAlways.push_back(h.id);
+        continue;
+      }
+      String oldId = makeRoom(stored);
+      if (oldId.length()) job->evicted.push_back(oldId);
+      addEntry(stored, h.id.c_str(), h.meta["sentAt"], h.meta["sentGeo"], img);
+      memImages.push_back({h.id, h.data, h.size});
+      job->images.push_back(memImages.back());
+      job->ackNew.push_back(h.id);
+      added++;
+    }
+    held.clear();
+    job->ackAlways.insert(job->ackAlways.end(), toAck.begin(), toAck.end());
+    job->manifest.set(manifestDoc);
+    memManifest.set(manifestDoc);
+    memManifestLive = true;
+    job->conn = conn.release();
+    writerBusy = true;
+    // core 0 (WiFi's core), below WiFi's priority; the stack fits a fresh TLS handshake if the ack needs one
+    if (xTaskCreatePinnedToCore(writerTask, "writer", 16384, job, 1, nullptr, 0) != pdPASS) {
+      Serial.println("Couldn't start the background writer, writing now");
+      runWriteJob(job);
+    }
+    Serial.printf("Sync phases: network %u ms; %d image(s) drawable from PSRAM now, flash and ack in the background\n",
+                  (unsigned)netMs, added);
+    return SYNC_OK;
+  }
+
   // the stream is done (or broke off): whatever arrived whole is still stored and acked
   if (!held.empty()) {
     Serial.printf("Received %u image(s) into PSRAM, writing to flash\n", (unsigned)held.size());
     if (!flushHeld()) result = SYNC_PARTIAL;
   }
   Serial.printf("Sync phases: network %u ms, flash %u ms%s\n", (unsigned)netMs, (unsigned)flashMs, tank ? "" : " (no PSRAM)");
-  http.end();
 
   if (!toAck.empty()) {
     uint32_t tAck = millis();
@@ -836,17 +1049,18 @@ void printAnimTiming(const std::vector<FrameTiming>& t, uint16_t targetMs, bool 
   }
 }
 
-// badge > 0 draws that number bottom-left (on an animation, on its resting first frame)
-void showImage(const String& itemId, size_t num, size_t total, bool full, int badge = 0) {
-  File f = LittleFS.open("/" + itemId, "r");
+// badge > 0 draws that number bottom-left (on an animation, on its resting first frame).
+// F is a File, or a MemFile for an image still held in PSRAM
+template <class F>
+void showImageFrom(F& f, const char* from, const String& itemId, size_t num, size_t total, bool full, int badge) {
   EpdImage img;
   if (!f || !epdParse(f, img)) {
     Serial.printf("Can't open %s\n", itemId.c_str());
     if (f) f.close();
     return;
   }
-  Serial.printf("Image %u/%u: %s (%u frame(s), %.1f KB)\n", (unsigned)num, (unsigned)total, itemId.c_str(),
-                img.frames, f.size() / 1024.0);
+  Serial.printf("Image %u/%u: %s (%u frame(s), %.1f KB, from %s)\n", (unsigned)num, (unsigned)total, itemId.c_str(),
+                img.frames, f.size() / 1024.0, from);
 
   if (img.frames == 1) {
     if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, !full, badge);
@@ -887,6 +1101,16 @@ void showImage(const String& itemId, size_t num, size_t total, bool full, int ba
   Serial.printf("  rest frame drawn in %u ms (build %u + panel %u)\n", (unsigned)(millis() - restStart), (unsigned)lastBuildMs,
                 (unsigned)lastPanelMs);
   f.close();
+}
+
+void showImage(const String& itemId, size_t num, size_t total, bool full, int badge = 0) {
+  if (const MemImage* m = findMemImage(itemId)) {
+    MemFile mf(m->data, m->size);
+    showImageFrom(mf, "PSRAM", itemId, num, total, full, badge);
+    return;
+  }
+  File f = LittleFS.open("/" + itemId, "r");
+  showImageFrom(f, "flash", itemId, num, total, full, badge);
 }
 
 std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
@@ -933,6 +1157,7 @@ void markSeen(int idx) {
 // sync, which rewrites the manifest)
 void saveSeenFlags() {
   if (!seenDirty) return;
+  waitForWriter();  // the manifest on flash is the writer's until it is done
   JsonDocument doc;
   loadManifest(doc);
   for (JsonObject e : doc.as<JsonArray>()) {
@@ -1196,10 +1421,16 @@ bool connectForSync(bool portalIfUnconfigured) {
   return false;
 }
 
-// connects, downloads new images, installs a newer firmware if the worker
-// reported one, then turns WiFi off. False if it couldn't get online
+// connects and downloads new images, then turns WiFi off (the background
+// writer does that, after its ack, when it is still storing them). A newer
+// firmware the worker reported is installed only at the end of the wake (see
+// updateBeforeSleep), so nobody waits for it. False if it couldn't get online
 bool doSync(bool portalIfUnconfigured, int& added) {
   added = 0;
+  waitForWriter();  // an earlier sync this wake may still be storing
+  // its images are on flash now: their PSRAM copies make room for this sync's
+  for (MemImage& m : memImages) free(m.data);
+  memImages.clear();
   if (!connectForSync(portalIfUnconfigured)) return false;
   cycleOk = true;
   saveSeenFlags();  // the sync rewrites the manifest from flash, so save our changes first
@@ -1210,10 +1441,25 @@ bool doSync(bool portalIfUnconfigured, int& added) {
     added += syncQueue();
   }
   Serial.printf("Sync took %u ms (%u ms since wake)\n", (unsigned)(millis() - tSync), (unsigned)millis());
-  updateFirmwareIfNeeded();  // reboots into the new firmware if there is one
+  if (!writerBusy) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+  return true;
+}
+
+// the last thing a wake does, after the images were shown and the button window
+// closed: installs the newer firmware a sync reported this wake (reconnecting,
+// which with the cached access point takes ~0.1 s). Reboots into it if installed
+void updateBeforeSleep() {
+  if (workerFwVersion.isEmpty()) return;  // no sync reached the worker this wake
+  if (workerFwVersion != FW_VERSION && !otaguard::isBad(workerFwVersion)) {
+    Serial.println("Firmware update waiting: reconnecting to install it");
+    if (!connectForSync(false)) return;  // retried at the next sync
+  }
+  updateFirmwareIfNeeded();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
-  return true;
 }
 
 // draws image idx (newest-first). The first image gets the full refresh, and
@@ -1267,10 +1513,16 @@ void quickPass() {
 // spot without the picture, so the picture is re-read and drawn again
 void redrawCurrent(bool syncBadge) {
   if (storedIds.empty()) return;
-  File f = LittleFS.open("/" + storedIds[rtcViewIdx], "r");
   EpdImage img;
-  bool ok = f && epdParse(f, img) && epdReadFrame(f, img, 0, frameBuf);
-  if (f) f.close();
+  bool ok;
+  if (const MemImage* m = findMemImage(storedIds[rtcViewIdx])) {
+    MemFile mf(m->data, m->size);
+    ok = epdParse(mf, img) && epdReadFrame(mf, img, 0, frameBuf);
+  } else {
+    File f = LittleFS.open("/" + storedIds[rtcViewIdx], "r");
+    ok = f && epdParse(f, img) && epdReadFrame(f, img, 0, frameBuf);
+    if (f) f.close();
+  }
   if (ok) drawFrame(img, true, rtcViewIdx == 0 ? badgeCount() : 0, syncBadge);
 }
 
@@ -1359,10 +1611,12 @@ void idleWindow() {
 }
 
 [[noreturn]] void goToSleep() {
+  waitForWriter();                     // the images must be on flash (and acked) before sleep wipes PSRAM
   if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
 
-  saveSeenFlags();
+  saveSeenFlags();  // before a firmware update's reboot, too
+  if (cycleOk) updateBeforeSleep();
 
   // a button still held would wake us again at once
   uint32_t t0 = millis();

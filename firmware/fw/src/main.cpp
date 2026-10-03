@@ -65,6 +65,54 @@ String lampUrl(const String& rest) {
   return String(BASE_URL) + "/lamp/" + LAMP_ID + rest;
 }
 
+String workerHost() {
+  return String(BASE_URL).substring(8);  // after "https://"
+}
+
+// Our own minimal HTTP/1.1 request on an open connection: sends the request in
+// one write, then reads the status line and headers. Returns the status code
+// (0 on failure); contentLength gets the body length (-1 if not given). The
+// body is left on the connection for the caller. The Arduino HTTPClient took
+// ~1.5 s per request (5 s for an ack) on this lamp, where a raw request gets
+// its first byte back in ~50 ms (measured by the link test)
+int rawRequest(Client& c, const char* method, const String& path, const String& body, long& contentLength,
+               uint32_t timeoutMs = 10000) {
+  String req = String(method) + " " + path + " HTTP/1.1\r\nHost: " + workerHost() + "\r\nConnection: keep-alive\r\n";
+  if (body.length()) req += "Content-Type: application/json\r\nContent-Length: " + String(body.length()) + "\r\n";
+  req += "\r\n" + body;
+  if (c.write((const uint8_t*)req.c_str(), req.length()) != req.length()) return 0;
+  int code = 0;
+  bool statusLine = true;
+  contentLength = -1;
+  String line;
+  uint32_t last = millis();
+  while (millis() - last < timeoutMs) {
+    int ch = c.read();
+    if (ch < 0) {
+      if (!c.connected()) return 0;
+      delay(1);
+      continue;
+    }
+    last = millis();
+    if (ch != '\n') {
+      if (ch != '\r') line += (char)ch;
+      continue;
+    }
+    if (statusLine) {  // "HTTP/1.1 200 OK"
+      int sp = line.indexOf(' ');
+      code = sp > 0 ? line.substring(sp + 1).toInt() : 0;
+      statusLine = false;
+    } else if (!line.length()) {
+      return code;  // blank line: the headers are done
+    } else {
+      line.toLowerCase();
+      if (line.startsWith("content-length:")) contentLength = line.substring(15).toInt();
+    }
+    line = "";
+  }
+  return 0;
+}
+
 // Images received this wake stay in PSRAM until sleep, so they can be drawn at
 // once while the background writer (see syncBundle) is still putting them on flash
 struct MemImage { String id; uint8_t* data; size_t size; };
@@ -573,14 +621,15 @@ bool ackOnClient(WiFiClientSecure& client, const std::vector<String>& ids) {
   for (const String& id : ids) arr.add(id);
   String body;
   serializeJson(doc, body);
-  HTTPClient http;
-  http.setReuse(false);  // done with the connection after this
-  http.setTimeout(10000);
-  Serial.printf("  ack: %s\n", client.connected() ? "reusing the sync connection" : "new connection (TLS handshake)");
-  http.begin(client, lampUrl("/ack"));
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(body);
-  http.end();
+  if (client.connected()) {
+    Serial.println("  ack: reusing the sync connection");
+  } else {
+    Serial.println("  ack: new connection (TLS handshake)");
+    if (!client.connect(workerHost().c_str(), 443)) return false;
+  }
+  long len;
+  int code = rawRequest(client, "POST", String("/lamp/") + LAMP_ID + "/ack", body, len);
+  client.stop();  // done with the connection
   return code == 200;
 }
 
@@ -598,12 +647,9 @@ bool ackItems(const std::vector<String>& ids) {
 // acked before the manifest is on flash, so a power cut still loses nothing:
 // the worker just sends the images again.
 
-// the sync's connection, kept open on the heap so the writer can ack on it.
-// HTTPClient stops its client when destroyed, hence both live together
-// (members are destroyed in reverse order: http first, then client)
+// the sync's connection, kept open on the heap so the writer can ack on it
 struct SyncConn {
   WiFiClientSecure client;
-  HTTPClient http;
 };
 
 struct WriteJob {
@@ -684,33 +730,29 @@ SyncResult syncBundle(int& added) {
   added = 0;
   std::unique_ptr<SyncConn> conn(new SyncConn);
   WiFiClientSecure& client = conn->client;
-  HTTPClient& http = conn->http;
   client.setInsecure();  // prototype only
-  http.setReuse(true);  // keep the connection open afterwards for the ack
-  http.setTimeout(10000);
   uint32_t tStart = millis();
-  // the TLS handshake on its own first (HTTPClient then uses the open
-  // connection), so the log tells it apart from the worker's own time
-  String host = String(BASE_URL).substring(8);  // after "https://"
-  if (client.connect(host.c_str(), 443)) Serial.printf("TLS handshake %u ms\n", (unsigned)(millis() - tStart));
+  if (!client.connect(workerHost().c_str(), 443)) {
+    Serial.println("Bundle sync: couldn't connect");
+    return SYNC_FALLBACK;
+  }
+  Serial.printf("TLS handshake %u ms\n", (unsigned)(millis() - tStart));
   bool tank = psramFound();
-  http.begin(client, lampUrl("/sync"));
   uint32_t tGet = millis();
-  int code = http.GET();
+  long bodyLen;
+  int code = rawRequest(client, "GET", String("/lamp/") + LAMP_ID + "/sync", "", bodyLen);
   Serial.printf("Request to response headers %u ms (WiFi signal %d dBm)\n", (unsigned)(millis() - tGet), (int)WiFi.RSSI());
   if (code != 200) {
     Serial.printf("Bundle sync: HTTP %d\n", code);
-    http.end();
     return SYNC_FALLBACK;
   }
-  WiFiClient* stream = http.getStreamPtr();
+  WiFiClient* stream = &client;
   uint32_t deadline = millis() + BUNDLE_BUDGET_MS;
 
   String line;
   JsonDocument head;
   if (!readLineFrom(stream, line) || deserializeJson(head, line) || (head["v"] | 0) != 1) {
     Serial.println("Bundle sync: unreadable header");
-    http.end();
     return SYNC_FALLBACK;
   }
   workerFwVersion = head["firmware"]["version"] | "";
@@ -867,7 +909,8 @@ SyncResult syncBundle(int& added) {
     netMs += itemNetMs;
     flashMs += millis() - tItem - itemNetMs;
   }
-  http.end();  // the connection stays open for the ack
+  // a sync that broke off may have left unread bytes: its ack goes on a new connection
+  if (result != SYNC_OK) client.stop();
   passMoreComing = false;
 
   if (!held.empty() && result == SYNC_OK) {

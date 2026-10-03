@@ -8,6 +8,7 @@
 #include <GxEPD2_BW.h>
 #include <vector>
 #include <memory>
+#include <algorithm>
 #include <WiFiManager.h>
 #include <esp_wifi.h>
 #include <esp_sleep.h>
@@ -119,10 +120,27 @@ bool loadManifest(JsonDocument& doc) {
   return true;
 }
 
+// the manifest is kept oldest first. Ids start with the send time in ms (same
+// number of digits), so sorting by id sorts by time, whatever order a sync
+// delivered the images in. out gets the sorted copy; doc itself is left alone
+// (callers hold JsonArray references into it)
+void sortedManifest(JsonDocument& doc, JsonDocument& out) {
+  JsonArray arr = doc.as<JsonArray>();
+  std::vector<std::pair<String, JsonObject>> order;
+  for (JsonObject e : arr) order.push_back({e["id"].as<String>(), e});
+  std::sort(order.begin(), order.end(), [](const std::pair<String, JsonObject>& a, const std::pair<String, JsonObject>& b) {
+    return a.first < b.first;
+  });
+  JsonArray o = out.to<JsonArray>();
+  for (auto& p : order) o.add(p.second);
+}
+
 bool saveManifest(JsonDocument& doc) {
+  JsonDocument sorted;
+  sortedManifest(doc, sorted);
   File f = LittleFS.open(MANIFEST_PATH, "w");
   if (!f) return false;
-  serializeJson(doc, f);
+  serializeJson(sorted, f);
   f.close();
   return true;
 }
@@ -483,6 +501,28 @@ bool readLineFrom(WiFiClient* s, String& out) {
   return false;
 }
 
+std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
+
+std::vector<bool> storedAnimated;  // same order as storedIds
+std::vector<bool> storedSeen;      // viewed with the button (an image only drawn by the quick pass doesn't count)
+bool seenDirty = false;            // storedSeen changed and isn't in the manifest yet
+
+// ---------- the quick pass, played while the sync downloads ----------
+// After a sync the lamp shows every unseen image, OLDEST first, ending on the
+// newest (image 1). New images also arrive oldest first, so each one is drawn
+// as soon as it is in: the pass plays during the download instead of after it.
+// passQueue holds the ids still to draw; passTick() (called from the download
+// loop) draws the next once the one on screen has been up STILL_HOLD_MS. The
+// last one waiting when nothing more is coming is held back: quickPass() puts
+// the newest up as the resting image (full refresh, badge)
+std::vector<String> passQueue;
+bool passRunning = false;     // a pass is playing
+bool passStreamed = false;    // this sync already played the pass: quickPass() only finishes it
+bool passMoreComing = false;  // the sync still has images to deliver
+int passDrawn = 0;
+uint32_t passLastDraw = 0;
+void passTick();
+
 uint32_t copyFlashUs = 0;  // time spent inside File::write by copyBytes (flash erase + program), to tell flash from network
 
 // copies the next n bytes of the response into mem (if given) or f, or throws them away if both are null
@@ -491,6 +531,7 @@ bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline, uint8_t* mem
   uint32_t last = millis();
   while (n > 0) {
     otaguard::tick();
+    passTick();  // the next image of the pass goes up while this one downloads
     if (millis() > deadline || millis() - last > BUNDLE_STALL_MS) return false;
     int avail = s->available();
     if (!avail) {
@@ -635,6 +676,7 @@ void waitForWriter() {
 // (with PSRAM: drawable now, and on their way to flash in the background)
 SyncResult syncBundle(int& added) {
   added = 0;
+  passStreamed = false;
   std::unique_ptr<SyncConn> conn(new SyncConn);
   WiFiClientSecure& client = conn->client;
   HTTPClient& http = conn->http;
@@ -646,8 +688,11 @@ SyncResult syncBundle(int& added) {
   // connection), so the log tells it apart from the worker's own time
   String host = String(BASE_URL).substring(8);  // after "https://"
   if (client.connect(host.c_str(), 443)) Serial.printf("TLS handshake %u ms\n", (unsigned)(millis() - tStart));
+  bool tank = psramFound();
   http.begin(client, lampUrl("/sync"));
+  uint32_t tGet = millis();
   int code = http.GET();
+  Serial.printf("Request to response headers %u ms (WiFi signal %d dBm)\n", (unsigned)(millis() - tGet), (int)WiFi.RSSI());
   if (code != 200) {
     Serial.printf("Bundle sync: HTTP %d\n", code);
     http.end();
@@ -667,6 +712,17 @@ SyncResult syncBundle(int& added) {
   workerFwSize = head["firmware"]["size"] | 0;
   int count = head["count"] | 0;
   Serial.printf("Bundle: %d item(s) waiting (header after %u ms)\n", count, (unsigned)(millis() - tStart));
+  if (count > 0) {
+    // the pass starts with unseen images from earlier syncs (oldest first, not the
+    // current newest: that one rests at the end only if nothing new arrives)
+    passQueue.clear();
+    for (int i = (int)storedIds.size() - 1; i >= 1; i--) {
+      if (!storedSeen[i]) passQueue.push_back(storedIds[i]);
+    }
+    passRunning = passStreamed = true;
+    passMoreComing = true;
+    passDrawn = 0;
+  }
 
   JsonDocument manifestDoc;
   loadManifest(manifestDoc);
@@ -682,8 +738,7 @@ SyncResult syncBundle(int& added) {
   // WiFi/TCP code mostly stalls too) also stalled the download. Without PSRAM,
   // or when it is full, an image is streamed straight to flash as before
   struct Held { String id; uint8_t* data; size_t size; JsonDocument meta; };
-  std::vector<Held> held;
-  bool tank = psramFound();
+  std::vector<Held> held;  // oldest first, as they arrive
   uint32_t netMs = 0, flashMs = 0;
   // the synchronous way (PSRAM full mid-stream, or the stream broke off): writes
   // the held images to flash now, commits them with a single manifest save, and frees them
@@ -711,6 +766,12 @@ SyncResult syncBundle(int& added) {
                         h.size / 1024.0, (unsigned)(millis() - tWritten));
         }
         flashMs += millis() - t0;
+      }
+      for (size_t i = 0; i < memImages.size(); i++) {  // from now on it is drawn from flash
+        if (memImages[i].data == h.data) {
+          memImages.erase(memImages.begin() + i);
+          break;
+        }
       }
       free(h.data);
     }
@@ -766,6 +827,14 @@ SyncResult syncBundle(int& added) {
       Serial.printf("  received into PSRAM: %u ms (%.1f KB, %.0f KB/s)\n", (unsigned)ms, size / 1024.0,
                     ms ? size / 1.024 / ms : 0.0);
       held.push_back({itemId, mem, size, std::move(item)});
+      MemFile mf(mem, size);
+      EpdImage img;
+      if (epdParse(mf, img)) {  // an unusable one is discarded after the stream
+        memImages.push_back({itemId, mem, size});
+        passQueue.push_back(itemId);
+      }
+      passMoreComing = k + 1 < count;
+      passTick();
       continue;
     }
     // PSRAM missing or full: what is held goes to flash first, so images stay in arrival order
@@ -788,8 +857,12 @@ SyncResult syncBundle(int& added) {
     }
     CommitResult cr = commitTmpItem(manifestDoc, stored, itemId.c_str(), item["sentAt"], item["sentGeo"]);
     if (cr == COMMIT_FAIL) { result = SYNC_PARTIAL; break; }
-    if (cr == COMMIT_OK) added++;
+    if (cr == COMMIT_OK) {
+      added++;
+      passQueue.push_back(itemId);
+    }
     toAck.push_back(itemId);  // stored, or unusable: either way it's done with
+    passMoreComing = k + 1 < count;
     uint32_t dl = tDownloaded - tItem;
     double kb = size / 1024.0;
     uint32_t itemFlashMs = copyFlashUs / 1000;
@@ -800,12 +873,12 @@ SyncResult syncBundle(int& added) {
     flashMs += millis() - tItem - itemNetMs;
   }
   http.end();  // the connection stays open for the ack
+  passMoreComing = false;
 
   if (!held.empty() && result == SYNC_OK) {
     // the fast way: check and list the held images in memory (no flash), hand
     // the flash work and the ack to the writer task, and return so drawing can start
     WriteJob* job = new WriteJob;
-    std::vector<String> evicted;
     for (Held& h : held) {
       MemFile mf(h.data, h.size);
       EpdImage img;
@@ -819,15 +892,14 @@ SyncResult syncBundle(int& added) {
       String oldId = makeRoom(stored);
       if (oldId.length()) job->evicted.push_back(oldId);
       addEntry(stored, h.id.c_str(), h.meta["sentAt"], h.meta["sentGeo"], img);
-      memImages.push_back({h.id, h.data, h.size});
-      job->images.push_back(memImages.back());
+      job->images.push_back({h.id, h.data, h.size});
       job->ackNew.push_back(h.id);
       added++;
     }
     held.clear();
     job->ackAlways.insert(job->ackAlways.end(), toAck.begin(), toAck.end());
     job->manifest.set(manifestDoc);
-    memManifest.set(manifestDoc);
+    sortedManifest(manifestDoc, memManifest);
     memManifestLive = true;
     job->conn = conn.release();
     writerBusy = true;
@@ -1137,11 +1209,6 @@ void showImage(const String& itemId, size_t num, size_t total, bool full, int ba
   showImageFrom(f, "flash", itemId, num, total, full, badge);
 }
 
-std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
-
-std::vector<bool> storedAnimated;  // same order as storedIds
-std::vector<bool> storedSeen;      // viewed with the button (an image only drawn by the quick pass doesn't count)
-bool seenDirty = false;            // storedSeen changed and isn't in the manifest yet
 
 void loadStoredIds() {
   storedIds.clear();
@@ -1159,14 +1226,6 @@ void loadStoredIds() {
 int countUnseen() {
   int n = 0;
   for (bool seen : storedSeen) n += !seen;
-  return n;
-}
-
-// the badge number on image idx: unseen images other than the one on screen
-// (so 4 new images show a 3 on image 1, then 2, 1 and none as NEXT steps through them)
-int badgeFor(int idx) {
-  int n = 0;
-  for (int i = 0; i < (int)storedSeen.size(); i++) n += i != idx && !storedSeen[i];
   return n;
 }
 
@@ -1348,6 +1407,7 @@ void connectWiFi() {
 
 RTC_DATA_ATTR int rtcViewIdx = 0;     // image on screen, in newest-first order
 RTC_DATA_ATTR bool rtcInTour = false; // NEXT is stepping through the unseen images (ends by wrapping to image 1)
+RTC_DATA_ATTR int rtcBadge = 0;       // the number on the image on screen (redraws and replays show it again)
 // what the last successful connect looked like, so the next wake can skip the channel scan and DHCP
 RTC_DATA_ATTR uint8_t rtcWifiChannel = 0;  // 0 = nothing cached
 RTC_DATA_ATTR uint8_t rtcBssid[6];
@@ -1506,41 +1566,79 @@ void drawIndex(int idx, int badge, bool full) {
   }
   showImage(storedIds[idx], idx + 1, storedIds.size(), full, badge);
   rtcViewIdx = idx;
+  rtcBadge = badge;
+  cycleOk = true;
+}
+
+// draws the next image of the pass if it is due (see passQueue). A press of
+// the button ends the pass: the lamp goes straight to image 1 instead
+void passTick() {
+  if (!passRunning || passQueue.empty()) return;
+  if (nextPressed || replayRequested || syncRequested) {
+    passRunning = false;
+    nextPressed = replayRequested = false;  // the press meant "skip the pass", not also "step"
+    Serial.println("Pass stopped by the button");
+    return;
+  }
+  if (passQueue.size() == 1 && !passMoreComing) return;  // the last one: it rests, drawn by quickPass()
+  if (passDrawn > 0 && millis() - passLastDraw < STILL_HOLD_MS) return;
+  String id = passQueue.front();
+  passQueue.erase(passQueue.begin());
+  if (passDrawn == 0) Serial.printf("First draw starts %u ms after wake\n", (unsigned)millis());
+  showImage(id, ++passDrawn, 0, false);  // fast partial refresh, no badge
+  passLastDraw = millis();               // the hold counts from when it is fully up
   cycleOk = true;
 }
 
 void stepNext();
 
 // quick pass through the UNSEEN images only (never viewed with the button),
-// newest to oldest, then rest on the newest with the unseen-count badge. Images
-// already viewed are skipped but stay reachable with the button; unviewed ones
-// from earlier syncs are included, so nothing gets buried while nobody's home.
-// A button press steps on and ends the pass; a sync request ends it too and is
-// left for the caller. With nothing unseen it just draws the newest image once
+// OLDEST first, ending on the newest (image 1), which rests with the full
+// refresh and the badge. After a sync most of it has already played during the
+// download (passStreamed); this plays what is left. Images already viewed are
+// skipped but stay reachable with the button; unviewed ones from earlier syncs
+// are included, so nothing gets buried while nobody's home. A press ends the
+// pass on image 1; a sync request ends it too and is left for the caller. With
+// nothing unseen it just draws the newest image once
 void quickPass() {
-  int total = storedIds.size();
-  std::vector<int> pass;
-  for (int i = 0; i < total; i++) {
-    if (!storedSeen[i]) pass.push_back(i);
-  }
-  Serial.printf("%d unseen image(s), badge %d\n", (int)pass.size(), badgeFor(0));
-
-  // the pass itself is all fast partial refreshes; only coming to rest on image 1 is a full one
-  if (pass.size() > 1 || (pass.size() == 1 && pass[0] != 0)) {
-    for (size_t k = 0; k < pass.size(); k++) {
-      drawIndex(pass[k], 0, false);
-      if (waitForNext(STILL_HOLD_MS)) {
-        replayRequested = false;  // during the pass any press just steps on
-        rtcInTour = true;         // pressing means the user is here: on through the unseen ones
-        stepNext();
-        return;
-      }
-      if (syncRequested) return;
+  if (!passStreamed) {
+    passQueue.clear();
+    for (int i = (int)storedIds.size() - 1; i >= 1; i--) {
+      if (!storedSeen[i]) passQueue.push_back(storedIds[i]);
     }
-    Serial.println("Pass complete, resting on the newest image (press the button to step)");
+    passRunning = true;
+    passDrawn = 0;
   }
-  rtcInTour = countUnseen() > 0;
-  drawIndex(0, badgeFor(0), true);
+  passStreamed = false;
+  passMoreComing = false;
+  // what is left, minus the newest (it rests) and anything no longer stored
+  std::vector<String> left;
+  for (const String& id : passQueue) {
+    if (id == storedIds[0]) continue;
+    for (const String& s : storedIds) {
+      if (s == id) {
+        left.push_back(id);
+        break;
+      }
+    }
+  }
+  passQueue = left;
+  passQueue.push_back(storedIds[0]);  // held back by passTick: the resting image
+  Serial.printf("%d unseen image(s), %d left to show before image 1\n", countUnseen(), (int)passQueue.size() - 1);
+  while (passRunning && passQueue.size() > 1) {
+    passTick();
+    otaguard::tick();
+    delay(20);
+  }
+  passRunning = false;
+  passQueue.clear();
+  if (syncRequested) return;
+  // the pass ends on image 1: full refresh, badge = every unseen image, this one included
+  int unseen = countUnseen();
+  rtcInTour = unseen > 0;
+  if (passDrawn > 0) Serial.println("Pass complete, resting on the newest image (press the button to step)");
+  if (passDrawn > 0 && millis() - passLastDraw < STILL_HOLD_MS) delay(STILL_HOLD_MS - (millis() - passLastDraw));
+  drawIndex(0, unseen, true);
 }
 
 // redraws the image on screen as a still (first frame) with or without the
@@ -1558,13 +1656,14 @@ void redrawCurrent(bool syncBadge) {
     ok = f && epdParse(f, img) && epdReadFrame(f, img, 0, frameBuf);
     if (f) f.close();
   }
-  if (ok) drawFrame(img, true, badgeFor(rtcViewIdx), syncBadge);
+  if (ok) drawFrame(img, true, rtcBadge, syncBadge);
 }
 
 // pressing NEXT means the user is here: what's on screen counts as viewed, and
 // so does the image it steps to. While unseen images remain it steps only
-// through those (the badge counting down on each); after the last one it wraps
-// back to image 1, and from there it is plain 1, 2 ... 12, 1 again
+// through those, the badge counting the unseen ones left including the one
+// shown (4, 3, 2, 1); after the last one it wraps back to image 1 without a
+// badge, and from there it is plain 1, 2 ... 12, 1 again
 void stepNext() {
   int total = storedIds.size();
   markSeen(rtcViewIdx);
@@ -1572,18 +1671,19 @@ void stepNext() {
   if (next >= 0) {
     rtcInTour = true;
   } else if (rtcInTour) {
-    next = 0;  // done with the unseen ones: back to the newest
-    rtcInTour = false;
+    rtcInTour = false;  // done with the unseen ones: back to the newest
+    next = rtcViewIdx == 0 ? 1 % total : 0;  // (already on it, e.g. one new image: on to image 2)
   } else {
     next = (rtcViewIdx + 1) % total;
   }
+  int badge = rtcInTour ? countUnseen() : 0;  // counted before the one shown is marked seen
   markSeen(next);
-  drawIndex(next, badgeFor(next), next == 0);  // full refresh whenever it lands on image 1
+  drawIndex(next, badge, next == 0);  // full refresh whenever it lands on image 1
 }
 
 // plays the animation on screen again (it rests on its first frame afterwards)
 void replayCurrent() {
-  showImage(storedIds[rtcViewIdx], rtcViewIdx + 1, storedIds.size(), false, badgeFor(rtcViewIdx));
+  showImage(storedIds[rtcViewIdx], rtcViewIdx + 1, storedIds.size(), false, rtcBadge);
   cycleOk = true;
 }
 
@@ -1694,6 +1794,7 @@ void setup() {
   if (esp_reset_reason() == ESP_RST_POWERON) {  // RTC memory also survives soft resets (e.g. after an update)
     rtcViewIdx = 0;
     rtcInTour = false;
+    rtcBadge = 0;
     rtcManualFails = 0;
   }
   Serial.printf("Wake: %s, PSRAM %u KB free\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset",
@@ -1730,13 +1831,13 @@ void setup() {
   loadStoredIds();
 
   // power-up always shows something (the panel's state is unknown); a timer wake only when images arrived
-  if (!storedIds.empty() && (!timerWake || added > 0)) {
+  if (!storedIds.empty() && (!timerWake || added > 0 || passStreamed)) {  // a pass the sync started must end on image 1
     quickPass();
     idleWindow();
   } else if (otaguard::updatePending() && !storedIds.empty()) {
     // first run of a new firmware with nothing new to show: still prove the display path
     Serial.println("First run of a new firmware: proving the display path before keeping it");
-    drawIndex(rtcViewIdx, badgeFor(rtcViewIdx), rtcViewIdx == 0);
+    drawIndex(rtcViewIdx, rtcBadge, rtcViewIdx == 0);
   }
   goToSleep();
 }

@@ -529,10 +529,12 @@ export default {
     // as the lamp's fallback and serve the full PNGs. ----
     if (action === 'sync' && request.method === 'GET') {
       const prefix = `queue/${lampId}/`;
+      const t0 = Date.now();
       const [listed, fw] = await Promise.all([
         getQueueItems(env, lampId, { include: ['customMetadata'] }),
         env.LAMP_IMAGES.head('firmware/latest.bin'),
       ]);
+      const timing = [`list+head ${Date.now() - t0}ms`];
       const enc = new TextEncoder();
       const itemHead = (it, size) => {
         const md = it.customMetadata || {};
@@ -549,9 +551,11 @@ export default {
         firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
       }) + '\n');
       // all the images are fetched at once rather than one after another
-      const fetched = listed.map(async it => {
+      const fetched = listed.map(async (it, i) => {
         const obj = await env.LAMP_IMAGES.get(it.key);
-        return obj ? stripForLamp(new Uint8Array(await obj.arrayBuffer())) : null;
+        const data = obj ? stripForLamp(new Uint8Array(await obj.arrayBuffer())) : null;
+        timing.push(`fetch${i} ${Date.now() - t0}ms`);
+        return data;
       });
       // delivery events are logged in the background so they don't delay the response
       ctx.waitUntil(Promise.all(listed.map(it =>
@@ -579,8 +583,10 @@ export default {
               if (!data || data.length !== sizes[i]) data = new Uint8Array(sizes[i]);
               await writer.write(heads[i]);
               await writer.write(data);
+              timing.push(`sent${i} ${Date.now() - t0}ms`);
             }
             await writer.close();
+            console.log(`sync ${lampId} streamed ${listed.length} item(s): ${timing.join(', ')}`);
           } catch (e) {
             await writer.abort(e).catch(() => {});  // the lamp sees a short body and falls back
           }
@@ -592,6 +598,7 @@ export default {
 
       // buffered (items queued before lampSize existed): fetch everything, then send
       const datas = await Promise.all(fetched);
+      console.log(`sync ${lampId} buffered ${listed.length} item(s): ${timing.join(', ')}`);
       const entries = listed.map((it, i) => ({ it, data: datas[i] })).filter(e => e.data); // drop any that vanished
       const head = headLine(entries.length);
       const heads = entries.map(({ it, data }) => itemHead(it, data.length));

@@ -30,7 +30,7 @@ extern "C" bool verifyRollbackLater() { return true; }  // Arduino core: don't a
 namespace otaguard {
 
 const uint8_t MAX_CRASHES = 4;
-const uint32_t WATCHDOG_S = 300;                    // longer than any legitimate blocking step
+const uint32_t WATCHDOG_S = 300;                    // [PLACEHOLDER] longer than any legitimate blocking step
 
 static bool validated = false;  // per wake: RAM is cleared by every deep sleep
 static bool pending = false;    // this boot is the first run of a freshly installed update
@@ -62,7 +62,24 @@ inline void putStr(const char* key, const String& v) {
   p.end();
 }
 
-inline String badVersion() { return getStr("bad"); }
+// versions that failed on this lamp: a short comma-separated list (newest last),
+// so two failures in a row can't un-blocklist each other
+const int MAX_BAD = 4;
+
+inline bool isBad(const String& version) {
+  return version.length() && ("," + getStr("bad") + ",").indexOf("," + version + ",") >= 0;
+}
+
+inline String withBad(String list, const String& version) {
+  if (("," + list + ",").indexOf("," + version + ",") >= 0) return list;
+  list += (list.length() ? "," : "") + version;
+  int n = 1;
+  for (char c : list) n += (c == ',');
+  while (n-- > MAX_BAD) list.remove(0, list.indexOf(',') + 1);  // drop the oldest
+  return list;
+}
+
+inline void addBad(const String& version) { putStr("bad", withBad(getStr("bad"), version)); }
 inline void clearBad() { putStr("bad", ""); }
 
 // the updater calls this just before it starts writing a new image
@@ -76,7 +93,7 @@ inline void setTrying(const String& version) {
 inline void clearTrying() { putStr("trying", ""); }
 
 inline void rollbackToOtherSlot(const char* version) {
-  putStr("bad", version);
+  addBad(version);
   const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
   if (other && esp_ota_set_boot_partition(other) == ESP_OK) {  // fails if that slot holds no valid image
     Serial.println("Rolling back to the previous firmware");
@@ -122,7 +139,7 @@ inline void begin(const char* version) {
         Serial.printf("Firmware %s was rolled back after an inconclusive cycle, will retry\n", trying.c_str());
       } else {
         Serial.printf("Firmware %s failed to start and was rolled back, blocklisting it\n", trying.c_str());
-        p.putString("bad", trying);
+        p.putString("bad", withBad(p.getString("bad", ""), trying));
       }
       p.putString("trying", "");
       p.putBool("unsure", false);

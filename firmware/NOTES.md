@@ -18,25 +18,113 @@ The lamp sleeps almost all the time (the e-ink panel keeps its image unpowered) 
 
 | Wake | What it does |
 |---|---|
-| Power-up / reset / crash / firmware update | connect (setup portal only if no WiFi is saved), check firmware, sync, quick 1 s pass through all images, rest on the newest with the new-image badge, stay up 15 s for the button, sleep |
+| Power-up / reset / crash / firmware update | connect (setup portal only if no WiFi is saved), sync, quick 1 s pass through all images, rest on the newest with the new-image badge, stay up 30 s for the button, sleep |
 | Sleep timer (every 10 min while prototyping) | connect with a 20 s timeout, sync, pass + badge only if new images arrived, sleep. No WiFi: skip the sync and sleep, never the portal |
-| NEXT button | no WiFi: step to the next image (partial refresh; full refresh when wrapping to the newest), stay up 15 s after the last press, sleep |
+| NEXT button | no WiFi: step to the next image (partial refresh; full refresh when wrapping to the newest), stay up 30 s after the last press, sleep |
 
-- Firmware update check: once a day (every `FW_CHECK_EVERY_WAKES` timer wakes) and on every power-up/reset or manual sync. Image sync runs on every sync wake.
+- Firmware updates: the worker includes the current firmware version in its `/queue` response, so every sync wake learns about updates at no extra cost (no separate request). If the version differs and isn't blocklisted, the lamp downloads it after the image sync. `GET /firmware/version` still exists for the recovery app.
+- "Power-up" means a real power-on, a reset, a crash or the restart after an update. It does not mean a wake from deep sleep.
 - Badge: one small dot per image downloaded but not yet stepped through, stacked in a column up the bottom-left corner (white ring so it reads over any image). It accumulates across wakes and clears on the first button press.
 - NEXT button holds (timed from the moment the press began, even on a wake):
   - tap (under 2 s): next image
   - 2 s or more, then release: replay the animation on screen; on a still it is just a step
-  - 10 s (fires while held): full sync including a firmware check, clears the blocklist, replays the pass. If WiFi can't connect it opens the setup portal
-  - 8 s hold on BOOT (D5) forgets the saved WiFi
-- Firmware download is our own loop in `downloadFirmware()` (not HTTPUpdate, whose stall handling can hang for many minutes): abandoned after 90 s total or 15 s without data, retried at the next check, and it is not counted as a crash.
+  - 10 s (fires while held): "sync now" for the impatient: the same sync a timer wake does (images, plus a firmware update if the worker has one), clears the blocklist, replays the pass. If WiFi doesn't connect it just skips, and the lamp counts it. On the **second failed 10 s sync in a row** it opens the `Candlelight-XXXX` setup portal with the QR screen (one 3 min attempt; if nobody joins, the current image is put back and the lamp sleeps), so the user can see what's wrong and fix the WiFi. A 10 s hold with working WiFi never shows the portal, and any successful connection resets the count
+  - 8 s hold on BOOT (D5) forgets the saved WiFi and restarts into the setup portal with the QR screen. To reach it from sleep, press NEXT to wake the lamp, then hold BOOT right away (inside the 30 s awake window)
+- Firmware download is our own loop in `downloadFirmware()` (not HTTPUpdate, whose stall handling can hang for many minutes): abandoned after 150 s total (a 1.1MB image needs only ~7.5 KB/s) or 15 s without data, retried at the next sync, and it is not counted as a crash. The stall limit is the real protection against a dead connection; the total only has to be longer than a slow-but-working download.
 - State kept across sleep in RTC memory: current image, unseen count, wake count. It is reset on a true power-on.
-- Knobs at the top of `main.cpp`: `SYNC_INTERVAL_S` (600 s while prototyping; plan on 30 min or more for battery), `WIFI_TIMEOUT_MS`, `AWAKE_IDLE_MS`, `STILL_HOLD_MS`, `OTA_BUDGET_MS`, `OTA_STALL_MS`, `FULL_REFRESH_ON_WAKE`.
+- All timings are prototype placeholders. See **Timing reference** below for the full list, how to change them, and what depends on what. `FULL_REFRESH_ON_WAKE` (top of `main.cpp`) is the one non-timing knob.
 - Rollback guard hooks (`src/ota_guard.h`): `markValid()` runs before sleep when the wake reached the worker or drew something; otherwise `beforeSleep()` marks the cycle inconclusive so a bootloader rollback isn't blocklisted. A first run of a new firmware with nothing to show still redraws the current image to prove the display path. The 300 s watchdog is only a backstop: connect steps have their own short timeouts.
 
 Still to verify on the board: partial refresh after deep sleep (panel initialised with `initial=false`; set `FULL_REFRESH_ON_WAKE` if it ghosts or glitches), button wake, and real sleep current.
 
 Still to build: skip the update step when the battery is low (waiting for the battery pack on the ADC; the lamp runs on laptop USB power for now). A brownout during a new firmware's first wake looks like a failure and rolls back a good build (the 10 s hold clears the blocklist).
+
+## Timing reference (everything here is a prototype placeholder)
+
+Every value below is a placeholder chosen to make prototyping fast. All of them are expected to change for the final product. Each one is tagged `[PLACEHOLDER]` in the code, so this lists them all:
+
+```
+grep -rn PLACEHOLDER firmware/fw/src firmware/recovery/src
+```
+
+**How to change one:** edit the constant, push to `main`. A change to the lamp firmware (`fw/`) reaches lamps by OTA at their next sync (within one `SYNC_INTERVAL_S`). A change to the recovery app (`recovery/`) reaches a lamp **only by a USB flash of `merged.bin`**, because OTA never updates the factory partition. Check the dependencies table below before changing anything.
+
+### Lamp firmware: `fw/src/main.cpp`
+
+| Constant | Now | What it controls |
+|---|---|---|
+| `SYNC_INTERVAL_S` | 600 s (10 min) | Deep-sleep time between timer wakes. Sets battery life, the longest wait before a new image arrives, and the longest wait before a firmware update arrives. Earlier plan for the final product: 30 min or more |
+| `WIFI_TIMEOUT_MS` | 20 000 ms | How long a sync wake waits for the saved WiFi before skipping the sync and sleeping |
+| `AWAKE_IDLE_MS` | 30 000 ms | How long the lamp stays awake after its last activity (a button press, or the end of the pass) so NEXT can step through images |
+| `STILL_HOLD_MS` | 1 000 ms | How long each image stays up during the quick pass, **on top of** the e-ink refresh time (about 1 to 2 s partial, about 4 s full) |
+| `OTA_BUDGET_MS` | 150 000 ms | Total time limit for downloading new firmware; past it the download is abandoned and retried at the next sync |
+| `OTA_STALL_MS` | 15 000 ms | A firmware download that gets no data for this long is abandoned |
+| `REPLAY_HOLD_MS` | 2 000 ms | NEXT held this long, then released, replays an animation (a tap shorter than this is "next") |
+| `SYNC_HOLD_MS` | 10 000 ms | NEXT held this long fires "sync now" while still held |
+| `RESET_HOLD_MS` | 8 000 ms | BOOT (D5) held this long forgets the saved WiFi and restarts |
+| `PORTAL_TIMEOUT_S` | 180 s | How long a setup portal stays open (first-time setup, and the portal after two failed 10 s syncs) |
+
+### Rollback guard: `fw/src/ota_guard.h`
+
+| Constant | Now | What it controls |
+|---|---|---|
+| `WATCHDOG_S` | 300 s | A hang longer than this resets the lamp. It is a backstop only, not the way a wake normally ends |
+
+### Recovery app: `recovery/src/main.cpp`
+
+| Constant | Now | What it controls |
+|---|---|---|
+| `WIFI_TIMEOUT_MS` | 30 000 ms | How long to wait for the saved WiFi before giving up |
+| `OTA_BUDGET_MS` | 600 000 ms (10 min) | Total time limit for a firmware download |
+| `OTA_STALL_MS` | 30 000 ms | A download with no data for this long is abandoned |
+| `PORTAL_SECONDS` | 180 s | How long the setup portal stays open (only when a person is present) |
+| `RETRY_SLEEP_S` | 300 s (5 min) | Sleep after a failed download before trying again |
+| `WIFI_FAIL_SLEEP_S` | 1 800 s (30 min) | Sleep after WiFi wouldn't connect, or after a portal nobody used |
+| `IDLE_SLEEP_S` | 1 800 s (30 min) | Sleep when nothing safe is left to install, before polling the worker again |
+
+### Not named constants: numbers written directly in the code
+
+These are technical timeouts rather than prototype placeholders, and are unlikely to need changing. They are listed so nothing is hidden:
+
+| Where | Value | What it is |
+|---|---|---|
+| `main.cpp` `downloadItem()` | 3 attempts, 20 s read timeout, 0.5 s between attempts | Image download retries |
+| `main.cpp` and `recovery` HTTP requests | 10 s read timeout | Queue list, delete/ack and firmware requests |
+| `main.cpp` `connectWiFi()` (first-time setup portal) | `setConnectTimeout(20)` = 20 s | How long WiFiManager waits for a network to connect |
+| `main.cpp` `goToSleep()`, `recovery` `sleepAndRetry()` | up to 10 s | Waits for NEXT to be released before sleeping (a held button would wake the lamp at once) |
+| `buttonTask()` | 50 ms poll | Button polling and debounce |
+| `waitForNext()` | 20 ms poll | Wait loop between button checks |
+| Various | 100 to 500 ms | Short settle delays before a restart or sleep |
+| Each animation | `intervalMs` stored in the image | Time between frames |
+
+### Counts and limits (not times, but changed along with them)
+
+| Value | Where | Now |
+|---|---|---|
+| `MAX_IMAGES` | `main.cpp` | 12 images kept on the lamp |
+| `MAX_QUEUE_DEPTH` | `candlelight-worker/src/index.js` | 12 items waiting per lamp |
+| `ANIM_LOOPS` | `main.cpp` | 1 play-through per animation |
+| `MAX_CRASHES` | `ota_guard.h` | 4 crashes in a row before rolling back |
+| `MAX_BAD` | `ota_guard.h` and recovery | 4 blocklisted firmware versions remembered |
+
+### Dependencies between the values
+
+Change these in step, or something quietly stops working:
+
+| If you change... | Keep in mind |
+|---|---|
+| `AWAKE_IDLE_MS` | It must stay longer than `SYNC_HOLD_MS` plus about 2 s of wake-up time, or the 10 s sync hold from sleep can't finish. It must also leave room to press NEXT and then hold BOOT for `RESET_HOLD_MS`. At 30 s there is comfortable room; it got tight at 15 s, and below about 12 s the BOOT "forget WiFi" procedure stops working. Staying awake costs little next to the WiFi connections, so a longer window is cheap |
+| `SYNC_HOLD_MS`, `REPLAY_HOLD_MS` | Keep the order: tap < `REPLAY_HOLD_MS` < `SYNC_HOLD_MS` |
+| `PORTAL_TIMEOUT_S` / `PORTAL_SECONDS` | The portal blocks without feeding the watchdog, so keep `WATCHDOG_S` at least `PORTAL_TIMEOUT_S` plus about 60 s |
+| `OTA_BUDGET_MS` | The firmware needs at least size divided by budget: 1.1 MB over 150 s is about 7.5 KB/s. If the firmware grows or links are slow, a budget that is too short means the update can never finish and keeps retrying |
+| `OTA_STALL_MS` | Keep it above normal WiFi hiccups (a few seconds), or healthy downloads get cut off |
+| `SYNC_INTERVAL_S` | Also the delay before a firmware update or a new image shows up. Combined with the awake time per wake (WiFi, image downloads, pass) it determines battery life |
+| `STILL_HOLD_MS` | Total pass time is images × (refresh + hold), and that is awake time on every wake that brings new images |
+| Recovery values | Only change via USB flash. They are independent of the lamp's values |
+
+## Recovery app (`recovery/`, runs from the factory partition)
+
+Runs only when neither OTA slot is bootable. It joins the saved WiFi. If that doesn't connect within 30 s (or none is saved) it opens the `Candlelight-XXXX` setup portal for 3 min, but **only when a person is present**: after a power-on, the reset button, or a press of NEXT (the button wakes recovery from sleep). A sleep-timer wake, or the automatic restart that sends a crashing lamp into recovery, never opens it, because a lamp must not wake on its own to broadcast a portal nobody sees. This is how a lamp whose WiFi is gone can still be pointed at a new network (there is no on-screen help in recovery; join the network from a phone). It then reads `/firmware/version`, and installs the newest firmware that isn't blocklisted, otherwise the previous one (`/firmware/previous.bin`). It uses the same bounded download loop as the lamp firmware but with a 10 min total limit and a 30 s stall limit, because it is the lamp's only way back. After a failed attempt it deep-sleeps 5 min and tries again; when WiFi won't connect (or a portal nobody used), or nothing safe is left to install, it sleeps 30 min. If the firmware it installed was rolled back by the bootloader, it blocklists that version (shared NVS keys `trying` and `bad` in namespace `otaguard`) so it doesn't reinstall it. The blocklist is a list of the last 4 failed versions (not one), so two failures can't cancel each other and cause an install loop; when both published builds are blocklisted, recovery just polls every 30 min until a new build is pushed. It keeps using `/firmware/version` rather than the queue response because it needs `previousVersion` and has no lamp ID.
 
 ## Working agreement: commits and pushes
 

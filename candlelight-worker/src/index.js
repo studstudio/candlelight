@@ -483,8 +483,12 @@ export default {
     // /items/{itemId}, not wipe everything blind. ----
     if (action === 'queue' && request.method === 'GET') {
       const items = await getQueueItems(env, lampId, { include: ['customMetadata'] });
+      // the current firmware version rides along so a lamp learns about updates
+      // without a separate request (and a separate TLS connection)
+      const fw = await env.LAMP_IMAGES.head('firmware/latest.bin');
       return json({
         queueDepth: items.length,
+        firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
         items: items.map(obj => {
           const md = obj.customMetadata || {};
           return {

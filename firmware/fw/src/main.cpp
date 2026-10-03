@@ -33,16 +33,15 @@ const int EPD_CS = D6;    // GPIO14
 GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
     GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-const uint32_t STILL_HOLD_MS = 1000;   // how long each image stays up during the automatic pass
+const uint32_t STILL_HOLD_MS = 1000;   // [PLACEHOLDER] how long each image stays up during the automatic pass
 const int ANIM_LOOPS = 1;              // times an animation plays through before moving on
 
 // ---- sleep schedule ----
-const uint32_t SYNC_INTERVAL_S = 600;                        // deep-sleep time between worker syncs (10 min while prototyping)
-const uint32_t WIFI_TIMEOUT_MS = 20000;                      // give up on WiFi after this and go back to sleep
-const uint32_t AWAKE_IDLE_MS = 15000;                        // stay up this long after the last button press or pass
-const uint32_t FW_CHECK_EVERY_WAKES = 86400 / SYNC_INTERVAL_S;  // firmware update check about once a day
-const uint32_t OTA_BUDGET_MS = 90000;                        // a firmware download that isn't finished by now is abandoned (retried next check)
-const uint32_t OTA_STALL_MS = 15000;                         // ...and so is one that stops delivering data for this long
+const uint32_t SYNC_INTERVAL_S = 600;                        // [PLACEHOLDER] deep-sleep time between worker syncs (10 min while prototyping)
+const uint32_t WIFI_TIMEOUT_MS = 20000;                      // [PLACEHOLDER] give up on WiFi after this and go back to sleep
+const uint32_t AWAKE_IDLE_MS = 30000;                        // [PLACEHOLDER] stay up this long after the last button press or pass
+const uint32_t OTA_BUDGET_MS = 150000;                       // [PLACEHOLDER] a firmware download that isn't finished by now is abandoned (retried next check)
+const uint32_t OTA_STALL_MS = 15000;                         // [PLACEHOLDER] ...and so is one that stops delivering data for this long
 const bool FULL_REFRESH_ON_WAKE = false;                     // set true if partial refreshes after deep sleep ghost or glitch
 
 const int MAX_IMAGES = 12;                // most images the device keeps at once
@@ -223,45 +222,28 @@ bool downloadFirmware(WiFiClientSecure& client, const String& url) {
   return true;
 }
 
-// asks the worker which firmware is current; if it isn't the one running, pulls
-// it into the spare OTA slot and reboots into it (never returns on success)
-void checkForUpdate() {
-  Serial.printf("Firmware: %s\n", FW_VERSION);
+// the worker reports the current firmware inside the queue response, so
+// learning about an update costs no extra request. syncQueue() fills these in
+String workerFwVersion;
+uint32_t workerFwSize = 0;
 
-  WiFiClientSecure client;
-  client.setInsecure();  // prototype only
-  HTTPClient http;
-  http.setReuse(false);
-  http.setTimeout(10000);
-  http.begin(client, String(BASE_URL) + "/firmware/version");
-  int code = http.GET();
-  if (code != 200) {
-    Serial.printf("Update check: HTTP %d\n", code);
-    http.end();
-    return;
-  }
-  String body = http.getString();
-  http.end();
-  client.stop();
-
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) return;
-  String latest = doc["version"] | "";
-  if (latest.isEmpty() || latest == FW_VERSION) {
+// if the worker's firmware isn't the one running, pulls it into the spare OTA
+// slot and reboots into it (never returns on success)
+void updateFirmwareIfNeeded() {
+  if (workerFwVersion.isEmpty() || workerFwVersion == FW_VERSION) {
     Serial.println("Firmware is up to date");
     return;
   }
-
-  if (latest == otaguard::badVersion()) {
-    Serial.printf("Firmware %s failed on this lamp before, skipping (hold NEXT 10s to retry it)\n", latest.c_str());
+  if (otaguard::isBad(workerFwVersion)) {
+    Serial.printf("Firmware %s failed on this lamp before, skipping (hold NEXT 10s to retry it)\n", workerFwVersion.c_str());
     return;
   }
 
-  Serial.printf("Updating firmware %s -> %s (%u bytes)\n", FW_VERSION, latest.c_str(), (unsigned)(doc["size"] | 0));
+  Serial.printf("Updating firmware %s -> %s (%u bytes)\n", FW_VERSION, workerFwVersion.c_str(), (unsigned)workerFwSize);
   WiFiClientSecure updateClient;
   updateClient.setInsecure();  // prototype only
   otaguard::tick();
-  otaguard::setTrying(latest);  // lets the next boot blocklist it if the bootloader rolls it back
+  otaguard::setTrying(workerFwVersion);  // lets the next boot blocklist it if the bootloader rolls it back
   if (downloadFirmware(updateClient, String(BASE_URL) + "/firmware/latest.bin")) {
     Serial.println("Update installed, rebooting into it");
     Serial.flush();
@@ -295,6 +277,8 @@ int syncQueue() {
     Serial.println("Queue JSON parse failed");
     return 0;
   }
+  workerFwVersion = queueDoc["firmware"]["version"] | "";
+  workerFwSize = queueDoc["firmware"]["size"] | 0;
   JsonArray queue = queueDoc["items"].as<JsonArray>();
   Serial.printf("Queue: %u item(s) waiting\n", (unsigned)queue.size());
 
@@ -492,10 +476,10 @@ void loadStoredIds() {
 
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
 const int NEXT_BUTTON = 25;                  // GPIO25 (labelled D2): momentary switch to GND
-const uint32_t REPLAY_HOLD_MS = 2000;        // hold NEXT 2 s or more (then let go) to replay an animation
-const uint32_t SYNC_HOLD_MS = 10000;         // hold NEXT this long to re-check the worker for new images/firmware
-const uint32_t RESET_HOLD_MS = 8000;         // hold this long to forget the saved WiFi
-const uint32_t PORTAL_TIMEOUT_S = 180;       // setup mode stays open this long, then retries the saved network
+const uint32_t REPLAY_HOLD_MS = 2000;        // [PLACEHOLDER] hold NEXT 2 s or more (then let go) to replay an animation
+const uint32_t SYNC_HOLD_MS = 10000;         // [PLACEHOLDER] hold NEXT this long to re-check the worker for new images/firmware
+const uint32_t RESET_HOLD_MS = 8000;         // [PLACEHOLDER] hold this long to forget the saved WiFi
+const uint32_t PORTAL_TIMEOUT_S = 180;       // [PLACEHOLDER] setup mode stays open this long, then retries the saved network
 
 String setupApName() {
   uint8_t mac[6];
@@ -628,9 +612,9 @@ void connectWiFi() {
 //  - the NEXT button: no WiFi at all, just step to the next image
 // State that has to survive sleep lives in RTC memory.
 
-RTC_DATA_ATTR uint32_t rtcWakes = 0;  // timer wakes since the last firmware check
 RTC_DATA_ATTR int rtcViewIdx = 0;     // image on screen, in newest-first order
 RTC_DATA_ATTR int rtcUnseen = 0;      // downloaded images not stepped through yet: the badge number
+RTC_DATA_ATTR int rtcManualFails = 0; // 10 s syncs in a row that couldn't connect (the 2nd opens the setup portal)
 
 bool displayReady = false;  // display.init() has run, so it's safe to hibernate
 bool cycleOk = false;  // this wake reached the worker or drew something, i.e. the firmware did its job
@@ -655,9 +639,10 @@ bool hasSavedWiFi() {
 }
 
 // joins the saved network, giving up after WIFI_TIMEOUT_MS. The setup portal
-// (which keeps the lamp awake for minutes) opens only when asked: for a lamp
-// with no WiFi configured at all, or on a manual sync that can't connect
-bool connectForSync(bool portalIfUnconfigured, bool portalIfFailed) {
+// (which keeps the lamp awake for minutes) opens only for a lamp with no WiFi
+// configured at all. A saved network that won't connect never opens it: skip
+// the sync and sleep (hold BOOT 8 s to forget the network and set up again)
+bool connectForSync(bool portalIfUnconfigured) {
   WiFi.mode(WIFI_STA);  // also loads the saved credentials
   if (!hasSavedWiFi()) {
     if (!portalIfUnconfigured) {
@@ -665,6 +650,7 @@ bool connectForSync(bool portalIfUnconfigured, bool portalIfFailed) {
       return false;
     }
     connectWiFi();
+    rtcManualFails = 0;
     return true;
   }
   WiFi.begin();
@@ -675,24 +661,21 @@ bool connectForSync(bool portalIfUnconfigured, bool portalIfFailed) {
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("Connected: " + WiFi.localIP().toString());
-    return true;
-  }
-  if (portalIfFailed) {
-    connectWiFi();
+    rtcManualFails = 0;  // WiFi works, whatever happened on an earlier hold
     return true;
   }
   Serial.println("WiFi didn't connect, skipping sync");
   return false;
 }
 
-// connects, optionally checks for new firmware, downloads new images, then
-// turns WiFi off. False if it couldn't get online
-bool doSync(bool checkFirmware, bool portalIfUnconfigured, bool portalIfFailed, int& added) {
+// connects, downloads new images, installs a newer firmware if the worker
+// reported one, then turns WiFi off. False if it couldn't get online
+bool doSync(bool portalIfUnconfigured, int& added) {
   added = 0;
-  if (!connectForSync(portalIfUnconfigured, portalIfFailed)) return false;
+  if (!connectForSync(portalIfUnconfigured)) return false;
   cycleOk = true;
-  if (checkFirmware) checkForUpdate();  // reboots into new firmware if there is one
   added = syncQueue();
+  updateFirmwareIfNeeded();  // reboots into the new firmware if there is one
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   return true;
@@ -732,12 +715,35 @@ void replayCurrent() {
   cycleOk = true;
 }
 
-// 10 s hold: re-check the worker (firmware too), fetch new images, replay the pass
+// the setup network with the QR screen, one attempt of PORTAL_TIMEOUT_S.
+// True if someone joined it and the lamp is now online
+bool openSetupPortal() {
+  String apName = setupApName();
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
+  wm.setTitle("Candlelight");
+  Serial.println("Setup mode: join " + apName);
+  drawSetupScreen(apName);
+  bool online = wm.startConfigPortal(apName.c_str());
+  if (!online && !storedIds.empty()) drawIndex(rtcViewIdx, rtcViewIdx == 0 ? rtcUnseen : 0);  // nobody came: put the image back
+  return online;
+}
+
+// 10 s hold: "sync now" for the impatient. Same sync a timer wake does, plus a
+// retry of a blocklisted firmware. The setup portal opens only if WiFi fails
+// to connect on two of these in a row, so a lamp with working WiFi never sees it
 void manualSync() {
-  Serial.println("NEXT held: syncing with the worker");
-  otaguard::clearBad();  // a manual sync retries a blocklisted firmware version too
+  Serial.println("NEXT held 10s: syncing with the worker");
+  otaguard::clearBad();
   int added = 0;
-  doSync(true, true, true, added);
+  if (!doSync(false, added)) {
+    rtcManualFails++;
+    Serial.printf("Manual sync couldn't connect (%d in a row)\n", rtcManualFails);
+    if (rtcManualFails >= 2) {
+      rtcManualFails = 0;
+      if (openSetupPortal()) doSync(false, added);  // new network saved: sync over it
+    }
+  }
   loadStoredIds();
   nextPressed = false;
   syncRequested = false;
@@ -806,9 +812,9 @@ void setup() {
   bool timerWake = cause == ESP_SLEEP_WAKEUP_TIMER;
   wokeFromSleep = buttonWake || timerWake;
   if (esp_reset_reason() == ESP_RST_POWERON) {  // RTC memory also survives soft resets (e.g. after an update)
-    rtcWakes = 0;
     rtcViewIdx = 0;
     rtcUnseen = 0;
+    rtcManualFails = 0;
   }
   Serial.printf("Wake: %s\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset");
   if (buttonWake) rtc_gpio_deinit((gpio_num_t)NEXT_BUTTON);
@@ -837,16 +843,9 @@ void setup() {
   }
 
   // power-up/reset: sync and replay the pass. Timer: sync, and pass only if there's news
-  bool checkFirmware;
-  if (!timerWake) {
-    checkFirmware = true;
-    rtcWakes = 0;
-  } else {
-    checkFirmware = ++rtcWakes >= FW_CHECK_EVERY_WAKES;
-    if (checkFirmware) rtcWakes = 0;
-  }
+  Serial.printf("Firmware: %s\n", FW_VERSION);
   int added = 0;
-  doSync(checkFirmware, !timerWake, false, added);
+  doSync(!timerWake, added);
   loadStoredIds();
   rtcUnseen += added;
 

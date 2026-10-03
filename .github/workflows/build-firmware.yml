@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "firmware/fw/**"
+      - "firmware/recovery/**"
       - ".github/workflows/build-firmware.yml"
   workflow_dispatch:
 
@@ -22,7 +23,7 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
-          key: pio-${{ hashFiles('firmware/fw/platformio.ini') }}
+          key: pio-${{ hashFiles('firmware/fw/platformio.ini', 'firmware/recovery/platformio.ini') }}
 
       - uses: actions/setup-python@v5
         with:
@@ -35,16 +36,24 @@ jobs:
         env:
           PLATFORMIO_BUILD_FLAGS: '-DFW_VERSION=\"${{ github.sha }}\"'
 
+      - name: Build recovery app
+        run: pio run -d ../recovery
+
       - name: Merge into one flashable image (flash at 0x0)
         run: |
           B=.pio/build/firebeetle2
+          R=../recovery/.pio/build/recovery
+          # layout from partitions.csv: factory (recovery) 0x810000 for 1.5MB, app0 at 0x10000 for 4MB
+          [ $(stat -c %s $R/firmware.bin) -le $((0x180000)) ] || { echo "recovery app too big for its partition"; exit 1; }
+          [ $(stat -c %s $B/firmware.bin) -le $((0x400000)) ] || { echo "firmware too big for its OTA slot"; exit 1; }
           BOOT_APP0=$(find ~/.platformio -name boot_app0.bin | head -n 1)
           python -m esptool --chip esp32 merge_bin -o merged.bin \
             --flash_mode dio --flash_size 16MB \
             0x1000 $B/bootloader.bin \
             0x8000 $B/partitions.bin \
             0xe000 $BOOT_APP0 \
-            0x10000 $B/firmware.bin
+            0x10000 $B/firmware.bin \
+            0x810000 $R/firmware.bin
 
       - uses: actions/upload-artifact@v4
         with:

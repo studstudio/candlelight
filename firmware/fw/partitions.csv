@@ -1,0 +1,11 @@
+# Name,   Type, SubType,  Offset,   Size,     Flags
+# app0/app1 = the two OTA slots that hold the lamp firmware (app0 is listed
+# first because PlatformIO sizes the build against the first app partition).
+# factory = the recovery app (../recovery), 1.5MB
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x400000,
+app1,     app,  ota_1,    0x410000, 0x400000,
+factory,  app,  factory,  0x810000, 0x180000,
+spiffs,   data, spiffs,   0x990000, 0x660000,
+coredump, data, coredump, 0xFF0000, 0x10000,

@@ -10,6 +10,7 @@
 #include <WiFiManager.h>
 #include <qrcode.h>
 #include "epd_png.h"
+#include "ota_guard.h"
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
 // stamped in by CI (-DFW_VERSION="<git sha>"); an unstamped local build is "dev"
@@ -79,6 +80,7 @@ bool inManifest(JsonArray arr, const char* id) {
 // transfer is retried
 bool downloadItem(const char* itemId, size_t expectedSize) {
   for (int attempt = 1; attempt <= 3; attempt++) {
+    otaguard::tick();
     WiFiClientSecure client;
     client.setInsecure();  // prototype only
     HTTPClient http;
@@ -180,11 +182,19 @@ void checkForUpdate() {
     return;
   }
 
+  if (latest == otaguard::badVersion()) {
+    Serial.printf("Firmware %s failed on this lamp before, skipping (hold NEXT 4s to retry it)\n", latest.c_str());
+    return;
+  }
+
   Serial.printf("Updating firmware %s -> %s (%u bytes)\n", FW_VERSION, latest.c_str(), (unsigned)(doc["size"] | 0));
   WiFiClientSecure updateClient;
   updateClient.setInsecure();  // prototype only
   httpUpdate.rebootOnUpdate(true);
+  otaguard::tick();
+  otaguard::setTrying(latest);  // lets the next boot blocklist it if the bootloader rolls it back
   t_httpUpdate_return ret = httpUpdate.update(updateClient, String(BASE_URL) + "/firmware/latest.bin");
+  otaguard::clearTrying();  // only reached if no reboot happened, so nothing was installed
   if (ret == HTTP_UPDATE_FAILED) {
     Serial.printf("Update failed (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
   }
@@ -227,6 +237,7 @@ void syncQueue() {
   // evict oldest if full -> manifest -> ack), so a dropped connection mid-sync
   // leaves a consistent device and the rest simply stay queued for next time
   for (JsonObject item : queue) {
+    otaguard::tick();
     const char* itemId = item["itemId"] | "";
     if (!*itemId) continue;
     Serial.printf("- %s\n", itemId);
@@ -487,6 +498,7 @@ void connectWiFi() {
     }
   });
   while (!wm.autoConnect(apName.c_str())) {
+    otaguard::tick();
     Serial.println("No WiFi yet, retrying");
   }
   Serial.println("Connected: " + WiFi.localIP().toString());
@@ -494,6 +506,12 @@ void connectWiFi() {
 
 void setup() {
   Serial.begin(115200);
+  otaguard::begin(FW_VERSION);  // before anything that could fail
+#ifdef FW_TEST_CRASH  // test builds only: proves the rollback works
+  Serial.println("FW_TEST_CRASH: crashing on purpose");
+  delay(200);
+  abort();
+#endif
   delay(1000);
 
   if (!LittleFS.begin(true)) {  // true = format on first boot
@@ -514,6 +532,7 @@ void setup() {
 bool waitForNext(uint32_t ms) {
   uint32_t t0 = millis();
   while (!nextPressed) {
+    otaguard::tick();
     if (syncRequested) return false;
     if (ms && millis() - t0 >= ms) return false;
     delay(20);
@@ -523,6 +542,7 @@ bool waitForNext(uint32_t ms) {
 }
 
 void loop() {
+  otaguard::tick();
   // one automatic pass through everything stored, newest to oldest, then it
   // rests on the first image; from there (or after any press during the pass)
   // the NEXT button steps through the images, wrapping around
@@ -531,6 +551,7 @@ void loop() {
 
   if (syncRequested) {
     Serial.println("NEXT held: syncing with the worker");
+    otaguard::clearBad();  // a manual sync retries a blocklisted firmware version too
     checkForUpdate();  // reboots into new firmware if there is one
     syncQueue();
     loadStoredIds();
@@ -542,6 +563,7 @@ void loop() {
 
   if (storedIds.empty()) {
     Serial.println("Nothing stored to show");
+    otaguard::markValid();
     delay(5000);
     return;
   }
@@ -550,7 +572,9 @@ void loop() {
 
   // partial refreshes all the way round; the full refresh happens when the
   // cycle comes back to the first image (and on the first draw after boot)
+  if (otaguard::updatePending()) Serial.println("First run of a new firmware: proving the display path before keeping it");
   showImage(storedIds[idx], idx + 1, total, idx == 0);
+  otaguard::markValid();  // booted, synced and drew an image: this firmware is good
 
   if (autoPass) {
     if (waitForNext(STILL_HOLD_MS)) {

@@ -388,15 +388,21 @@ export default {
     // and pull /firmware/latest.bin when the version differs from their own ----
     if (parts[0] === 'firmware') {
       const KEY = 'firmware/latest.bin';
+      const PREV_KEY = 'firmware/previous.bin'; // the build before latest, kept for the recovery app to fall back on
 
       if (parts[1] === 'version' && request.method === 'GET') {
         const head = await env.LAMP_IMAGES.head(KEY);
         if (!head) return new Response('No firmware published', { status: 404, headers: CORS_HEADERS });
-        return json({ version: head.customMetadata?.version || '', size: head.size });
+        const prev = await env.LAMP_IMAGES.head(PREV_KEY);
+        return json({
+          version: head.customMetadata?.version || '',
+          size: head.size,
+          previousVersion: prev?.customMetadata?.version || '',
+        });
       }
 
-      if (parts[1] === 'latest.bin' && request.method === 'GET') {
-        const obj = await env.LAMP_IMAGES.get(KEY);
+      if ((parts[1] === 'latest.bin' || parts[1] === 'previous.bin') && request.method === 'GET') {
+        const obj = await env.LAMP_IMAGES.get(parts[1] === 'latest.bin' ? KEY : PREV_KEY);
         if (!obj) return new Response('No firmware published', { status: 404, headers: CORS_HEADERS });
         return new Response(obj.body, {
           headers: {
@@ -417,6 +423,11 @@ export default {
         const bin = await request.arrayBuffer();
         if (bin.byteLength < 100000 || new Uint8Array(bin)[0] !== 0xe9) {
           return json({ error: 'not an ESP32 app image' }, 400); // 0xE9 is the ESP image magic byte
+        }
+        // keep the build being replaced (unless this is a re-publish of the same version)
+        const current = await env.LAMP_IMAGES.get(KEY);
+        if (current && current.customMetadata?.version !== version) {
+          await env.LAMP_IMAGES.put(PREV_KEY, await current.arrayBuffer(), { customMetadata: current.customMetadata });
         }
         await env.LAMP_IMAGES.put(KEY, bin, { customMetadata: { version } });
         return json({ ok: true, version, size: bin.byteLength });

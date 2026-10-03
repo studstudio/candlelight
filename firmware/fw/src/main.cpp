@@ -17,6 +17,7 @@
 #include <qrcode.h>
 #include "epd_png.h"
 #include "ota_guard.h"
+#include "tls_resume.h"
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
 // stamped in by CI (-DFW_VERSION="<git sha>"); an unstamped local build is "dev"
@@ -36,7 +37,7 @@ const int EPD_CS = D6;    // GPIO14
 GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
     GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-const uint32_t STILL_HOLD_MS = 500;    // [PLACEHOLDER] how long each image stays up during the automatic pass
+const uint32_t STILL_HOLD_MS = 0;      // [PLACEHOLDER] extra time each image stays up during the automatic pass (0: the next goes up as soon as it is in)
 const int ANIM_LOOPS = 1;              // times an animation plays through before moving on
 
 // ---- sleep schedule ----
@@ -67,6 +68,25 @@ String lampUrl(const String& rest) {
 
 String workerHost() {
   return String(BASE_URL).substring(8);  // after "https://"
+}
+
+// the TLS session of the last connection to the worker (see tls_resume.h).
+// RTC memory: kept through deep sleep, cleared by power loss (then the next
+// handshake is a full one)
+RTC_DATA_ATTR uint8_t rtcTlsSession[1024];
+RTC_DATA_ATTR uint32_t rtcTlsSessionLen = 0;
+
+// connects to the worker, resuming the last TLS session when the server still
+// accepts it, and logs how long the handshake took
+bool connectWorker(ResumableTLS& c, const char* what) {
+  size_t len = rtcTlsSessionLen;
+  bool offered = len > 0;
+  uint32_t t0 = millis();
+  bool ok = c.connectResumable(workerHost().c_str(), 443, rtcTlsSession, len, sizeof(rtcTlsSession));
+  rtcTlsSessionLen = ok ? len : 0;  // a failed connect forgets the session: the next one starts clean
+  Serial.printf("%s: TLS handshake %u ms (%s)%s\n", what, (unsigned)(millis() - t0),
+                offered ? "saved session offered" : "full, no saved session", ok ? "" : " FAILED");
+  return ok;
 }
 
 // Our own minimal HTTP/1.1 request on an open connection: sends the request in
@@ -614,7 +634,7 @@ bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline, uint8_t* mem
 // confirms a batch of stored items to the worker in one request, on `client`.
 // If the connection from the sync is still open it is reused, which saves a whole
 // new secure handshake; otherwise HTTPClient simply opens a new one
-bool ackOnClient(WiFiClientSecure& client, const std::vector<String>& ids) {
+bool ackOnClient(ResumableTLS& client, const std::vector<String>& ids) {
   if (ids.empty()) return true;
   JsonDocument doc;
   JsonArray arr = doc["ids"].to<JsonArray>();
@@ -623,9 +643,8 @@ bool ackOnClient(WiFiClientSecure& client, const std::vector<String>& ids) {
   serializeJson(doc, body);
   if (client.connected()) {
     Serial.println("  ack: reusing the sync connection");
-  } else {
-    Serial.println("  ack: new connection (TLS handshake)");
-    if (!client.connect(workerHost().c_str(), 443)) return false;
+  } else if (!connectWorker(client, "  ack, new connection")) {
+    return false;
   }
   long len;
   int code = rawRequest(client, "POST", String("/lamp/") + LAMP_ID + "/ack", body, len);
@@ -635,8 +654,7 @@ bool ackOnClient(WiFiClientSecure& client, const std::vector<String>& ids) {
 
 // the same on a brand-new connection (the fallback)
 bool ackItems(const std::vector<String>& ids) {
-  WiFiClientSecure client;
-  client.setInsecure();  // prototype only
+  ResumableTLS client;
   return ackOnClient(client, ids);
 }
 
@@ -649,7 +667,7 @@ bool ackItems(const std::vector<String>& ids) {
 
 // the sync's connection, kept open on the heap so the writer can ack on it
 struct SyncConn {
-  WiFiClientSecure client;
+  ResumableTLS client;
 };
 
 struct WriteJob {
@@ -729,14 +747,12 @@ void waitForWriter() {
 SyncResult syncBundle(int& added) {
   added = 0;
   std::unique_ptr<SyncConn> conn(new SyncConn);
-  WiFiClientSecure& client = conn->client;
-  client.setInsecure();  // prototype only
+  ResumableTLS& client = conn->client;
   uint32_t tStart = millis();
-  if (!client.connect(workerHost().c_str(), 443)) {
+  if (!connectWorker(client, "Sync")) {
     Serial.println("Bundle sync: couldn't connect");
     return SYNC_FALLBACK;
   }
-  Serial.printf("TLS handshake %u ms\n", (unsigned)(millis() - tStart));
   bool tank = psramFound();
   uint32_t tGet = millis();
   long bodyLen;
@@ -1847,10 +1863,10 @@ void idleWindow() {
 // connect time, time to first byte and throughput of each. Tells the ESP32's
 // TLS apart from its network stack. Remove once answered
 void speedTestOne(Client& c, bool tls) {
-  String host = String(BASE_URL).substring(8);  // after "https://"
+  String host = workerHost();
   const char* name = tls ? "HTTPS" : "HTTP";
   uint32_t t0 = millis();
-  if (!c.connect(host.c_str(), tls ? 443 : 80)) {
+  if (tls ? !connectWorker((ResumableTLS&)c, "[speed HTTPS]") : !c.connect(host.c_str(), 80)) {
     Serial.printf("[speed %s] connect failed\n", name);
     return;
   }
@@ -1913,8 +1929,7 @@ void speedTest() {
   Serial.println("[speed] link test (diagnostic)");
   if (!connectForSync(false)) return;
   {
-    WiFiClientSecure sc;
-    sc.setInsecure();
+    ResumableTLS sc;
     speedTestOne(sc, true);
   }
   {

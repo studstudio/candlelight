@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <WiFiManager.h>
 #include <esp_wifi.h>
+#include <ping/ping_sock.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
 #include <qrcode.h>
@@ -1442,6 +1443,28 @@ bool hasSavedWiFi() {
 // (which keeps the lamp awake for minutes) opens only for a lamp with no WiFi
 // configured at all. A saved network that won't connect never opens it: skip
 // the sync and sleep (hold BOOT 8 s to forget the network and set up again)
+// [DIAGNOSTIC] pings the router and the internet in the background (5 each)
+// while the sync runs, to tell a slow WiFi/router from a slow internet path.
+// Results print as they come in, tagged [ping router] / [ping internet]
+void pingDiag(IPAddress target, const char* label) {
+  esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+  IP_ADDR4(&cfg.target_addr, target[0], target[1], target[2], target[3]);
+  cfg.count = 5;
+  cfg.interval_ms = 300;
+  cfg.timeout_ms = 2000;
+  esp_ping_callbacks_t cbs = {};
+  cbs.cb_args = (void*)label;
+  cbs.on_ping_success = [](esp_ping_handle_t h, void* arg) {
+    uint32_t ms = 0;
+    esp_ping_get_profile(h, ESP_PING_PROF_TIMEGAP, &ms, sizeof(ms));
+    Serial.printf("[ping %s] %u ms\n", (const char*)arg, (unsigned)ms);
+  };
+  cbs.on_ping_timeout = [](esp_ping_handle_t h, void* arg) { Serial.printf("[ping %s] timeout\n", (const char*)arg); };
+  cbs.on_ping_end = [](esp_ping_handle_t h, void* arg) { esp_ping_delete_session(h); };
+  esp_ping_handle_t h;
+  if (esp_ping_new_session(&cfg, &cbs, &h) == ESP_OK) esp_ping_start(h);
+}
+
 bool connectForSync(bool portalIfUnconfigured) {
   WiFi.mode(WIFI_STA);  // also loads the saved credentials
   if (!hasSavedWiFi()) {
@@ -1501,6 +1524,8 @@ bool connectForSync(bool portalIfUnconfigured) {
                   usedStatic ? "cached channel + IP" : (fastTried && connected && rtcWifiChannel) ? "cached channel, DHCP" : "full connect",
                   (unsigned)(millis() - t0), (unsigned)millis());
     rtcManualFails = 0;  // WiFi works, whatever happened on an earlier hold
+    pingDiag(WiFi.gatewayIP(), "router");
+    pingDiag(IPAddress(1, 1, 1, 1), "internet");
     return true;
   }
   Serial.println("WiFi didn't connect, skipping sync");
@@ -1713,6 +1738,7 @@ void manualSync() {
   Serial.printf("NEXT held %us: syncing with the worker\n", (unsigned)(SYNC_HOLD_MS / 1000));
   if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
   redrawCurrent(true);  // "Syncing..." top-left: the hold registered
+  syncRequested = false;  // handled: left set, the pass would read it as a press and stop
   otaguard::clearBad();
   int added = 0;
   if (!doSync(false, added)) {

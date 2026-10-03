@@ -162,7 +162,6 @@
      clientWidth/clientHeight are valid again immediately for the crop math */
   .photo-wrap.collapsed { display: none; }
   body.crop-collapsed #cropHint { display: none !important; }
-  body.crop-collapsed .preview-wrap { border-radius: 14px; border-top-color: var(--line); }
   .empty-state {
     position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 10px; color: var(--cream-dim); font-size: 13px; padding: 30px 0;
@@ -281,7 +280,7 @@
   }
   .send-btn:active { transform: scale(0.94); }
   .send-btn:disabled { opacity: 0.3; box-shadow: none; }
-  .send-btn svg { width: 30px; height: 30px; }
+  .send-btn { color: #1a1108; font-family: inherit; font-size: 17px; font-weight: 700; letter-spacing: 0.04em; text-transform: lowercase; }
   .send-status { margin-top: 14px; font-size: 12px; color: var(--cream-dim); text-align: center; min-height: 16px; }
   .send-status.success { color: var(--success); }
   .send-status.fail { color: var(--fail); }
@@ -422,7 +421,6 @@
 <div class="moire-row opacity-row"><span class="moire-label">opacity</span><input type="range" id="opacitySlider" min="0" max="100" value="100"></div>
 <div class="moire-row"><span class="moire-label">grid</span><input type="range" id="gridSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">hatch</span><input type="range" id="hatchSlider" min="0" max="100" value="0"></div>
-<div class="moire-row"><span class="moire-label">hatch wide</span><input type="range" id="hatch2Slider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">scan</span><input type="range" id="scanSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">grain</span><input type="range" id="grainSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">chroma</span><input type="range" id="chromaSlider" min="0" max="100" value="0"></div>
@@ -452,21 +450,12 @@
 <p class="privacy-hint" id="privacyHint">only they'll see this</p>
 
 <div class="send-zone">
-  <button class="send-btn" id="sendBtn" disabled>
-    <svg viewBox="0 0 24 24" fill="none" stroke="#1a1108" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 3c2 2.5 3.5 5 3.5 7.5A3.5 3.5 0 0 1 8.5 12C8.5 9 10 5.5 12 3z"/>
-      <path d="M12 21a4 4 0 0 0 4-4c0-1.5-1-2.5-2-3.5"/>
-    </svg>
-  </button>
+  <button class="send-btn" id="sendBtn" disabled>send</button>
   <div class="send-status" id="sendStatus"></div>
   <div class="last-seen" id="lastSeen"></div>
 </div>
 
-<hr class="divider">
 
-<div class="footer-row">
-  <h1>send today's light</h1>
-</div>
 
 
 <div class="modal-backdrop" id="modalBackdrop">
@@ -605,7 +594,7 @@ function makeDefaultLayerParams() {
     ditherPattern: 'floyd',
     invert: false,
     filterStepIndex: 0,
-    gridAmount: 0, hatchAmount: 0, hatch2Amount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
+    gridAmount: 0, hatchAmount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
     organicAmount: 0, outlineAmount: 0,
     dotStippleAmount: 0,
     opacityAmount: 1 // 0..1 — only meaningful for overlay layers (1 and 2); base is always fully opaque
@@ -642,7 +631,7 @@ function snapshotActiveLayerState() {
   layer.ditherPattern = ditherPattern;
   layer.invert = invert;
   layer.filterStepIndex = filterStepIndex;
-  layer.gridAmount = gridAmount; layer.hatchAmount = hatchAmount; layer.hatch2Amount = hatch2Amount;
+  layer.gridAmount = gridAmount; layer.hatchAmount = hatchAmount;
   layer.scanAmount = scanAmount; layer.grainAmount = grainAmount; layer.chromaAmount = chromaAmount;
   layer.reliefAmount = reliefAmount;
   layer.organicAmount = organicAmount;
@@ -671,7 +660,7 @@ function loadLayerStateToGlobals(idx) {
   ditherPattern = layer.ditherPattern;
   invert = layer.invert;
   filterStepIndex = layer.filterStepIndex;
-  gridAmount = layer.gridAmount; hatchAmount = layer.hatchAmount; hatch2Amount = layer.hatch2Amount;
+  gridAmount = layer.gridAmount; hatchAmount = layer.hatchAmount;
   scanAmount = layer.scanAmount; grainAmount = layer.grainAmount; chromaAmount = layer.chromaAmount;
   reliefAmount = layer.reliefAmount;
   organicAmount = layer.organicAmount;
@@ -685,7 +674,6 @@ function loadLayerStateToGlobals(idx) {
   opacitySlider.disabled = (idx === 0); // base has nothing beneath it to blend with
   document.getElementById('gridSlider').value = Math.round(gridAmount * 100);
   document.getElementById('hatchSlider').value = Math.round(hatchAmount * 100);
-  document.getElementById('hatch2Slider').value = Math.round(hatch2Amount * 100);
   document.getElementById('scanSlider').value = Math.round(scanAmount * 100);
   document.getElementById('grainSlider').value = Math.round(grainAmount * 100);
   document.getElementById('chromaSlider').value = Math.round(chromaAmount * 100);
@@ -1642,11 +1630,10 @@ function computeLayerGray(layer, W, H, forceLevels) {
   // organically instead of geometrically; relief simulates a raking light
   // source across the luminance gradient, giving edges a pushed-out/carved
   // "3D" look (classic bump-mapping technique).
-  if (layer.gridAmount > 0 || layer.hatchAmount > 0 || layer.hatch2Amount > 0 || layer.scanAmount > 0 || layer.grainAmount > 0 || layer.reliefAmount > 0) {
+  if (layer.gridAmount > 0 || layer.hatchAmount > 0 || layer.scanAmount > 0 || layer.grainAmount > 0 || layer.reliefAmount > 0) {
     const AMPLITUDE = 55;
     const GRID_WAVELENGTH = 4;
     const HATCH_WAVELENGTH = 5;
-    const HATCH2_WAVELENGTH = 50; // 10x the original hatch wavelength — much wider bands
     const SCAN_WAVELENGTH = 4;
     const RELIEF_SCALE = 6.5; // stronger raking-light push for a more pronounced carved look
     const LIGHT_ANGLE = -45 * Math.PI / 180; // light from upper-left
@@ -1664,11 +1651,6 @@ function computeLayerGray(layer, W, H, forceLevels) {
           const proj = (x + y) / Math.SQRT2; // 45° diagonal projection
           const h = Math.sin(2 * Math.PI * proj / HATCH_WAVELENGTH);
           gray[idx] += layer.hatchAmount * AMPLITUDE * h;
-        }
-        if (layer.hatch2Amount > 0) {
-          const proj = (x + y) / Math.SQRT2; // same 45° diagonal projection, 4x wider bands
-          const h2 = Math.sin(2 * Math.PI * proj / HATCH2_WAVELENGTH);
-          gray[idx] += layer.hatch2Amount * AMPLITUDE * h2;
         }
         if (layer.scanAmount > 0) {
           const s = Math.sin(2 * Math.PI * y / SCAN_WAVELENGTH); // horizontal-only, no x term
@@ -2029,7 +2011,6 @@ const FONT_LIST = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonli
 let selectedFontIndex = 0; // Pixelcastle, the default
 let gridAmount = 0;    // 0..1 — 2D periodic grid, interferes with dither patterns
 let hatchAmount = 0;   // 0..1 — diagonal single-axis wave, crosshatch/engraving feel
-let hatch2Amount = 0;  // 0..1 — same diagonal wave, 4x the wavelength (much wider bands)
 let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
 let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
 let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
@@ -2222,7 +2203,6 @@ const EFFECT_SLIDERS = [
   { id: 'opacitySlider', setter: v => opacityAmount = v },
   { id: 'gridSlider', setter: v => gridAmount = v },
   { id: 'hatchSlider', setter: v => hatchAmount = v },
-  { id: 'hatch2Slider', setter: v => hatch2Amount = v },
   { id: 'scanSlider', setter: v => scanAmount = v },
   { id: 'grainSlider', setter: v => grainAmount = v },
   { id: 'chromaSlider', setter: v => chromaAmount = v },

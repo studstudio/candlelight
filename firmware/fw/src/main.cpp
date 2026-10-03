@@ -1032,9 +1032,52 @@ void drawBadge(Adafruit_GFX& g, int n) {
   drawBoxedText(g, txt, 6, -6);
 }
 
-// top-left corner: feedback that the 5 s sync hold registered
-void drawSyncBadge(Adafruit_GFX& g) {
-  drawBoxedText(g, "Syncing...", 6, 6);
+// ---------- the sync spinner ----------
+// Top-left corner while a 5 s-hold sync runs: a boxed spinner inspired by
+// Claude Code's terminal one (· ✢ ✳ ✶ ✻ ✽ and back), drawn as shapes (the font
+// has no such glyphs) and animated by syncAnimTask with partial refreshes of
+// just that corner
+const int SYNC_BOX_X = 6, SYNC_BOX_Y = 6, SYNC_BOX_SIZE = 34;
+
+// one petal: a kite from the centre to the tip, widest at 60% of its length
+void drawPetal(Adafruit_GFX& g, float cx, float cy, float ang, float len, float width) {
+  float dx = cosf(ang), dy = sinf(ang), px = -dy, py = dx;
+  float mx = cx + dx * len * 0.6f, my = cy + dy * len * 0.6f;
+  int16_t tx = lroundf(cx + dx * len), ty = lroundf(cy + dy * len);
+  int16_t lx = lroundf(mx + px * width / 2), ly = lroundf(my + py * width / 2);
+  int16_t rx = lroundf(mx - px * width / 2), ry = lroundf(my - py * width / 2);
+  g.fillTriangle(lroundf(cx), lroundf(cy), lx, ly, tx, ty, GxEPD_BLACK);
+  g.fillTriangle(lroundf(cx), lroundf(cy), rx, ry, tx, ty, GxEPD_BLACK);
+}
+
+const int SPINNER_FRAMES = 6;
+
+// frame 0..5: · ✢ ✳ ✶ ✻ ✽
+void drawSpinner(Adafruit_GFX& g, int cx, int cy, int frame) {
+  struct Shape { uint8_t arms; float len, width, rot; };
+  static const Shape S[SPINNER_FRAMES] = {
+      {0, 0, 0, 0},                // ·  a dot
+      {4, 7, 4, 0},                // ✢  four petals
+      {8, 9, 2, 0},                // ✳  eight thin spokes
+      {6, 11, 5, -PI / 2},         // ✶  six-pointed star
+      {8, 12, 3.5, PI / 8},        // ✻  eight petals
+      {8, 13, 4.5, 0},             // ✽  eight heavier petals
+  };
+  const Shape& s = S[frame];
+  if (!s.arms) {
+    g.fillCircle(cx, cy, 2, GxEPD_BLACK);
+    return;
+  }
+  for (int a = 0; a < s.arms; a++) drawPetal(g, cx, cy, s.rot + a * 2 * PI / s.arms, s.len, s.width);
+}
+
+// the box (white, double border) with spinner frame `frame`
+void drawSyncBadge(Adafruit_GFX& g, int frame = 0) {
+  const int x = SYNC_BOX_X, y = SYNC_BOX_Y, n = SYNC_BOX_SIZE;
+  g.fillRect(x, y, n, n, GxEPD_WHITE);
+  g.drawRect(x, y, n, n, GxEPD_BLACK);
+  g.drawRect(x + 1, y + 1, n - 2, n - 2, GxEPD_BLACK);
+  drawSpinner(g, x + n / 2, y + n / 2, frame);
 }
 
 // draws into a packed 1-bit picture laid out the way the panel takes it
@@ -1113,6 +1156,8 @@ RTC_DATA_ATTR bool rtcScreenGray = false;
 RTC_DATA_ATTR char rtcGrayId[64];
 RTC_DATA_ATTR int rtcGrayBadge = 0;
 
+void stopSyncAnim();
+
 bool grayBuffers() {
   if (!grayWork) grayWork = (uint8_t*)ps_malloc(GRAY_FRAME_BYTES);
   if (!grayPlane) grayPlane = (uint8_t*)ps_malloc(Panel420::PLANE_BYTES);
@@ -1122,6 +1167,7 @@ bool grayBuffers() {
 
 // a full-size 2-bit still in 4-level gray (full refresh). False if it can't
 bool drawGray(const EpdImage& img, int badge) {
+  stopSyncAnim();
   const int W = Panel420::WIDTH, H = Panel420::HEIGHT;
   if (img.bpp != 2 || img.frames != 1 || img.w != W || img.h != H || !grayBuffers()) return false;
   uint32_t t0 = millis();
@@ -1160,7 +1206,10 @@ void bridgeFromGray(const uint8_t* next, uint8_t* prev) {
 // skipping the buffer and the per-pixel drawing. The frames are already packed
 // the way the panel wants them (MSB first, 1 = white). False if it can't (other
 // size, or FAST_DRAW off), and the caller draws the normal way
+bool syncBoxInMono = false;  // the last direct draw had the sync box, so monoBuf holds the corner around it
+
 bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
+  syncBoxInMono = false;
   const int W = GxEPD2_420_GDEY042T81::WIDTH, H = GxEPD2_420_GDEY042T81::HEIGHT;
   if (!FAST_DRAW || img.w != W || img.h != H) return false;
   uint32_t t0 = millis();
@@ -1202,10 +1251,12 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
   }
   lastPanelMs = millis() - t1;
   screenGray = false;
+  syncBoxInMono = syncBadge;  // the corner the spinner animates is in monoBuf
   return true;
 }
 
 void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge = false) {
+  stopSyncAnim();  // nothing else may use the panel while the spinner runs
   if (FULL_REFRESH_ON_WAKE && wokeFromSleep && !drewThisWake) partial = false;
   drewThisWake = true;
   display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
@@ -1240,6 +1291,47 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
   } while (more);
   lastBuildMs = tBuild;
   lastPanelMs = tPanel;
+}
+
+// The spinner runs in its own task while the sync connects and downloads,
+// with partial refreshes of a 48x48 corner around the box (~0.36 s each, so
+// ~2.5 frames a second). Anything that draws stops it first (stopSyncAnim()
+// waits for the refresh in progress, at most ~0.4 s)
+const int SYNC_RX = 0, SYNC_RY = 0, SYNC_RW = 48, SYNC_RH = 48;  // x and width on byte boundaries
+uint8_t syncRegionBase[(SYNC_RW / 8) * SYNC_RH];  // the corner as drawn, image around the box included
+volatile bool syncAnimStop = false;
+volatile bool syncAnimRunning = false;
+
+void syncAnimTask(void*) {
+  static const uint8_t SEQ[] = {0, 1, 2, 3, 4, 5, 4, 3, 2, 1};  // · ✢ ✳ ✶ ✻ ✽ ✻ ✶ ✳ ✢
+  uint8_t buf[sizeof(syncRegionBase)];
+  auto& e = display.epd2;
+  for (int i = 1; !syncAnimStop; i++) {
+    memcpy(buf, syncRegionBase, sizeof(buf));
+    MonoCanvas canvas(buf, SYNC_RW, SYNC_RH);
+    drawSyncBadge(canvas, SEQ[i % sizeof(SEQ)]);
+    e.writeImage(buf, SYNC_RX, SYNC_RY, SYNC_RW, SYNC_RH);
+    e.refresh(SYNC_RX, SYNC_RY, SYNC_RW, SYNC_RH);
+    e.writeImageAgain(buf, SYNC_RX, SYNC_RY, SYNC_RW, SYNC_RH);  // so the next partial knows what is on screen
+  }
+  syncAnimRunning = false;
+  vTaskDelete(nullptr);
+}
+
+// starts the spinner on the box just drawn by redrawCurrent(true)
+void startSyncAnim() {
+  if (syncAnimRunning || !syncBoxInMono) return;  // the box went up some other way: it stays a still
+  const int stride = Panel420::WIDTH / 8;
+  for (int r = 0; r < SYNC_RH; r++) memcpy(syncRegionBase + r * (SYNC_RW / 8), monoBuf + (SYNC_RY + r) * stride + SYNC_RX / 8, SYNC_RW / 8);
+  syncAnimStop = false;
+  syncAnimRunning = true;
+  if (xTaskCreatePinnedToCore(syncAnimTask, "spinner", 4096, nullptr, 1, nullptr, 0) != pdPASS) syncAnimRunning = false;
+}
+
+void stopSyncAnim() {
+  if (!syncAnimRunning) return;
+  syncAnimStop = true;
+  while (syncAnimRunning) delay(5);
 }
 
 // set by buttonTask on each press of the NEXT button, cleared when consumed
@@ -1419,6 +1511,7 @@ String setupApName() {
 
 // instructions + a QR code that joins the setup network when scanned
 void drawSetupScreen(const String& apName) {
+  stopSyncAnim();
   QRCode qr;
   uint8_t qrData[qrcode_getBufferSize(3)];
   String payload = "WIFI:S:" + apName + ";T:nopass;;";
@@ -1894,7 +1987,8 @@ bool openSetupPortal() {
 void manualSync() {
   Serial.printf("NEXT held %us: syncing with the worker\n", (unsigned)(SYNC_HOLD_MS / 1000));
   if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
-  redrawCurrent(true);  // "Syncing..." top-left: the hold registered
+  redrawCurrent(true);  // the spinner box top-left: the hold registered
+  startSyncAnim();      // and it animates while the sync runs
   syncRequested = false;  // handled: left set, the pass would read it as a press and stop
   otaguard::clearBad();
   int added = 0;
@@ -1952,6 +2046,7 @@ void idleWindow() {
   uint32_t t0 = millis();
   while (digitalRead(NEXT_BUTTON) == LOW && millis() - t0 < 10000) delay(20);
 
+  stopSyncAnim();
   if (displayReady) display.hibernate();
   WiFi.mode(WIFI_OFF);
   esp_sleep_enable_ext0_wakeup((gpio_num_t)NEXT_BUTTON, 0);

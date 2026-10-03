@@ -245,7 +245,7 @@ function resolveGeo(cityName, override) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
@@ -481,6 +481,77 @@ export default {
     // one shot. The bulk DELETE is a dev/testing convenience — real firmware
     // usage should still ack one real download at a time via DELETE
     // /items/{itemId}, not wipe everything blind. ----
+    // ---- sync: everything one wake needs in ONE response, so the lamp makes a
+    // single secure connection instead of one per image. Body = a text header
+    // line, then for each queued item a text header line followed by exactly
+    // `size` raw bytes:
+    //   {"v":1,"count":N,"firmware":{"version":..,"size":..}|null}\n
+    //   {"itemId":..,"size":..,"sentAt":..,"sentGeo":..}\n<size bytes>   (repeated)
+    // Nothing is deleted here: the lamp confirms what it stored with POST /ack
+    // (one request for all of them). The older /queue + /items routes still work
+    // as the lamp's fallback. ----
+    if (action === 'sync' && request.method === 'GET') {
+      const prefix = `queue/${lampId}/`;
+      const items = await getQueueItems(env, lampId, { include: ['customMetadata'] });
+      const fw = await env.LAMP_IMAGES.head('firmware/latest.bin');
+      const enc = new TextEncoder();
+      const head = enc.encode(JSON.stringify({
+        v: 1,
+        count: items.length,
+        firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
+      }) + '\n');
+      const heads = items.map(obj => {
+        const md = obj.customMetadata || {};
+        return enc.encode(JSON.stringify({
+          itemId: obj.key.slice(prefix.length),
+          size: obj.size,
+          sentAt: md.sentAt ? parseInt(md.sentAt, 10) : null,
+          sentGeo: md.sentGeo ? JSON.parse(md.sentGeo) : null,
+        }) + '\n');
+      });
+      // the total is known up front, so the lamp gets a Content-Length instead of chunked framing
+      const total = heads.reduce((n, h, i) => n + h.length + items[i].size, head.length);
+      const { readable, writable } = new FixedLengthStream(total);
+      ctx.waitUntil((async () => {
+        const writer = writable.getWriter();
+        try {
+          await writer.write(head);
+          for (let i = 0; i < items.length; i++) {
+            await writer.write(heads[i]);
+            const obj = await env.LAMP_IMAGES.get(items[i].key);
+            if (!obj) throw new Error('item vanished mid-sync');
+            const reader = obj.body.getReader();
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              await writer.write(value);
+            }
+          }
+          await writer.close();
+        } catch (e) {
+          await writer.abort(e); // the lamp sees a short body and falls back
+        }
+      })());
+      // delivery events are logged in the background so they don't delay the response
+      ctx.waitUntil(Promise.all(items.map(obj =>
+        recordDownloadEvent(env, lampId, obj.key.slice(prefix.length), request).catch(() => {}))));
+      return new Response(readable, {
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/octet-stream' },
+      });
+    }
+
+    // ---- ack: the lamp confirms every item it stored, in one request ----
+    if (action === 'ack' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch { return json({ error: 'bad json' }, 400); }
+      const ids = Array.isArray(body.ids)
+        ? body.ids.filter(id => typeof id === 'string' && id.length > 0 && id.length < 200 && !id.includes('/'))
+        : [];
+      await Promise.all(ids.map(id => env.LAMP_IMAGES.delete(`queue/${lampId}/${id}`)));
+      const left = await getQueueItems(env, lampId);
+      return json({ ok: true, acked: ids.length, queueDepth: left.length });
+    }
+
     if (action === 'queue' && request.method === 'GET') {
       const items = await getQueueItems(env, lampId, { include: ['customMetadata'] });
       // the current firmware version rides along so a lamp learns about updates

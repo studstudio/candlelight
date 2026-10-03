@@ -425,8 +425,8 @@ bool readLineFrom(WiFiClient* s, String& out) {
 
 uint32_t copyFlashUs = 0;  // time spent inside File::write by copyBytes (flash erase + program), to tell flash from network
 
-// copies the next n bytes of the response into f, or throws them away if f is null
-bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline) {
+// copies the next n bytes of the response into mem (if given) or f, or throws them away if both are null
+bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline, uint8_t* mem = nullptr) {
   uint8_t buf[1460];
   uint32_t last = millis();
   while (n > 0) {
@@ -438,9 +438,13 @@ bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline) {
       delay(2);
       continue;
     }
-    int got = s->readBytes(buf, min((size_t)avail, min(n, sizeof(buf))));
+    size_t want = min((size_t)avail, n);
+    if (!mem) want = min(want, sizeof(buf));
+    int got = s->readBytes(mem ? mem : buf, want);
     if (got <= 0) continue;
-    if (f) {
+    if (mem) {
+      mem += got;
+    } else if (f) {
       uint32_t tw = micros();
       size_t wrote = f->write(buf, got);
       copyFlashUs += micros() - tw;
@@ -518,6 +522,46 @@ SyncResult syncBundle(int& added) {
 
   std::vector<String> toAck;  // everything we're finished with, stored or not
   SyncResult result = SYNC_OK;
+
+  // With PSRAM the images are first received into memory at network speed and
+  // only written to flash once the stream is done. Written while receiving,
+  // every 4 KB flash erase (~45 ms, flash cache off, so the WiFi/TCP code mostly
+  // stalls too) also stalls the download, and the server backs off. Without
+  // PSRAM, or when it is full, an image is streamed straight to flash as before
+  struct Held { String id; uint8_t* data; size_t size; JsonDocument meta; };
+  std::vector<Held> held;
+  bool tank = psramFound();
+  uint32_t netMs = 0, flashMs = 0;
+  // writes the held images to flash (oldest first, like the stream), commits and frees them
+  auto flushHeld = [&]() -> bool {
+    bool ok = true;
+    for (Held& h : held) {
+      if (ok) {
+        uint32_t t0 = millis();
+        File f = LittleFS.open(TMP_PATH, "w");
+        bool written = f && f.write(h.data, h.size) == h.size;  // one call: LittleFS writes whole blocks
+        if (f) f.close();
+        uint32_t tWritten = millis();
+        CommitResult cr = written ? commitTmpItem(manifestDoc, stored, h.id.c_str(), h.meta["sentAt"], h.meta["sentGeo"])
+                                  : COMMIT_FAIL;
+        if (cr == COMMIT_FAIL) {
+          Serial.printf("- %s: flash write failed\n", h.id.c_str());
+          LittleFS.remove(TMP_PATH);
+          ok = false;
+        } else {
+          if (cr == COMMIT_OK) added++;
+          toAck.push_back(h.id);
+          Serial.printf("- %s: flash write %u ms (%.1f KB), validate+store %u ms\n", h.id.c_str(), (unsigned)(tWritten - t0),
+                        h.size / 1024.0, (unsigned)(millis() - tWritten));
+        }
+        flashMs += millis() - t0;
+      }
+      free(h.data);
+    }
+    held.clear();
+    return ok;
+  };
+
   for (int k = 0; k < count; k++) {
     if (!readLineFrom(stream, line)) { result = SYNC_PARTIAL; break; }
     JsonDocument item;
@@ -536,6 +580,28 @@ SyncResult syncBundle(int& added) {
     }
 
     uint32_t tItem = millis();
+    uint8_t* mem = tank && size ? (uint8_t*)ps_malloc(size) : nullptr;
+    if (mem) {
+      bool got = copyBytes(stream, nullptr, size, deadline, mem);
+      uint32_t ms = millis() - tItem;
+      netMs += ms;
+      if (!got) {
+        Serial.println("  download incomplete");
+        free(mem);
+        result = SYNC_PARTIAL;
+        break;
+      }
+      Serial.printf("  received into PSRAM: %u ms (%.1f KB, %.0f KB/s)\n", (unsigned)ms, size / 1024.0,
+                    ms ? size / 1.024 / ms : 0.0);
+      held.push_back({itemId, mem, size, std::move(item)});
+      continue;
+    }
+    // PSRAM missing or full: what is held goes to flash first, so images stay in arrival order
+    if (!held.empty()) {
+      Serial.println("  PSRAM full, writing what is held");
+      if (!flushHeld()) { result = SYNC_PARTIAL; break; }
+      tItem = millis();
+    }
     File f = LittleFS.open(TMP_PATH, "w");
     if (!f) { result = SYNC_PARTIAL; break; }
     copyFlashUs = 0;
@@ -554,11 +620,19 @@ SyncResult syncBundle(int& added) {
     toAck.push_back(itemId);  // stored, or unusable: either way it's done with
     uint32_t dl = tDownloaded - tItem;
     double kb = size / 1024.0;
-    uint32_t flashMs = copyFlashUs / 1000;
+    uint32_t itemFlashMs = copyFlashUs / 1000;
+    uint32_t itemNetMs = dl > itemFlashMs ? dl - itemFlashMs : 0;
     Serial.printf("  timing: download %u ms (%.1f KB, %.0f KB/s) = network %u + flash writes %u, validate+store %u ms\n", (unsigned)dl, kb,
-                  dl ? kb * 1000.0 / dl : 0.0, (unsigned)(dl > flashMs ? dl - flashMs : 0), (unsigned)flashMs,
-                  (unsigned)(millis() - tDownloaded));
+                  dl ? kb * 1000.0 / dl : 0.0, (unsigned)itemNetMs, (unsigned)itemFlashMs, (unsigned)(millis() - tDownloaded));
+    netMs += itemNetMs;
+    flashMs += millis() - tItem - itemNetMs;
   }
+  // the stream is done (or broke off): whatever arrived whole is still stored and acked
+  if (!held.empty()) {
+    Serial.printf("Received %u image(s) into PSRAM, writing to flash\n", (unsigned)held.size());
+    if (!flushHeld()) result = SYNC_PARTIAL;
+  }
+  Serial.printf("Sync phases: network %u ms, flash %u ms%s\n", (unsigned)netMs, (unsigned)flashMs, tank ? "" : " (no PSRAM)");
   http.end();
 
   if (!toAck.empty()) {
@@ -1323,7 +1397,8 @@ void setup() {
     rtcViewIdx = 0;
     rtcManualFails = 0;
   }
-  Serial.printf("Wake: %s\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset");
+  Serial.printf("Wake: %s, PSRAM %u KB free\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset",
+                (unsigned)(ESP.getFreePsram() / 1024));
   if (buttonWake) rtc_gpio_deinit((gpio_num_t)NEXT_BUTTON);
 
   if (!LittleFS.begin(true)) {  // true = format on first boot

@@ -2,12 +2,15 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <HTTPUpdate.h>
+#include <Update.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h>
 #include <vector>
 #include <WiFiManager.h>
+#include <esp_wifi.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
 #include <qrcode.h>
 #include "epd_png.h"
 #include "ota_guard.h"
@@ -32,6 +35,15 @@ GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
 
 const uint32_t STILL_HOLD_MS = 1000;   // how long each image stays up during the automatic pass
 const int ANIM_LOOPS = 1;              // times an animation plays through before moving on
+
+// ---- sleep schedule ----
+const uint32_t SYNC_INTERVAL_S = 600;                        // deep-sleep time between worker syncs (10 min while prototyping)
+const uint32_t WIFI_TIMEOUT_MS = 20000;                      // give up on WiFi after this and go back to sleep
+const uint32_t AWAKE_IDLE_MS = 15000;                        // stay up this long after the last button press or pass
+const uint32_t FW_CHECK_EVERY_WAKES = 86400 / SYNC_INTERVAL_S;  // firmware update check about once a day
+const uint32_t OTA_BUDGET_MS = 90000;                        // a firmware download that isn't finished by now is abandoned (retried next check)
+const uint32_t OTA_STALL_MS = 15000;                         // ...and so is one that stops delivering data for this long
+const bool FULL_REFRESH_ON_WAKE = false;                     // set true if partial refreshes after deep sleep ghost or glitch
 
 const int MAX_IMAGES = 12;                // most images the device keeps at once
 const char* MANIFEST_PATH = "/manifest.json";
@@ -153,6 +165,64 @@ void printSentInfo(JsonVariantConst sentAt, JsonVariantConst geo) {
   }
 }
 
+// streams the firmware into the next OTA slot, giving up after OTA_BUDGET_MS in
+// total or OTA_STALL_MS without data. A stalled connection must never keep the
+// radio on for minutes or trip the watchdog (which would count as a crash).
+// true only if the whole image arrived, verified and the new slot is selected
+bool downloadFirmware(WiFiClientSecure& client, const String& url) {
+  HTTPClient http;
+  http.setReuse(false);
+  http.setTimeout(10000);
+  http.begin(client, url);
+  int code = http.GET();
+  int len = http.getSize();
+  if (code != 200 || len <= 0) {
+    Serial.printf("  firmware download: HTTP %d, length %d\n", code, len);
+    http.end();
+    return false;
+  }
+  if (!Update.begin(len)) {
+    Serial.printf("  firmware download: no room for %d bytes\n", len);
+    http.end();
+    return false;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buf[1460];
+  int written = 0;
+  uint32_t t0 = millis(), lastData = millis();
+  const char* failure = nullptr;
+  while (written < len && !failure) {
+    otaguard::tick();
+    if (millis() - t0 > OTA_BUDGET_MS) {
+      failure = "took too long";
+    } else if (millis() - lastData > OTA_STALL_MS) {
+      failure = "stalled";
+    } else if (int avail = stream->available()) {
+      int n = stream->readBytes(buf, min(avail, (int)sizeof(buf)));
+      if (n > 0) {
+        if (Update.write(buf, n) != (size_t)n) failure = "flash write failed";
+        written += n;
+        lastData = millis();
+      }
+    } else if (!stream->connected()) {
+      failure = "connection closed early";
+    } else {
+      delay(5);
+    }
+  }
+  http.end();
+  if (!failure && !Update.end(true)) failure = "image rejected";  // checks the image and selects the new slot
+  if (failure) {
+    Serial.printf("  firmware download %s after %u of %d bytes (%u s)\n", failure, (unsigned)written, len,
+                  (unsigned)((millis() - t0) / 1000));
+    Update.abort();
+    return false;
+  }
+  Serial.printf("  firmware downloaded in %u s\n", (unsigned)((millis() - t0) / 1000));
+  return true;
+}
+
 // asks the worker which firmware is current; if it isn't the one running, pulls
 // it into the spare OTA slot and reboots into it (never returns on success)
 void checkForUpdate() {
@@ -183,21 +253,22 @@ void checkForUpdate() {
   }
 
   if (latest == otaguard::badVersion()) {
-    Serial.printf("Firmware %s failed on this lamp before, skipping (hold NEXT 4s to retry it)\n", latest.c_str());
+    Serial.printf("Firmware %s failed on this lamp before, skipping (hold NEXT 10s to retry it)\n", latest.c_str());
     return;
   }
 
   Serial.printf("Updating firmware %s -> %s (%u bytes)\n", FW_VERSION, latest.c_str(), (unsigned)(doc["size"] | 0));
   WiFiClientSecure updateClient;
   updateClient.setInsecure();  // prototype only
-  httpUpdate.rebootOnUpdate(true);
   otaguard::tick();
   otaguard::setTrying(latest);  // lets the next boot blocklist it if the bootloader rolls it back
-  t_httpUpdate_return ret = httpUpdate.update(updateClient, String(BASE_URL) + "/firmware/latest.bin");
-  otaguard::clearTrying();  // only reached if no reboot happened, so nothing was installed
-  if (ret == HTTP_UPDATE_FAILED) {
-    Serial.printf("Update failed (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+  if (downloadFirmware(updateClient, String(BASE_URL) + "/firmware/latest.bin")) {
+    Serial.println("Update installed, rebooting into it");
+    Serial.flush();
+    delay(200);
+    ESP.restart();
   }
+  otaguard::clearTrying();  // nothing was installed
 }
 
 // returns how many new images were stored
@@ -319,28 +390,26 @@ bool pixelIsBlack(uint8_t code, uint8_t bpp, int x, int y) {
   }
 }
 
-// small boxed number in the bottom-right corner (white box so it reads over any image)
+// one small dot per unseen image, stacked in a column up the bottom-left corner.
+// Each dot has a white ring so it reads over any image
 void drawBadge(int n) {
-  char txt[8];
-  snprintf(txt, sizeof(txt), "%d", n);
-  display.setTextSize(2);
-  display.setTextColor(GxEPD_BLACK);
-  int16_t bx, by;
-  uint16_t bw, bh;
-  display.getTextBounds(txt, 0, 0, &bx, &by, &bw, &bh);
-  const int pad = 5, margin = 6;
-  int w = bw + 2 * pad, h = bh + 2 * pad;
-  int x = display.width() - w - margin, y = display.height() - h - margin;
-  display.fillRect(x, y, w, h, GxEPD_WHITE);
-  display.drawRect(x, y, w, h, GxEPD_BLACK);
-  display.drawRect(x + 1, y + 1, w - 2, h - 2, GxEPD_BLACK);
-  display.setCursor(x + pad - bx, y + pad - by);
-  display.print(txt);
+  const int r = 3, ring = 2, step = 14, margin = 8;
+  int x = margin + r + ring;
+  for (int i = 0; i < n; i++) {
+    int y = display.height() - margin - r - ring - i * step;
+    if (y < r + ring) break;  // off the top of the panel
+    display.fillCircle(x, y, r + ring, GxEPD_WHITE);
+    display.fillCircle(x, y, r, GxEPD_BLACK);
+  }
 }
 
 // draws one packed frame; partial = fast refresh without the full-screen flash.
-// badge > 0 also draws that number in the bottom-right corner
+// badge > 0 also draws that many dots in the bottom-left corner
+bool wokeFromSleep = false;   // set in setup(): the panel was hibernated, not freshly powered
+bool drewThisWake = false;
 void drawFrame(const EpdImage& img, bool partial, int badge = 0) {
+  if (FULL_REFRESH_ON_WAKE && wokeFromSleep && !drewThisWake) partial = false;
+  drewThisWake = true;
   display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
   if (display.width() != img.w || display.height() != img.h) {
     Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
@@ -364,9 +433,11 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0) {
 volatile bool nextPressed = false;
 // set by buttonTask when the NEXT button is held for SYNC_HOLD_MS, cleared when handled
 volatile bool syncRequested = false;
+// set by buttonTask when NEXT is held for REPLAY_HOLD_MS..SYNC_HOLD_MS and released
+volatile bool replayRequested = false;
 
 // full = flashing full-screen refresh (clears ghosting); otherwise a fast partial one
-// badge > 0 puts that number in the bottom-right corner (on an animation, its resting first frame)
+// badge > 0 draws that many dots in the bottom-left corner (on an animation, on its resting first frame)
 void showImage(const String& itemId, size_t num, size_t total, bool full, int badge = 0) {
   File f = LittleFS.open("/" + itemId, "r");
   EpdImage img;
@@ -388,7 +459,7 @@ void showImage(const String& itemId, size_t num, size_t total, bool full, int ba
   bool first = full;
   for (int loop = 0; loop < ANIM_LOOPS; loop++) {
     for (uint8_t i = 0; i < img.frames; i++) {
-      if (nextPressed || syncRequested) { f.close(); return; }  // button skips the rest of the animation
+      if (nextPressed || replayRequested || syncRequested) { f.close(); return; }  // button skips the rest of the animation
       uint32_t t0 = millis();
       if (!epdReadFrame(f, img, i, frameBuf)) break;
       drawFrame(img, !first);
@@ -402,22 +473,27 @@ void showImage(const String& itemId, size_t num, size_t total, bool full, int ba
   f.close();
 }
 
-int unseenCount = 0;  // images the last sync downloaded, shown as a badge once the lamp rests on the newest
-
 std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
+
+std::vector<bool> storedAnimated;  // same order as storedIds
 
 void loadStoredIds() {
   storedIds.clear();
+  storedAnimated.clear();
   JsonDocument doc;
   loadManifest(doc);
-  for (JsonObject e : doc.as<JsonArray>()) storedIds.insert(storedIds.begin(), e["id"].as<String>());
+  for (JsonObject e : doc.as<JsonArray>()) {
+    storedIds.insert(storedIds.begin(), e["id"].as<String>());
+    storedAnimated.insert(storedAnimated.begin(), (e["frames"] | 1) > 1);
+  }
 }
 
 // ---------- WiFi setup (captive portal) ----------
 
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
 const int NEXT_BUTTON = 25;                  // GPIO25 (labelled D2): momentary switch to GND
-const uint32_t SYNC_HOLD_MS = 4000;          // hold NEXT this long to re-check the worker for new images/firmware
+const uint32_t REPLAY_HOLD_MS = 2000;        // hold NEXT 2 s or more (then let go) to replay an animation
+const uint32_t SYNC_HOLD_MS = 10000;         // hold NEXT this long to re-check the worker for new images/firmware
 const uint32_t RESET_HOLD_MS = 8000;         // hold this long to forget the saved WiFi
 const uint32_t PORTAL_TIMEOUT_S = 180;       // setup mode stays open this long, then retries the saved network
 
@@ -472,15 +548,19 @@ void drawSetupScreen(const String& apName) {
 // long-press BOOT at any time (after the board has started: holding it
 // during power-up would put the chip in flash-download mode instead) to
 // forget the saved WiFi and restart into setup mode
+bool buttonWakePress = false;  // set in setup() when the button that woke the lamp is still down
+
 void buttonTask(void*) {
   pinMode(RESET_BUTTON, INPUT_PULLUP);
   pinMode(NEXT_BUTTON, INPUT_PULLUP);
   uint32_t heldSince = 0;
-  uint32_t nextHeldSince = 0;
+  // woken by the button: the press began at power-up, so count the hold from there
+  uint32_t nextHeldSince = buttonWakePress ? 1 : 0;
   bool syncFired = false;
   for (;;) {
-    // polled every 50 ms, which also debounces. A short press counts as "next"
-    // when released; holding for SYNC_HOLD_MS asks for a sync instead
+    // polled every 50 ms, which also debounces. On release, a short press is
+    // "next" and a longer one (REPLAY_HOLD_MS+) is "replay"; holding on to
+    // SYNC_HOLD_MS asks for a sync instead
     if (digitalRead(NEXT_BUTTON) == LOW) {
       if (!nextHeldSince) nextHeldSince = millis();
       if (!syncFired && millis() - nextHeldSince >= SYNC_HOLD_MS) {
@@ -488,7 +568,10 @@ void buttonTask(void*) {
         syncRequested = true;
       }
     } else {
-      if (nextHeldSince && !syncFired) nextPressed = true;
+      if (nextHeldSince && !syncFired) {
+        if (millis() - nextHeldSince >= REPLAY_HOLD_MS) replayRequested = true;
+        else nextPressed = true;
+      }
       nextHeldSince = 0;
       syncFired = false;
     }
@@ -536,34 +619,27 @@ void connectWiFi() {
   Serial.println("Connected: " + WiFi.localIP().toString());
 }
 
-void setup() {
-  Serial.begin(115200);
-  otaguard::begin(FW_VERSION);  // before anything that could fail
-#ifdef FW_TEST_CRASH  // test builds only: proves the rollback works
-  Serial.println("FW_TEST_CRASH: crashing on purpose");
-  delay(200);
-  abort();
-#endif
-  delay(1000);
+// ---------- sleep / wake cycle ----------
+//
+// The lamp spends almost all its time in deep sleep (the e-ink panel keeps its
+// image with no power) and wakes for one of three reasons:
+//  - power-up / reset / crash / firmware update: full sync, then the quick pass
+//  - the sleep timer, every SYNC_INTERVAL_S: sync; the pass only if new images came
+//  - the NEXT button: no WiFi at all, just step to the next image
+// State that has to survive sleep lives in RTC memory.
 
-  if (!LittleFS.begin(true)) {  // true = format on first boot
-    Serial.println("LittleFS mount failed");
-    return;
-  }
-  display.init(115200);
-  xTaskCreate(buttonTask, "button", 4096, nullptr, 1, nullptr);
+RTC_DATA_ATTR uint32_t rtcWakes = 0;  // timer wakes since the last firmware check
+RTC_DATA_ATTR int rtcViewIdx = 0;     // image on screen, in newest-first order
+RTC_DATA_ATTR int rtcUnseen = 0;      // downloaded images not stepped through yet: the badge number
 
-  connectWiFi();
-  checkForUpdate();
-  unseenCount = syncQueue();
-  loadStoredIds();
-}
+bool displayReady = false;  // display.init() has run, so it's safe to hibernate
+bool cycleOk = false;  // this wake reached the worker or drew something, i.e. the firmware did its job
 
 // waits up to ms (0 = forever) for a press of the NEXT button; true if pressed.
 // Returns false early if a sync was requested
 bool waitForNext(uint32_t ms) {
   uint32_t t0 = millis();
-  while (!nextPressed) {
+  while (!nextPressed && !replayRequested) {  // a replay request counts as a press; the caller decides what it means
     otaguard::tick();
     if (syncRequested) return false;
     if (ms && millis() - t0 >= ms) return false;
@@ -573,57 +649,218 @@ bool waitForNext(uint32_t ms) {
   return true;
 }
 
-void loop() {
-  otaguard::tick();
-  // one automatic pass through everything stored, newest to oldest, then it
-  // rests on the first image; from there (or after any press during the pass)
-  // the NEXT button steps through the images, wrapping around
-  static size_t idx = 0;
-  static bool autoPass = true;
+bool hasSavedWiFi() {
+  wifi_config_t conf;
+  return esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK && conf.sta.ssid[0] != 0;
+}
 
-  if (syncRequested) {
-    Serial.println("NEXT held: syncing with the worker");
-    otaguard::clearBad();  // a manual sync retries a blocklisted firmware version too
-    checkForUpdate();  // reboots into new firmware if there is one
-    unseenCount = syncQueue();
-    loadStoredIds();
-    nextPressed = false;
-    syncRequested = false;
-    idx = 0;
-    autoPass = true;  // show everything again from the first image
-  }
-
-  if (storedIds.empty()) {
-    Serial.println("Nothing stored to show");
-    otaguard::markValid();
-    delay(5000);
-    return;
-  }
-  size_t total = storedIds.size();
-  if (idx >= total) idx = 0;
-
-  // partial refreshes all the way round; the full refresh happens when the
-  // cycle comes back to the first image (and on the first draw after boot)
-  if (otaguard::updatePending()) Serial.println("First run of a new firmware: proving the display path before keeping it");
-  // the badge goes on the newest image once the automatic pass has come to rest on it
-  showImage(storedIds[idx], idx + 1, total, idx == 0, (!autoPass && idx == 0) ? unseenCount : 0);
-  otaguard::markValid();  // booted, synced and drew an image: this firmware is good
-
-  if (autoPass) {
-    if (waitForNext(STILL_HOLD_MS)) {
-      autoPass = false;
-      unseenCount = 0;  // they're looking through them now
-      idx = (idx + 1) % total;
-    } else if (idx + 1 < total) {
-      idx++;
-    } else {
-      autoPass = false;
-      idx = 0;
-      Serial.println("Pass complete, resting on first image (press button to step)");
+// joins the saved network, giving up after WIFI_TIMEOUT_MS. The setup portal
+// (which keeps the lamp awake for minutes) opens only when asked: for a lamp
+// with no WiFi configured at all, or on a manual sync that can't connect
+bool connectForSync(bool portalIfUnconfigured, bool portalIfFailed) {
+  WiFi.mode(WIFI_STA);  // also loads the saved credentials
+  if (!hasSavedWiFi()) {
+    if (!portalIfUnconfigured) {
+      Serial.println("No saved WiFi, skipping sync");
+      return false;
     }
-  } else {
-    waitForNext(0);
-    unseenCount = 0;
-    idx = (idx + 1) % total;
+    connectWiFi();
+    return true;
   }
+  WiFi.begin();
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_TIMEOUT_MS) {
+    otaguard::tick();
+    delay(100);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Connected: " + WiFi.localIP().toString());
+    return true;
+  }
+  if (portalIfFailed) {
+    connectWiFi();
+    return true;
+  }
+  Serial.println("WiFi didn't connect, skipping sync");
+  return false;
+}
+
+// connects, optionally checks for new firmware, downloads new images, then
+// turns WiFi off. False if it couldn't get online
+bool doSync(bool checkFirmware, bool portalIfUnconfigured, bool portalIfFailed, int& added) {
+  added = 0;
+  if (!connectForSync(portalIfUnconfigured, portalIfFailed)) return false;
+  cycleOk = true;
+  if (checkFirmware) checkForUpdate();  // reboots into new firmware if there is one
+  added = syncQueue();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  return true;
+}
+
+// draws image idx (newest-first). The first image gets the full refresh, and
+// only it carries the badge
+void drawIndex(int idx, int badge) {
+  showImage(storedIds[idx], idx + 1, storedIds.size(), idx == 0, idx == 0 ? badge : 0);
+  rtcViewIdx = idx;
+  cycleOk = true;
+}
+
+// quick pass through everything, newest to oldest, then rest on the newest with
+// the badge. A button press steps on and ends the pass; a sync request ends it
+// too and is left for the caller
+void quickPass(int badge) {
+  int total = storedIds.size();
+  for (int i = 0; i < total; i++) {
+    drawIndex(i, 0);
+    if (waitForNext(STILL_HOLD_MS)) {
+      replayRequested = false;  // during the pass any press just steps on
+      rtcUnseen = 0;  // they're looking through them now
+      drawIndex((i + 1) % total, 0);
+      return;
+    }
+    if (syncRequested) return;
+  }
+  Serial.println("Pass complete, resting on the newest image (press the button to step)");
+  rtcUnseen = badge;
+  drawIndex(0, badge);
+}
+
+// plays the animation on screen again (it rests on its first frame afterwards)
+void replayCurrent() {
+  showImage(storedIds[rtcViewIdx], rtcViewIdx + 1, storedIds.size(), false, rtcViewIdx == 0 ? rtcUnseen : 0);
+  cycleOk = true;
+}
+
+// 10 s hold: re-check the worker (firmware too), fetch new images, replay the pass
+void manualSync() {
+  Serial.println("NEXT held: syncing with the worker");
+  otaguard::clearBad();  // a manual sync retries a blocklisted firmware version too
+  int added = 0;
+  doSync(true, true, true, added);
+  loadStoredIds();
+  nextPressed = false;
+  syncRequested = false;
+  rtcUnseen += added;
+  if (!storedIds.empty()) quickPass(rtcUnseen);
+}
+
+// stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
+// can step through the images; a 2 s hold replays an animation, a 10 s hold syncs
+void idleWindow() {
+  uint32_t last = millis();
+  while (millis() - last < AWAKE_IDLE_MS) {
+    bool pressed = waitForNext(AWAKE_IDLE_MS - (millis() - last));
+    if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
+    if (syncRequested) {
+      manualSync();
+      last = millis();
+    } else if (replayRequested) {
+      replayRequested = false;
+      if (!storedIds.empty() && storedAnimated[rtcViewIdx]) {
+        replayCurrent();
+      } else if (!storedIds.empty()) {  // nothing to replay on a still: it's just a step
+        rtcUnseen = 0;
+        drawIndex((rtcViewIdx + 1) % storedIds.size(), 0);
+      }
+      last = millis();
+    } else if (pressed) {
+      rtcUnseen = 0;
+      if (!storedIds.empty()) drawIndex((rtcViewIdx + 1) % storedIds.size(), 0);
+      last = millis();
+    }
+  }
+}
+
+[[noreturn]] void goToSleep() {
+  if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
+  else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
+
+  // a button still held would wake us again at once
+  uint32_t t0 = millis();
+  while (digitalRead(NEXT_BUTTON) == LOW && millis() - t0 < 10000) delay(20);
+
+  if (displayReady) display.hibernate();
+  WiFi.mode(WIFI_OFF);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)NEXT_BUTTON, 0);
+  rtc_gpio_pullup_en((gpio_num_t)NEXT_BUTTON);
+  rtc_gpio_pulldown_dis((gpio_num_t)NEXT_BUTTON);
+  esp_sleep_enable_timer_wakeup((uint64_t)SYNC_INTERVAL_S * 1000000ULL);
+  Serial.printf("Sleeping (next sync in %us, or press the button)\n", (unsigned)SYNC_INTERVAL_S);
+  Serial.flush();
+  esp_deep_sleep_start();
+}
+
+void setup() {
+  Serial.begin(115200);
+  otaguard::begin(FW_VERSION);  // before anything that could fail
+#ifdef FW_TEST_CRASH  // test builds only: proves the rollback works
+  Serial.println("FW_TEST_CRASH: crashing on purpose");
+  delay(200);
+  abort();
+#endif
+  delay(200);
+
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  bool buttonWake = cause == ESP_SLEEP_WAKEUP_EXT0;
+  bool timerWake = cause == ESP_SLEEP_WAKEUP_TIMER;
+  wokeFromSleep = buttonWake || timerWake;
+  if (esp_reset_reason() == ESP_RST_POWERON) {  // RTC memory also survives soft resets (e.g. after an update)
+    rtcWakes = 0;
+    rtcViewIdx = 0;
+    rtcUnseen = 0;
+  }
+  Serial.printf("Wake: %s\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset");
+  if (buttonWake) rtc_gpio_deinit((gpio_num_t)NEXT_BUTTON);
+
+  if (!LittleFS.begin(true)) {  // true = format on first boot
+    Serial.println("LittleFS mount failed");
+    goToSleep();
+  }
+  // after deep sleep the panel still holds its image, so partial refreshes keep working
+  display.init(115200, !wokeFromSleep);
+  displayReady = true;
+
+  pinMode(NEXT_BUTTON, INPUT_PULLUP);
+  if (buttonWake) {
+    if (digitalRead(NEXT_BUTTON) == HIGH) nextPressed = true;  // tapped and released before we were up: still a step
+    else buttonWakePress = true;                               // still down: buttonTask times the hold from power-up
+  }
+  xTaskCreate(buttonTask, "button", 4096, nullptr, 1, nullptr);
+
+  loadStoredIds();
+  if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
+
+  if (buttonWake) {  // no WiFi, just step through what's stored
+    idleWindow();
+    goToSleep();
+  }
+
+  // power-up/reset: sync and replay the pass. Timer: sync, and pass only if there's news
+  bool checkFirmware;
+  if (!timerWake) {
+    checkFirmware = true;
+    rtcWakes = 0;
+  } else {
+    checkFirmware = ++rtcWakes >= FW_CHECK_EVERY_WAKES;
+    if (checkFirmware) rtcWakes = 0;
+  }
+  int added = 0;
+  doSync(checkFirmware, !timerWake, false, added);
+  loadStoredIds();
+  rtcUnseen += added;
+
+  if (!storedIds.empty() && (!timerWake || added > 0)) {
+    quickPass(rtcUnseen);
+    idleWindow();
+  } else if (otaguard::updatePending() && !storedIds.empty()) {
+    // first run of a new firmware with nothing new to show: still prove the display path
+    Serial.println("First run of a new firmware: proving the display path before keeping it");
+    drawIndex(rtcViewIdx, rtcViewIdx == 0 ? rtcUnseen : 0);
+  }
+  goToSleep();
+}
+
+void loop() {
+  goToSleep();  // not reached; setup() always ends in deep sleep
 }

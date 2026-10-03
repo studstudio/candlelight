@@ -1731,13 +1731,12 @@ void redrawCurrent(bool syncBadge) {
 // so does the image it steps to. While unseen images remain it steps only
 // through those, the badge counting the unseen ones left including the one
 // shown (4, 3, 2, 1); after the last one it wraps back to image 1 without a
-// badge (the one full refresh), and from there it is plain 1, 2 ... 12, 1 again
-// (all partial refreshes)
+// badge, and from there it is plain 1, 2 ... 12, 1 again (a full refresh on
+// every wrap to image 1)
 void stepNext() {
   int total = storedIds.size();
   markSeen(rtcViewIdx);
   int next = nextUnseenAfter(rtcViewIdx);
-  bool full = false;
   if (next >= 0) {
     rtcInTour = true;
   } else if (rtcInTour) {
@@ -1749,13 +1748,14 @@ void stepNext() {
       return;
     }
     next = 0;
-    full = true;  // the only full refresh: back on image 1 after flipping through the unseen ones
   } else {
     next = (rtcViewIdx + 1) % total;
   }
   int badge = rtcInTour ? countUnseen() : 0;  // counted before the one shown is marked seen
   markSeen(next);
-  drawIndex(next, badge, full);
+  // a full refresh whenever the button wraps back to image 1 (after the unseen
+  // ones, or 12 -> 1), to clear ghosting; never after the auto pass
+  drawIndex(next, badge, next == 0);
 }
 
 // plays the animation on screen again (it rests on its first frame afterwards)

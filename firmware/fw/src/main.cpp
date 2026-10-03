@@ -383,6 +383,28 @@ void updateFirmwareIfNeeded() {
   otaguard::clearTrying();  // nothing was installed
 }
 
+std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
+
+std::vector<bool> storedAnimated;  // same order as storedIds
+std::vector<bool> storedSeen;      // viewed with the button (an image only drawn by the quick pass doesn't count)
+bool seenDirty = false;            // storedSeen changed and isn't in the manifest yet
+
+// ---------- the quick pass, played while the sync downloads ----------
+// After a sync the lamp shows the images that sync brought, OLDEST first,
+// ending on the newest (image 1), each as a still (an animation's first frame;
+// it plays when the user steps to it). They arrive oldest first, so each one is
+// drawn as soon as it is in: the pass plays during the download instead of
+// after it. passQueue holds the ids still to draw; passTick() (called from the
+// download loop) draws the next once the one on screen has been up
+// STILL_HOLD_MS. The last one waiting when nothing more is coming is held back:
+// quickPass() puts the newest up as the resting image (full refresh, badge)
+std::vector<String> passQueue;
+bool passRunning = false;     // a pass is playing (a press stops it)
+bool passMoreComing = false;  // the sync still has images to deliver
+int passDrawn = 0;
+uint32_t passLastDraw = 0;
+void passTick();
+
 // returns how many new images were stored
 int syncQueue() {
   // 1. what's waiting, oldest first, with sentAt/sentGeo for each
@@ -451,6 +473,7 @@ int syncQueue() {
     if (cr == COMMIT_FAIL) break;
 
     added++;
+    passQueue.push_back(itemId);
     uint32_t tStored = millis();
     if (!ackItem(itemId)) Serial.println("  ack failed (will dedupe next sync)");
     uint32_t tAcked = millis();
@@ -501,27 +524,6 @@ bool readLineFrom(WiFiClient* s, String& out) {
   return false;
 }
 
-std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
-
-std::vector<bool> storedAnimated;  // same order as storedIds
-std::vector<bool> storedSeen;      // viewed with the button (an image only drawn by the quick pass doesn't count)
-bool seenDirty = false;            // storedSeen changed and isn't in the manifest yet
-
-// ---------- the quick pass, played while the sync downloads ----------
-// After a sync the lamp shows every unseen image, OLDEST first, ending on the
-// newest (image 1). New images also arrive oldest first, so each one is drawn
-// as soon as it is in: the pass plays during the download instead of after it.
-// passQueue holds the ids still to draw; passTick() (called from the download
-// loop) draws the next once the one on screen has been up STILL_HOLD_MS. The
-// last one waiting when nothing more is coming is held back: quickPass() puts
-// the newest up as the resting image (full refresh, badge)
-std::vector<String> passQueue;
-bool passRunning = false;     // a pass is playing
-bool passStreamed = false;    // this sync already played the pass: quickPass() only finishes it
-bool passMoreComing = false;  // the sync still has images to deliver
-int passDrawn = 0;
-uint32_t passLastDraw = 0;
-void passTick();
 
 uint32_t copyFlashUs = 0;  // time spent inside File::write by copyBytes (flash erase + program), to tell flash from network
 
@@ -676,7 +678,6 @@ void waitForWriter() {
 // (with PSRAM: drawable now, and on their way to flash in the background)
 SyncResult syncBundle(int& added) {
   added = 0;
-  passStreamed = false;
   std::unique_ptr<SyncConn> conn(new SyncConn);
   WiFiClientSecure& client = conn->client;
   HTTPClient& http = conn->http;
@@ -712,17 +713,7 @@ SyncResult syncBundle(int& added) {
   workerFwSize = head["firmware"]["size"] | 0;
   int count = head["count"] | 0;
   Serial.printf("Bundle: %d item(s) waiting (header after %u ms)\n", count, (unsigned)(millis() - tStart));
-  if (count > 0) {
-    // the pass starts with unseen images from earlier syncs (oldest first, not the
-    // current newest: that one rests at the end only if nothing new arrives)
-    passQueue.clear();
-    for (int i = (int)storedIds.size() - 1; i >= 1; i--) {
-      if (!storedSeen[i]) passQueue.push_back(storedIds[i]);
-    }
-    passRunning = passStreamed = true;
-    passMoreComing = true;
-    passDrawn = 0;
-  }
+  passMoreComing = count > 0;
 
   JsonDocument manifestDoc;
   loadManifest(manifestDoc);
@@ -1523,6 +1514,10 @@ bool connectForSync(bool portalIfUnconfigured) {
 bool doSync(bool portalIfUnconfigured, int& added) {
   added = 0;
   waitForWriter();  // an earlier sync this wake may still be storing
+  passQueue.clear();  // the pass shows only what this sync brings
+  passRunning = true;
+  passMoreComing = false;
+  passDrawn = 0;
   // its images are on flash now: their PSRAM copies make room for this sync's
   for (MemImage& m : memImages) free(m.data);
   memImages.clear();
@@ -1557,6 +1552,27 @@ void updateBeforeSleep() {
   WiFi.mode(WIFI_OFF);
 }
 
+// reads the first frame of image id into frameBuf (from PSRAM if it is still there)
+bool loadFirstFrame(const String& id, EpdImage& img) {
+  if (const MemImage* m = findMemImage(id)) {
+    MemFile mf(m->data, m->size);
+    return epdParse(mf, img) && epdReadFrame(mf, img, 0, frameBuf);
+  }
+  File f = LittleFS.open("/" + id, "r");
+  bool ok = f && epdParse(f, img) && epdReadFrame(f, img, 0, frameBuf);
+  if (f) f.close();
+  return ok;
+}
+
+// draws image idx as a still: an animation shows its first frame without playing
+void drawIndexStill(int idx, int badge, bool full) {
+  EpdImage img;
+  if (loadFirstFrame(storedIds[idx], img)) drawFrame(img, !full, badge);
+  rtcViewIdx = idx;
+  rtcBadge = badge;
+  cycleOk = true;
+}
+
 // draws image idx (newest-first); full = flashing full refresh (clears ghosting)
 void drawIndex(int idx, int badge, bool full) {
   static bool logged = false;
@@ -1585,31 +1601,22 @@ void passTick() {
   String id = passQueue.front();
   passQueue.erase(passQueue.begin());
   if (passDrawn == 0) Serial.printf("First draw starts %u ms after wake\n", (unsigned)millis());
-  showImage(id, ++passDrawn, 0, false);  // fast partial refresh, no badge
-  passLastDraw = millis();               // the hold counts from when it is fully up
+  EpdImage img;
+  if (loadFirstFrame(id, img)) drawFrame(img, true);  // a still (an animation's first frame), fast partial refresh, no badge
+  passDrawn++;
+  Serial.printf("Pass image %d: %s\n", passDrawn, id.c_str());
+  passLastDraw = millis();  // the hold counts from when it is fully up
   cycleOk = true;
 }
 
 void stepNext();
 
-// quick pass through the UNSEEN images only (never viewed with the button),
-// OLDEST first, ending on the newest (image 1), which rests with the full
-// refresh and the badge. After a sync most of it has already played during the
-// download (passStreamed); this plays what is left. Images already viewed are
-// skipped but stay reachable with the button; unviewed ones from earlier syncs
-// are included, so nothing gets buried while nobody's home. A press ends the
-// pass on image 1; a sync request ends it too and is left for the caller. With
-// nothing unseen it just draws the newest image once
+// finishes the pass of the images this sync brought (oldest first; most of it
+// already played during the download) and rests on the newest, image 1: full
+// refresh, a still, and the badge counting every unseen image. A press ends the
+// pass on image 1; a sync request ends it too and is left for the caller.
+// With nothing new it just draws image 1
 void quickPass() {
-  if (!passStreamed) {
-    passQueue.clear();
-    for (int i = (int)storedIds.size() - 1; i >= 1; i--) {
-      if (!storedSeen[i]) passQueue.push_back(storedIds[i]);
-    }
-    passRunning = true;
-    passDrawn = 0;
-  }
-  passStreamed = false;
   passMoreComing = false;
   // what is left, minus the newest (it rests) and anything no longer stored
   std::vector<String> left;
@@ -1633,12 +1640,13 @@ void quickPass() {
   passRunning = false;
   passQueue.clear();
   if (syncRequested) return;
-  // the pass ends on image 1: full refresh, badge = every unseen image, this one included
   int unseen = countUnseen();
   rtcInTour = unseen > 0;
-  if (passDrawn > 0) Serial.println("Pass complete, resting on the newest image (press the button to step)");
-  if (passDrawn > 0 && millis() - passLastDraw < STILL_HOLD_MS) delay(STILL_HOLD_MS - (millis() - passLastDraw));
-  drawIndex(0, unseen, true);
+  if (passDrawn > 0) {
+    Serial.println("Pass complete, resting on the newest image (press the button to step)");
+    if (millis() - passLastDraw < STILL_HOLD_MS) delay(STILL_HOLD_MS - (millis() - passLastDraw));
+  }
+  drawIndexStill(0, unseen, true);
 }
 
 // redraws the image on screen as a still (first frame) with or without the
@@ -1647,16 +1655,7 @@ void quickPass() {
 void redrawCurrent(bool syncBadge) {
   if (storedIds.empty()) return;
   EpdImage img;
-  bool ok;
-  if (const MemImage* m = findMemImage(storedIds[rtcViewIdx])) {
-    MemFile mf(m->data, m->size);
-    ok = epdParse(mf, img) && epdReadFrame(mf, img, 0, frameBuf);
-  } else {
-    File f = LittleFS.open("/" + storedIds[rtcViewIdx], "r");
-    ok = f && epdParse(f, img) && epdReadFrame(f, img, 0, frameBuf);
-    if (f) f.close();
-  }
-  if (ok) drawFrame(img, true, rtcBadge, syncBadge);
+  if (loadFirstFrame(storedIds[rtcViewIdx], img)) drawFrame(img, true, rtcBadge, syncBadge);
 }
 
 // pressing NEXT means the user is here: what's on screen counts as viewed, and
@@ -1672,7 +1671,13 @@ void stepNext() {
     rtcInTour = true;
   } else if (rtcInTour) {
     rtcInTour = false;  // done with the unseen ones: back to the newest
-    next = rtcViewIdx == 0 ? 1 % total : 0;  // (already on it, e.g. one new image: on to image 2)
+    if (rtcViewIdx == 0) {
+      // already on it (one new image, showing a "1"): this press only clears the
+      // badge, a fast partial refresh of the same still; the next press goes on
+      drawIndexStill(0, 0, false);
+      return;
+    }
+    next = 0;
   } else {
     next = (rtcViewIdx + 1) % total;
   }
@@ -1831,7 +1836,7 @@ void setup() {
   loadStoredIds();
 
   // power-up always shows something (the panel's state is unknown); a timer wake only when images arrived
-  if (!storedIds.empty() && (!timerWake || added > 0 || passStreamed)) {  // a pass the sync started must end on image 1
+  if (!storedIds.empty() && (!timerWake || added > 0 || passDrawn > 0)) {  // a pass the sync started must end on image 1
     quickPass();
     idleWindow();
   } else if (otaguard::updatePending() && !storedIds.empty()) {

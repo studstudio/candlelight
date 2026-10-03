@@ -32,9 +32,14 @@ class ResumableTLS : public WiFiClientSecure {
       return 0;
     }
     _connected = true;
-    save(sess, sessLen, sessCap);
+    saveResult = save(sess, sessLen, sessCap);
     return 1;
   }
+
+  // what the last connectResumable() did with the session: 0 = saved (sessLen
+  // bytes), otherwise the mbedtls error, with saveNeeded the size it wanted
+  int saveResult = 0;
+  size_t saveNeeded = 0;
 
  private:
   int start(const IPAddress& ip, uint16_t port, const char* host, const uint8_t* sess, size_t sessLen) {
@@ -104,15 +109,28 @@ class ResumableTLS : public WiFiClientSecure {
     return c->socket;
   }
 
-  // keeps the session (with the newest ticket the server sent) for the next connection
-  void save(uint8_t* sess, size_t& sessLen, size_t sessCap) {
+  // keeps the session (with the newest ticket the server sent) for the next
+  // connection. The core is built to keep the server's certificate in the
+  // session (~0.9 KB for Cloudflare's); resuming doesn't need it, so it is
+  // dropped from the copy first, which keeps the saved session at ~0.4 KB
+  int save(uint8_t* sess, size_t& sessLen, size_t sessCap) {
     mbedtls_ssl_session s;
     mbedtls_ssl_session_init(&s);
     size_t olen = 0;
-    if (mbedtls_ssl_get_session(&sslclient->ssl_ctx, &s) == 0 && mbedtls_ssl_session_save(&s, sess, sessCap, &olen) == 0)
-      sessLen = olen;
-    else
-      sessLen = 0;
+    int ret = mbedtls_ssl_get_session(&sslclient->ssl_ctx, &s);
+    if (ret == 0) {
+#if defined(MBEDTLS_SSL_KEEP_PEER_CERTIFICATE)
+      if (s.peer_cert) {
+        mbedtls_x509_crt_free(s.peer_cert);
+        mbedtls_free(s.peer_cert);
+        s.peer_cert = NULL;
+      }
+#endif
+      ret = mbedtls_ssl_session_save(&s, sess, sessCap, &olen);
+    }
+    sessLen = ret == 0 ? olen : 0;
+    saveNeeded = olen;
     mbedtls_ssl_session_free(&s);
+    return ret;
   }
 };

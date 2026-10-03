@@ -86,6 +86,8 @@ bool connectWorker(ResumableTLS& c, const char* what) {
   rtcTlsSessionLen = ok ? len : 0;  // a failed connect forgets the session: the next one starts clean
   Serial.printf("%s: TLS handshake %u ms (%s)%s\n", what, (unsigned)(millis() - t0),
                 offered ? "saved session offered" : "full, no saved session", ok ? "" : " FAILED");
+  if (ok && c.saveResult == 0) Serial.printf("  TLS session saved for next time (%u bytes)\n", (unsigned)len);
+  else if (ok) Serial.printf("  TLS session NOT saved: error -0x%04x (needs %u bytes)\n", (unsigned)-c.saveResult, (unsigned)c.saveNeeded);
   return ok;
 }
 

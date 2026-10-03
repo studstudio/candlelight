@@ -49,7 +49,6 @@ const uint32_t FAST_WIFI_MS = 6000;                          // [PLACEHOLDER] fa
 const uint32_t DHCP_REUSE_S = 1800;                          // [PLACEHOLDER] reuse the cached IP address this long before asking DHCP again
 const uint32_t BUNDLE_STALL_MS = 15000;                      // [PLACEHOLDER] a sync response that stops delivering data for this long is abandoned
 const uint32_t BUNDLE_BUDGET_MS = 120000;                    // [PLACEHOLDER] total time allowed for the sync response
-const bool GRAY_STILLS = true;                               // stills the user settles on (image 1 after the pass, NEXT steps) in 4-level gray: a full refresh; the pass stays fast b/w
 const bool FAST_DRAW = true;                                 // send frames to the panel directly (skips the per-pixel library loop); set false if the display glitches
 const bool FULL_REFRESH_ON_WAKE = false;                     // set true if partial refreshes after deep sleep ghost or glitch
 
@@ -1110,7 +1109,6 @@ uint8_t* grayPlane = nullptr;  // second bit plane, also the "previous" plane fo
 uint8_t* shownGray = nullptr;  // the gray frame on screen
 bool screenGray = false;       // what's on screen was drawn in gray
 bool shownGrayValid = false;   // ...and shownGray holds it
-bool graySettled = false;      // set by drawIndex()/drawIndexStill(): this draw may be gray
 RTC_DATA_ATTR bool rtcScreenGray = false;
 RTC_DATA_ATTR char rtcGrayId[64];
 RTC_DATA_ATTR int rtcGrayBadge = 0;
@@ -1125,7 +1123,7 @@ bool grayBuffers() {
 // a full-size 2-bit still in 4-level gray (full refresh). False if it can't
 bool drawGray(const EpdImage& img, int badge) {
   const int W = Panel420::WIDTH, H = Panel420::HEIGHT;
-  if (!GRAY_STILLS || img.bpp != 2 || img.frames != 1 || img.w != W || img.h != H || !grayBuffers()) return false;
+  if (img.bpp != 2 || img.frames != 1 || img.w != W || img.h != H || !grayBuffers()) return false;
   uint32_t t0 = millis();
   memcpy(grayWork, frameBuf, GRAY_FRAME_BYTES);
   if (badge > 0) {
@@ -1215,8 +1213,6 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
     Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
     return;
   }
-  // a still the user settles on: 4-level gray (always a full refresh)
-  if (graySettled && !syncBadge && drawGray(img, badge)) return;
   // full-size landscape frames (badges included) go straight to the panel; anything else uses the library
   if (drawDirect(img, partial, badge, syncBadge)) return;
   if (screenGray) partial = false;  // the library can't bridge from gray
@@ -1733,9 +1729,7 @@ void rememberScreen(int idx, int badge) {
 void drawIndexStill(int idx, int badge, bool full) {
   logFirstDraw();
   EpdImage img;
-  graySettled = true;
   if (loadFirstFrame(storedIds[idx], img)) drawFrame(img, !full, badge);
-  graySettled = false;
   rememberScreen(idx, badge);
   rtcViewIdx = idx;
   rtcBadge = badge;
@@ -1745,9 +1739,7 @@ void drawIndexStill(int idx, int badge, bool full) {
 // draws image idx (newest-first); full = flashing full refresh (clears ghosting)
 void drawIndex(int idx, int badge, bool full) {
   logFirstDraw();
-  graySettled = true;
   showImage(storedIds[idx], idx + 1, storedIds.size(), full, badge);
-  graySettled = false;
   rememberScreen(idx, badge);
   rtcViewIdx = idx;
   rtcBadge = badge;
@@ -1864,6 +1856,24 @@ void replayCurrent() {
   cycleOk = true;
 }
 
+// [TESTING] 2 s hold on a still: redraws it in 4-level gray (a full, flashing
+// refresh), or back in b/w (a full refresh, which clears the gray) if it is
+// gray already. Gray is not the default: it flashes, ghosts more and doesn't
+// look better than the dithered b/w
+void toggleGray() {
+  EpdImage img;
+  if (!loadFirstFrame(storedIds[rtcViewIdx], img)) return;
+  if (screenGray) {
+    Serial.println("2 s hold: back to b/w");
+    drawFrame(img, false, rtcBadge);
+  } else {
+    Serial.println("2 s hold: showing this still in 4-level gray");
+    if (!drawGray(img, rtcBadge)) Serial.println("  gray not possible for this image (needs a full-size 2-bit still)");
+  }
+  rememberScreen(rtcViewIdx, rtcBadge);
+  cycleOk = true;
+}
+
 // the setup network with the QR screen, one attempt of PORTAL_TIMEOUT_S.
 // True if someone joined it and the lamp is now online
 bool openSetupPortal() {
@@ -1917,12 +1927,9 @@ void idleWindow() {
     } else if (replayRequested) {
       replayRequested = false;
       if (!storedIds.empty()) {
-        if (storedAnimated[rtcViewIdx]) {
-          markSeen(rtcViewIdx);
-          replayCurrent();
-        } else {
-          stepNext();  // nothing to replay on a still: it's just a step
-        }
+        markSeen(rtcViewIdx);
+        if (storedAnimated[rtcViewIdx]) replayCurrent();
+        else toggleGray();  // [TESTING] a still has nothing to replay: gray / b/w
       }
       last = millis();
     } else if (pressed) {

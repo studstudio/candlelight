@@ -101,21 +101,6 @@
     border-radius: 50%; background: rgba(0,0,0,0.25); font-size: 10px;
   }
 
-  /* orientation icon buttons — sit in the letterbox space beside the photo */
-  .orient-btn {
-    position: absolute; top: 50%; transform: translateY(-50%);
-    width: 34px; height: 34px; border-radius: 8px;
-    background: rgba(30,23,18,0.75); border: 1px solid var(--line);
-    color: var(--cream-dim);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 6;
-  }
-  .orient-btn.active { background: var(--ember); border-color: var(--ember); color: #1a1108; }
-  .orient-btn-left { left: 8px; top: 8px; transform: none; }
-  .orient-btn-right { right: 8px; }
-  .replace-photo-btn { left: 8px; top: 46px; transform: none; }
-  .message-toggle-btn { left: 8px; top: 84px; transform: none; }
-  .message-toggle-btn.active { background: var(--ember); border-color: var(--ember); color: #1a1108; }
 
   /* collapsed by default (zero height, hidden) so photo and preview stay
      flush together exactly as before; expanding it inserts real space
@@ -150,16 +135,19 @@
     display: block; width: 100%; height: 100%; object-fit: contain;
     user-select: none; -webkit-user-select: none; pointer-events: none;
   }
-  .crop-toggle {
-    display: flex; align-items: center; justify-content: center; gap: 6px;
-    width: 100%; padding: 5px 0; margin: 0 0 6px;
-    background: transparent; border: none; color: var(--cream-dim);
-    font-size: 11px; letter-spacing: 0.04em; text-transform: lowercase; opacity: 0.8;
+  /* one slim toolbar row above the crop view: + and message on the left, the
+     fold arrow centered. Plain icons, no button chrome. Collapsing hides the
+     crop view entirely and this row stays as the whole collapsed footprint. */
+  .crop-toolbar { position: relative; display: flex; align-items: center; height: 34px; margin: 0 0 6px; }
+  .tool-btn, .crop-toggle {
+    background: transparent; border: none; padding: 0; color: var(--cream-dim);
+    display: flex; align-items: center; justify-content: center;
   }
-  .crop-toggle svg { transition: transform 0.2s; }
-  body.crop-collapsed .crop-toggle svg { transform: rotate(-90deg); }
-  /* display:none (not a height transition) so the expand is synchronous and
-     clientWidth/clientHeight are valid again immediately for the crop math */
+  .tool-btn { width: 36px; height: 34px; }
+  .message-toggle-btn { margin-left: auto; } /* far right, balancing the + on the left */
+  .tool-btn.active { color: var(--ember); }
+  /* message cursor icon: just highlights orange while the message box is open */
+  .crop-toggle { position: absolute; left: 50%; top: 0; transform: translateX(-50%); width: 56px; height: 34px; opacity: 0.8; }
   .photo-wrap.collapsed { display: none; }
   body.crop-collapsed #cropHint { display: none !important; }
   .empty-state {
@@ -194,8 +182,8 @@
   .preview-wrap {
     position: relative; touch-action: none;
     width: 100%;
-    border-radius: 0 0 14px 14px; overflow: hidden;
-    border: 1px solid var(--line); border-top: 1px solid var(--ember-dim);
+    border-radius: 0; overflow: hidden;
+    border: 1px solid var(--line); border-top: 1px solid rgba(156,154,148,0.2); /* faint grey seam under the crop view */
     background: var(--bg);
     display: flex; align-items: center; justify-content: center;
   }
@@ -233,11 +221,21 @@
 
   .postcard-row { display: flex; gap: 8px; margin-top: 12px; }
   .postcard-row input[type=text] {
-    flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+    flex: 1; min-width: 0; padding: 2px 8px; align-self: center; border-radius: 0; border: 1px solid rgba(156,154,148,0.22); caret-color: transparent;
     background: var(--bg-elevated); color: var(--cream); font-size: 16px;
     font-family: inherit;
   }
-  .postcard-row input[type=text]::placeholder { color: var(--cream-dim); opacity: 0.6; }
+  .postcard-row input[type=text]:focus { outline: none; }
+  .postcard-field { position: relative; flex: 1; min-width: 0; display: flex; align-self: center; }
+  .postcard-field input[type=text] { width: 100%; }
+  /* orange blinking underscore caret — a brisk blink, soft-edged rather than a hard flick */
+  .msg-underscore {
+    position: absolute; left: 0; bottom: 6px; width: 9px; height: 2px; background: var(--ember);
+    pointer-events: none; display: none;
+  }
+  .postcard-collapse.expanded .msg-underscore { display: block; animation: underscoreBlink 1.1s ease-in-out infinite; }
+  @keyframes underscoreBlink { 0%, 45% { opacity: 1; } 60%, 85% { opacity: 0; } 100% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .postcard-collapse.expanded .msg-underscore { animation: none; } }
   .postcard-pos-btn {
     flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px;
     border: 1px solid var(--line); background: var(--bg-elevated); color: var(--cream-dim);
@@ -335,11 +333,18 @@
   <button class="pill" id="duplicateFrameBtn" style="margin-top:8px; width:100%; padding:9px 0;">⧉ duplicate current frame</button>
 </div>
 
-<button class="crop-toggle" id="cropToggleBtn" type="button" aria-expanded="true">
-  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" id="cropToggleChevron"><path d="M6 9l6 6 6-6"/></svg>
-  <span id="cropToggleLabel">hide crop</span>
-</button>
 
+
+<div class="crop-area" id="cropArea">
+<div class="crop-toolbar">
+  <button class="tool-btn" id="replacePhotoBtn" type="button" title="add / replace photo" aria-label="add or replace photo">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+  <button class="tool-btn message-toggle-btn" id="messageToggleBtn" type="button" title="add a message" aria-label="add a message"><svg class="msg-cursor" viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 17h12"/></svg></button>
+  <button class="crop-toggle" id="cropToggleBtn" type="button" aria-label="show or hide crop area" aria-expanded="true">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="cropChevron" d="M6 15l6-6 6 6"/></svg>
+  </button>
+</div>
 <div class="photo-wrap" id="photoWrap">
   <img id="sourceImg" src="" style="display:none;">
   <div class="empty-state" id="emptyState">
@@ -355,32 +360,19 @@
   <input type="file" id="fileInput" accept="image/*">
   <div class="tap-target" id="tapTarget"></div>
 
-  <button class="orient-btn orient-btn-left active" id="btnLandscape" title="landscape">
-    <svg viewBox="0 0 24 24" width="16" height="16"><rect x="2" y="6" width="20" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-  </button>
-  <button class="orient-btn orient-btn-right" id="btnPortrait" title="portrait">
-    <svg viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="2" width="12" height="20" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-  </button>
-  <button class="orient-btn replace-photo-btn" id="replacePhotoBtn" title="replace photo">
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-      <path d="M21 4v5h-5"/>
-    </svg>
-  </button>
-  <button class="orient-btn message-toggle-btn" id="messageToggleBtn" title="add a message">
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 5h16v11H8l-4 4V5z"/>
-      <line x1="7" y1="9" x2="17" y2="9"/>
-      <line x1="7" y1="12.5" x2="13" y2="12.5"/>
-    </svg>
-  </button>
+
+</div>
 </div>
 
 <div class="postcard-collapse" id="postcardCollapse">
   <div class="postcard-row">
-    <input type="text" id="postcardInput" placeholder="add a short message (optional)" maxlength="90">
+    <div class="postcard-field"><input type="text" id="postcardInput" aria-label="postcard message" maxlength="90">
+    <span class="msg-underscore" id="msgUnderscore"></span></div>
     <button class="postcard-pos-btn" id="postcardPosBtn" title="move message to top/bottom">
-      <svg viewBox="0 0 24 24" width="16" height="16"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="4.5" y="15" width="15" height="5.5" rx="1" fill="currentColor" id="postcardPosIcon"/></svg>
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <g id="postcardArrowUp"><path d="M7 10l5-5 5 5"/></g>
+        <g id="postcardArrowDown"><path d="M7 14l5 5 5-5"/></g>
+      </svg>
     </button>
     <button class="font-dial-btn" id="fontDialBtn" title="tap to cycle font">
       <svg viewBox="0 0 24 24" width="22" height="22">
@@ -428,6 +420,7 @@
 <div class="moire-row"><span class="moire-label">organic</span><input type="range" id="organicSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">outline</span><input type="range" id="outlineSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">dot stipple</span><input type="range" id="dotStippleSlider" min="0" max="100" value="0"></div>
+<div id="applyAllBtn" role="button" tabindex="0" style="display:none; margin:12px 0 0; text-align:center; font-size:12px; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">apply to all</div>
 <p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading · tap preview to cycle filter</p>
@@ -499,15 +492,22 @@ const saveImageBtn = document.getElementById('saveImageBtn');
 const filterButtons = document.querySelectorAll('.filter-pill');
 const postcardInput = document.getElementById('postcardInput');
 const postcardPosBtn = document.getElementById('postcardPosBtn');
-const postcardPosIcon = document.getElementById('postcardPosIcon');
+const postcardArrowUp = document.getElementById('postcardArrowUp');
+const postcardArrowDown = document.getElementById('postcardArrowDown');
+// the arrow matching the current message position (top/bottom of the image) is the bright one
+function updatePostcardPosIcon() {
+  [[postcardArrowUp, 'top'], [postcardArrowDown, 'bottom']].forEach(([el, pos]) => {
+    const on = postcardPosition === pos;
+    el.style.stroke = on ? 'var(--ember)' : 'currentColor';
+    el.style.opacity = on ? '1' : '0.3';
+  });
+}
 const fontDialBtn = document.getElementById('fontDialBtn');
 const FONT_DOTS = [0,1,2,3,4,5].map(i => document.getElementById(`fontDot${i}`));
 const activeFontLabel = document.getElementById('activeFontLabel');
 const sendBtn = document.getElementById('sendBtn');
 const sendStatus = document.getElementById('sendStatus');
 const lastSeen = document.getElementById('lastSeen');
-const btnLandscape = document.getElementById('btnLandscape');
-const btnPortrait = document.getElementById('btnPortrait');
 const contactsRow = document.getElementById('contactsRow');
 const addContactBtn = document.getElementById('addContactBtn');
 const modalBackdrop = document.getElementById('modalBackdrop');
@@ -562,10 +562,9 @@ let pendingUploadTargetLayer = 0; // which layer slot the next file picker resul
 // ============================================================
 // ANIMATION ("cycle") MODE: up to 10 independent frames. Each frame is
 // itself a full layer stack — a base plus up to 2 overlays, edited and
-// composited exactly like still mode (see LAYERS above) — just forced to
-// pure black & white (2 levels) instead of whatever tone step you dial in,
-// since the panel can't do partial refresh in 4-gray mode and cycling
-// relies on fast B/W partial refresh instead.
+// composited exactly like still mode (see LAYERS above). Everything in the
+// app — still and cycle alike — is pure black & white (2 levels); there is no
+// gray-level output any more. Cycling relies on fast B/W partial refresh.
 // currentStack() is the single source of truth for "whichever layer stack
 // is being edited right now" — the base `layers` array in still mode, or
 // frames[activeFrameIdx] in cycle mode — so all the existing layer-tab /
@@ -575,7 +574,17 @@ const MAX_FRAMES = 10;
 let mode = 'still'; // 'still' | 'cycle'
 let frames = []; // each entry is itself a [base, overlay1, overlay2] stack, or null
 let activeFrameIdx = 0; // which frame is being edited in cycle mode
-let pendingNewFrameIdx = null; // set only by the filmstrip's + button; committed in fileInput.onchange once a photo is actually chosen
+let pendingNewFrameIdx = null; // flag (null/true), set only by the filmstrip's + button; committed in fileInput.onchange once photos are actually chosen
+
+// single entry point for every file-picker open, so stale intent from a
+// cancelled pick (no 'change' event fires on cancel) can never leak into the next one
+function openFilePicker(targetLayer, opts = {}) {
+  pendingUploadTargetLayer = targetLayer;
+  pendingNewFrameIdx = opts.newFrame ? true : null;
+  fileInput.multiple = !!opts.multiple;
+  fileInput.value = ''; // so re-picking the same photo still fires 'change'
+  fileInput.click();
+}
 let animIntervalSec = 0.3; // global, defaults to real partial-refresh speed
 let animPlaying = false;
 let animPlayTimer = null;
@@ -589,8 +598,7 @@ function frameIsFilled(f) { return !!(f && f[0] && f[0].img); }
 
 function makeDefaultLayerParams() {
   return {
-    stepIndex: STEPS.reduce((best, cur, idx) =>
-      (cur.levels === 2 && Math.abs(cur.contrast - 1) < Math.abs(STEPS[best].contrast - 1)) ? idx : best, 0),
+    stepIndex: DEFAULT_STEP_INDEX,
     ditherPattern: 'floyd',
     invert: false,
     filterStepIndex: 0,
@@ -716,7 +724,7 @@ function updateLayerTabs() {
     tab.className = 'layer-tab' + (i === activeLayerIdx ? ' active' : '') + (!layer ? ' layer-tab-add' : '');
     tab.textContent = layer ? LABELS[i] : '+ overlay';
     tab.onclick = () => {
-      if (!layer) { pendingUploadTargetLayer = i; fileInput.click(); }
+      if (!layer) { openFilePicker(i); }
       else { switchToLayer(i); }
     };
     if (layer && i > 0) {
@@ -743,13 +751,13 @@ const animPlayBtn = document.getElementById('animPlayBtn');
 // shared by render() (still mode, and the active frame in cycle mode) and
 // the preview/send paths below (which need to composite OTHER frames, not
 // just whichever one is currently loaded into the editing globals)
-function compositeStack(stack, forceLevels) {
+function compositeStack(stack) {
   const W = targetW, H = targetH;
   let composite = null;
   for (let i = 0; i < stack.length; i++) {
     const layer = stack[i];
     if (!layer || !layer.img) continue;
-    const gray = computeLayerGray(layer, W, H, forceLevels);
+    const gray = computeLayerGray(layer, W, H);
     if (!composite) { composite = gray; continue; }
     const opacity = layer.opacityAmount;
     if (opacity >= 0.999) {
@@ -958,16 +966,12 @@ function updateFrameFilmstrip() {
     add.title = 'add a new photo as the next frame';
     add.onclick = () => {
       snapshotActiveLayerState();
-      let newIdx = -1;
-      for (let i = 0; i < MAX_FRAMES; i++) { if (!frameIsFilled(frames[i])) { newIdx = i; break; } }
-      if (newIdx === -1) return;
+      if (frames.filter(frameIsFilled).length >= MAX_FRAMES) return;
       // don't touch activeFrameIdx/frames yet — if the user cancels the photo
       // picker, no 'change' event fires at all, and mutating state now would
       // silently strand the app pointed at an empty frame nothing ever
       // refreshes to show. Commit only once a photo is actually chosen.
-      pendingNewFrameIdx = newIdx;
-      pendingUploadTargetLayer = 0;
-      fileInput.click();
+      openFilePicker(0, { newFrame: true, multiple: true });
     };
     frameFilmstrip.appendChild(add);
   }
@@ -1046,6 +1050,7 @@ function setMode(next) {
   modeCycleBtn.classList.toggle('active', mode === 'cycle');
   frameFilmstrip.style.display = mode === 'cycle' ? 'flex' : 'none';
   animControls.style.display = mode === 'cycle' ? 'block' : 'none';
+  document.getElementById('applyAllBtn').style.display = mode === 'cycle' ? 'block' : 'none'; // frames only exist in cycle
 
   activeLayerIdx = 0;
   const stack = currentStack();
@@ -1232,39 +1237,14 @@ async function checkLastSeen(lampId) {
 // hardware), not just a starting box shape. The crop box can still be any
 // shape — whatever region you select gets stretched/squashed to fit this
 // fixed pixel count, same as it will be on the real panel.
-function setOrientation(landscape) {
-  if (landscape) {
-    btnLandscape.classList.add('active'); btnPortrait.classList.remove('active');
-    targetW = PANEL_W; targetH = PANEL_H; presetAspect = PANEL_W / PANEL_H;
-  } else {
-    btnPortrait.classList.add('active'); btnLandscape.classList.remove('active');
-    targetW = PANEL_H; targetH = PANEL_W; presetAspect = PANEL_H / PANEL_W;
-  }
-  liveCanvas.width = targetW;
-  liveCanvas.height = targetH;
-  scratchCanvas.width = targetW;
-  scratchCanvas.height = targetH;
-  // the fixed output aspect just changed, so every layer's crop box (not
-  // just the one you're currently editing) needs to re-fit to it
-  layers.forEach((layer, i) => {
-    if (!layer) return;
-    const vis = computeVisibleBoundsFor(layer.coverScale, layer.coverX0, layer.coverY0, layer.naturalW, layer.naturalH);
-    const fitted = computeFittedBox(vis, presetAspect);
-    if (i === activeLayerIdx) { box = fitted; applyBoxStyle(); }
-    else { layer.box = fitted; }
-  });
-  if (naturalW) render();
-}
 let presetAspect = PANEL_W / PANEL_H;
-btnLandscape.onclick = () => setOrientation(true);
-btnPortrait.onclick = () => setOrientation(false);
 
 // ---------- photo load ----------
-tapTarget.onclick = () => { pendingUploadTargetLayer = 0; fileInput.click(); };
+tapTarget.onclick = () => openFilePicker(0, { multiple: mode === 'cycle' }); // empty cycle frame: pick several at once
 const replacePhotoBtn = document.getElementById('replacePhotoBtn');
 // replaces whichever layer is currently active (base or an overlay) — the
 // icon acts on "the photo you're looking at right now"
-replacePhotoBtn.onclick = () => { pendingUploadTargetLayer = activeLayerIdx; fileInput.click(); };
+replacePhotoBtn.onclick = () => openFilePicker(activeLayerIdx);
 
 // ---------- message panel toggle: folds/unfolds between photo and preview ----------
 const postcardCollapse = document.getElementById('postcardCollapse');
@@ -1272,22 +1252,161 @@ const messageToggleBtn = document.getElementById('messageToggleBtn');
 messageToggleBtn.onclick = () => {
   const isExpanded = postcardCollapse.classList.toggle('expanded');
   messageToggleBtn.classList.toggle('active', isExpanded);
+  if (isExpanded) { updateUnderscore(); setTimeout(() => { postcardInput.focus({ preventScroll: true }); updateUnderscore(); }, 150); }
+  else postcardInput.blur();
 };
 
+// orange blinking underscore standing in for the text caret inside the message
+// box; it tracks the real caret position by measuring the text before it
+const msgUnderscore = document.getElementById('msgUnderscore');
+const underscoreMeasure = document.createElement('canvas').getContext('2d');
+function updateUnderscore() {
+  const cs = getComputedStyle(postcardInput);
+  underscoreMeasure.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  const pos = postcardInput.selectionStart == null ? postcardInput.value.length : postcardInput.selectionStart;
+  const textW = underscoreMeasure.measureText(postcardInput.value.slice(0, pos)).width;
+  const padL = parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth);
+  const maxX = postcardInput.clientWidth - 6;
+  const x = Math.max(padL, Math.min(padL + textW - postcardInput.scrollLeft, maxX));
+  msgUnderscore.style.transform = `translateX(${x}px)`;
+}
+['input', 'keyup', 'click', 'focus', 'select', 'touchend', 'scroll'].forEach(evt => postcardInput.addEventListener(evt, () => requestAnimationFrame(updateUnderscore)));
+window.addEventListener('resize', updateUnderscore);
+
+// ---------- cycle mode: multi-photo import + settings inheritance ----------
+const SETTING_KEYS = ['stepIndex', 'ditherPattern', 'invert', 'filterStepIndex',
+  'gridAmount', 'hatchAmount', 'scanAmount', 'grainAmount', 'chromaAmount', 'reliefAmount',
+  'organicAmount', 'outlineAmount', 'dotStippleAmount', 'opacityAmount'];
+function copyLayerSettings(src, dst) { SETTING_KEYS.forEach(k => { dst[k] = src[k]; }); }
+
+// crop-area size, measured even while the section is collapsed to its strip
+// (expanded and re-collapsed within one synchronous layout — nothing paints)
+function measureContainer() {
+  const was = photoWrap.classList.contains('collapsed');
+  if (was) photoWrap.classList.remove('collapsed');
+  const cw = photoWrap.clientWidth, ch = photoWrap.clientHeight;
+  if (was) photoWrap.classList.add('collapsed');
+  return { cw, ch };
+}
+function placeLayerImage(layer, cw, ch) {
+  const scale = Math.min(cw / layer.naturalW, ch / layer.naturalH);
+  layer.coverScale = scale;
+  layer.coverX0 = (cw - layer.naturalW * scale) / 2;
+  layer.coverY0 = (ch - layer.naturalH * scale) / 2;
+}
+// carries src's crop box onto dst as a fraction of the visible image, so the
+// same region is selected even if the photos differ in size (identical size →
+// identical box). dst's cover-fit must already be set.
+function mapCropBox(src, dst) {
+  const sw = src.naturalW * src.coverScale, sh = src.naturalH * src.coverScale;
+  const dw = dst.naturalW * dst.coverScale, dh = dst.naturalH * dst.coverScale;
+  const w = Math.min(src.box.width / sw * dw, dw), h = Math.min(src.box.height / sh * dh, dh);
+  let l = dst.coverX0 + (src.box.left - src.coverX0) / sw * dw;
+  let t = dst.coverY0 + (src.box.top - src.coverY0) / sh * dh;
+  l = Math.max(dst.coverX0, Math.min(l, dst.coverX0 + dw - w));
+  t = Math.max(dst.coverY0, Math.min(t, dst.coverY0 + dh - h));
+  return { left: l, top: t, width: w, height: h };
+}
+function loadImageFile(file) {
+  return new Promise(resolve => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => resolve(null);
+    im.src = URL.createObjectURL(file);
+  });
+}
+function flashStatus(msg, cls) {
+  sendStatus.textContent = msg; sendStatus.className = 'send-status ' + (cls || '');
+  setTimeout(() => { if (sendStatus.textContent === msg) { sendStatus.textContent = ''; sendStatus.className = 'send-status'; } }, 4000);
+}
+
+// each chosen photo becomes the next frame, in selection order. Every new frame
+// starts from the currently-active frame's crop + settings (or, for the very
+// first batch, the first new frame's defaults).
+async function importFramesFromFiles(files) {
+  if (animPlaying) stopAnimPreview();
+  const filledCount = frames.filter(frameIsFilled).length;
+  const capacity = MAX_FRAMES - filledCount;
+  if (capacity <= 0) { flashStatus('all ' + MAX_FRAMES + ' frames are full', 'fail'); return; }
+  const truncated = files.length > capacity;
+  const imgs = (await Promise.all(files.slice(0, capacity).map(loadImageFile))).filter(Boolean);
+  if (!imgs.length) return;
+
+  let template = frameIsFilled(frames[activeFrameIdx]) ? frames[activeFrameIdx][0] : null;
+  if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false); // new photos get cropped in view
+  const { cw, ch } = measureContainer();
+  frames = frames.filter(frameIsFilled); // drops a stray empty placeholder
+  const firstNewIdx = frames.length;
+  imgs.forEach(im => {
+    const layer = makeDefaultLayerParams();
+    layer.img = im; layer.naturalW = im.naturalWidth; layer.naturalH = im.naturalHeight;
+    placeLayerImage(layer, cw, ch);
+    if (template) {
+      copyLayerSettings(template, layer);
+      layer.box = mapCropBox(template, layer);
+    } else {
+      const vis = computeVisibleBoundsFor(layer.coverScale, layer.coverX0, layer.coverY0, layer.naturalW, layer.naturalH);
+      layer.box = computeFittedBox(vis, presetAspect);
+      template = layer;
+    }
+    frames.push([layer, null, null]);
+  });
+
+  hasPhoto = true;
+  activeFrameIdx = firstNewIdx;
+  activeLayerIdx = 0;
+  loadLayerStateToGlobals(0);
+  updateLayerTabs();
+  updateFrameFilmstrip();
+  render();
+  lastWrapW = photoWrap.clientWidth;
+  updateSendState();
+  if (truncated) flashStatus('added the first ' + imgs.length + ' — frames max out at ' + MAX_FRAMES, 'fail');
+}
+
+// copies the active frame's crop + settings onto every other frame, layer by
+// layer (base→base, overlay 1→overlay 1, …) wherever both frames have that layer
+function applyActiveFrameToAll() {
+  if (mode !== 'cycle') return;
+  snapshotActiveLayerState();
+  const src = frames[activeFrameIdx];
+  if (!frameIsFilled(src)) return;
+  const others = frames.filter((f, i) => i !== activeFrameIdx && frameIsFilled(f));
+  if (!others.length) return;
+  if (!confirm('Apply this frame\'s crop and settings to all ' + others.length + ' other frame' + (others.length > 1 ? 's' : '') + '? This overwrites theirs.')) return;
+  const { cw, ch } = measureContainer();
+  others.forEach(f => {
+    for (let li = 0; li < 3; li++) {
+      const s = src[li], d = f[li];
+      if (!s || !d || !d.img) continue;
+      copyLayerSettings(s, d);
+      placeLayerImage(d, cw, ch);
+      d.box = mapCropBox(s, d);
+    }
+  });
+  render();
+  flashStatus('applied to all frames', 'success');
+}
+document.getElementById('applyAllBtn').onclick = applyActiveFrameToAll;
+
 fileInput.onchange = (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
   const targetIdx = pendingUploadTargetLayer;
+  const newFrameFlag = pendingNewFrameIdx !== null;
+  pendingNewFrameIdx = null;
+  snapshotActiveLayerState(); // template for inheritance must reflect the latest edits
+  // base photo into an empty cycle frame, or the filmstrip "+": each photo becomes a frame
+  if (mode === 'cycle' && targetIdx === 0 && (newFrameFlag || !frameIsFilled(currentStack()[0]))) {
+    importFramesFromFiles(files);
+    return;
+  }
+  const file = files[0];
   const img = new Image();
   img.onload = () => {
     // a new photo needs the crop area measurable (and visible to crop), so
     // expand it if it was collapsed
     if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false);
-    if (pendingNewFrameIdx !== null) {
-      activeFrameIdx = pendingNewFrameIdx;
-      frames[activeFrameIdx] = frames[activeFrameIdx] || [null, null, null];
-      pendingNewFrameIdx = null;
-    }
     const list = currentStack();
     const layer = list[targetIdx] || makeDefaultLayerParams();
     layer.img = img;
@@ -1446,12 +1565,11 @@ let lastWrapW = 0;
 // all layer state are untouched while collapsed; the preview below keeps
 // rendering from them.
 const cropToggleBtn = document.getElementById('cropToggleBtn');
-const cropToggleLabel = document.getElementById('cropToggleLabel');
 function setCropCollapsed(collapsed) {
   photoWrap.classList.toggle('collapsed', collapsed);
   document.body.classList.toggle('crop-collapsed', collapsed);
   cropToggleBtn.setAttribute('aria-expanded', String(!collapsed));
-  cropToggleLabel.textContent = collapsed ? 'show crop' : 'hide crop';
+  document.getElementById('cropChevron').setAttribute('d', collapsed ? 'M6 9l6 6 6-6' : 'M6 15l6-6 6 6'); // down when closed, up when open
   // re-sync coordinates in case the viewport changed while it was hidden
   if (!collapsed) window.dispatchEvent(new Event('resize'));
 }
@@ -1460,7 +1578,7 @@ cropToggleBtn.onclick = () => setCropCollapsed(!photoWrap.classList.contains('co
 window.addEventListener('resize', () => {
   if (!naturalW) return;
   const wrapW = photoWrap.clientWidth;
-  if (!wrapW) return; // collapsed — can't measure, re-synced on expand
+  if (photoWrap.classList.contains('collapsed')) return; // strip height would corrupt the crop math; re-synced on expand
   if (lastWrapW && wrapW === lastWrapW) return; // width unchanged, likely just a toolbar show/hide — ignore
   lastWrapW = wrapW;
   updateCoverFit();
@@ -1478,7 +1596,7 @@ window.addEventListener('resize', () => {
 // + tone curve + dither, run entirely against ONE layer's own stored settings.
 // Draws into the shared offscreen scratch canvas and returns a quantized,
 // dithered Float32Array of gray values (0-255) at panel resolution.
-function computeLayerGray(layer, W, H, forceLevels) {
+function computeLayerGray(layer, W, H) {
   // map crop box (container coordinates) back to natural image pixel coordinates
   // using the same cover-fit math the browser used to render the photo
   const sx = (layer.box.left - layer.coverX0) / layer.coverScale;
@@ -1729,7 +1847,7 @@ function computeLayerGray(layer, W, H, forceLevels) {
     gray[i] = t * 255;
   }
 
-  const levelCount = forceLevels || cfg.levels;
+  const levelCount = 2; // pure black & white — no gray levels
   const step = 255/(levelCount-1);
   function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
 
@@ -1760,7 +1878,7 @@ function render() {
 
   const W = targetW, H = targetH;
   const stack = currentStack(); // layers (still) or frames[activeFrameIdx] (cycle) — see compositeStack() for the shared logic
-  const composite = compositeStack(stack, mode === 'cycle' ? 2 : undefined);
+  const composite = compositeStack(stack);
   if (!composite) return;
 
   // postcard text isn't supported on animation frames for now — skip it
@@ -1825,12 +1943,9 @@ function stampPostcardText(composite, W, H) {
   sctx.fillText(text, 0, barY + barH / 2, maxTextWidth);
   sctx.restore();
 
-  // pull just the text-bar rows back out and dither them using the base
-  // layer's tone step + pattern for visual consistency — but CAPPED, so an
-  // aggressive base setting (e.g. 2-gray, high dither strength) can't shred
-  // thin text strokes into noise the way it did before. Text always gets at
-  // least 3 gray levels and no more than moderate dither strength, regardless
-  // of how hard the sliders are pushed elsewhere.
+  // pull just the text-bar rows back out and quantize them to black/white.
+  // No dither noise is injected into text, regardless of how hard the sliders
+  // are pushed elsewhere, so thin strokes can't be shredded into speckle.
   const barTop = Math.max(0, Math.floor(barY));
   const barBottom = Math.min(H, Math.ceil(barY + barH));
   const bandH = barBottom - barTop;
@@ -1842,8 +1957,8 @@ function stampPostcardText(composite, W, H) {
 
   const baseLayer = layers[0];
   const cfg = STEPS[baseLayer.stepIndex];
-  const levelCount = Math.max(3, cfg.levels); // never collapse text down to harsh 2-gray thresholding
-  const cappedStrength = Math.min(cfg.ditherStrength, 0.5); // never inject full-strength dither noise into text
+  const levelCount = 2; // pure black & white
+  const cappedStrength = 0; // text is hard-thresholded (no error diffusion) so thin strokes stay crisp instead of speckling
   const step = 255 / (levelCount - 1);
   function quantize(v){ v=Math.max(0,Math.min(255,v)); return Math.round(Math.round(v/step)*step); }
   applyDither(bandGray, W, bandH, quantize, step, baseLayer.ditherPattern, cappedStrength);
@@ -1891,86 +2006,50 @@ function applyDither(gray, W, H, quantize, step, pattern, strength) {
 }
 
 // ---------- scrub vertically on preview to adjust "look" (replaces slider) ----------
-// Most affordable e-ink panels max out at 4 real gray levels — we can't add more
-// physical shades, but a tone curve (contrast + black/white point) applied BEFORE
-// dithering changes how a photo maps onto those levels, the same way editing
-// contrast/black point in Photos before uploading changed your results. Combining
-// both gives a finer, more varied progression from one gesture than levels alone.
+// Output is pure black & white, so the only thing that shapes a photo is how
+// the tone curve (black/white point, shadow/highlight shaping, contrast) pushes
+// pixels toward the black/white threshold BEFORE dithering, plus how much error
+// the dither carries forward. One continuous ramp covers it: the bottom of the
+// scrub is soft and photographic (flat curve, full-strength dither — lots of
+// stipple that reads as gray), the top is punchy and graphic (steep curve,
+// crushed shadows/highlights, weak dither — hard edges).
 //
 // contrast: 1.0 = neutral, >1 = punchier, <1 = flatter/softer
-// blackPoint/whitePoint: 0-255, pulls in the tonal range before mapping to levels
-// shadowGamma/highlightGamma: >1 crushes shadows / rolls off highlights (punchier),
-// 1.0 = neutral, tied to the same "punch" value as contrast so they move together
-//
-// Rather than hand-picked presets (which jumped abruptly), generate a continuous
-// zigzag: all tone parameters ramp smoothly across each gray-level tier, and the
-// ramp direction ALTERNATES per tier so the value at each tier boundary matches
-// exactly. That isolates the one unavoidable jump — the level count itself
-// changing — instead of stacking a tone-curve jump on top of it.
-// non-uniform p sampling per tier — tier 0 (2 gray) gets extra density in the
-// 80%-98% contrast range specifically, since that's the range you liked most;
-// everything else stays evenly spaced
-function tierPValues(tierIdx) {
-  if (tierIdx === 0) {
-    const denseEnd = 0.257; // p value where contrast ≈ 0.98 (98%)
-    const denseCount = 20;
-    const coarseCount = 8;
-    const pts = [];
-    for (let i = 0; i < denseCount; i++) pts.push((i / (denseCount - 1)) * denseEnd);
-    for (let i = 1; i < coarseCount; i++) pts.push(denseEnd + (i / (coarseCount - 1)) * (1 - denseEnd));
-    return pts;
-  }
-  const PER_TIER = 16;
+// blackPoint/whitePoint: 0-255, pulls in the tonal range before thresholding
+// shadowGamma/highlightGamma: >1 crushes shadows / rolls off highlights (punchier)
+// ditherStrength: 1 = full error diffusion, lower = harder, more graphic edges
+const CONTRAST_MIN = 0.8, CONTRAST_MAX = 1.9;
+const DENSE_CONTRAST_END = 0.98; // sampling stays extra dense from min up to here (the range that felt best)
+function stepPValues() {
+  const denseEnd = (DENSE_CONTRAST_END - CONTRAST_MIN) / (CONTRAST_MAX - CONTRAST_MIN);
+  const denseCount = 20, coarseCount = 16;
   const pts = [];
-  for (let j = 0; j < PER_TIER; j++) pts.push(j / (PER_TIER - 1));
+  for (let i = 0; i < denseCount; i++) pts.push((i / (denseCount - 1)) * denseEnd);
+  for (let i = 1; i < coarseCount; i++) pts.push(denseEnd + (i / (coarseCount - 1)) * (1 - denseEnd));
   return pts;
 }
 
 function generateSteps() {
-  const TIERS = [2, 3, 4]; // real gray levels available on the hardware
-  const steps = [];
-  TIERS.forEach((levelCount, tierIdx) => {
-    const ascending = tierIdx % 2 === 0; // alternate direction so tier edges connect
-    const pValues = tierPValues(tierIdx);
-    pValues.forEach((rawP) => {
-      const p = ascending ? rawP : 1 - rawP;
-      const contrast = 0.8 + p * 0.7;       // 0.8 .. 1.5
-      const blackPoint = Math.round(p * 50);
-      const whitePoint = 255 - Math.round(p * 50);
-      const shadowGamma = 1 + p * 0.7;      // 1.0 .. 1.7 — crushes shadow detail as p rises
-      const highlightGamma = 1 + p * 0.7;   // 1.0 .. 1.7 — rolls off highlight detail as p rises
-      const ditherStrength = 1 - p * 0.6;   // 1.0 .. 0.4 — punchier steps dither less (harder, more graphic edges)
-      const pct = Math.round(contrast * 100);
-      steps.push({ levels: levelCount, contrast, blackPoint, whitePoint, shadowGamma, highlightGamma, ditherStrength, label: `${levelCount} gray · ${pct}%` });
-    });
+  return stepPValues().map(p => {
+    const contrast = CONTRAST_MIN + p * (CONTRAST_MAX - CONTRAST_MIN);
+    const blackPoint = Math.round(p * 60);
+    const whitePoint = 255 - Math.round(p * 60);
+    const shadowGamma = 1 + p * 1.0;       // 1.0 .. 2.0
+    const highlightGamma = 1 + p * 1.0;    // 1.0 .. 2.0
+    const ditherStrength = 1 - p * 0.7;    // 1.0 .. 0.3
+    return { contrast, blackPoint, whitePoint, shadowGamma, highlightGamma, ditherStrength, label: `${Math.round(contrast * 100)}%` };
   });
-  return steps;
 }
 const STEPS = generateSteps();
-// tier boundaries — used to map stepIndex to "how many gray-level tiers have
-// been crossed", so the sine wave icon completes exactly 1 cycle per tier
-// (2 gray, 3 gray, 4 gray), regardless of how many sub-steps live in each
-const TIER_BOUNDARIES = (() => {
-  const bounds = [0];
-  let lastLevel = STEPS[0].levels;
-  for (let i = 1; i < STEPS.length; i++) {
-    if (STEPS[i].levels !== lastLevel) { bounds.push(i); lastLevel = STEPS[i].levels; }
-  }
-  bounds.push(STEPS.length);
-  return bounds;
-})();
+// default: contrast closest to neutral (100%)
+const DEFAULT_STEP_INDEX = STEPS.reduce((best, cur, idx) =>
+  Math.abs(cur.contrast - 1) < Math.abs(STEPS[best].contrast - 1) ? idx : best, 0);
+// how far through the ramp (0..3) — drives the 4-bar scrub indicator, which
+// fills one bar at a time from soft (bottom) to punchy (top)
 function toneCycles(idx) {
-  let t = 0;
-  for (let i = 0; i < TIER_BOUNDARIES.length - 1; i++) {
-    if (idx >= TIER_BOUNDARIES[i] && idx < TIER_BOUNDARIES[i + 1]) { t = i; break; }
-  }
-  const tierStart = TIER_BOUNDARIES[t], tierEnd = TIER_BOUNDARIES[t + 1] - 1;
-  const localFrac = tierEnd > tierStart ? (idx - tierStart) / (tierEnd - tierStart) : 0;
-  return t + localFrac; // 0 (start of 2-gray) .. 3 (end of 4-gray)
+  return STEPS.length > 1 ? (idx / (STEPS.length - 1)) * 3 : 0;
 }
-// default: first tier (2 gray), contrast closest to neutral (100%)
-let stepIndex = STEPS.reduce((best, cur, idx) =>
-  (cur.levels === 2 && Math.abs(cur.contrast - 1) < Math.abs(STEPS[best].contrast - 1)) ? idx : best, 0);
+let stepIndex = DEFAULT_STEP_INDEX;
 
 let invert = false; // false = black content on white e-ink, true = white content on black
 let ditherPattern = 'floyd'; // 'floyd' | 'atkinson' | 'ordered' — cycled via the pattern button
@@ -2005,6 +2084,7 @@ const FILTER_STEPS = generateFilterSteps(); // [standard, red, green, blue]
 let filterStepIndex = 0; // starts at 'standard'
 let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
+updatePostcardPosIcon();
 
 // order matches the 7 dots around the dial (dot0 at top, clockwise)
 const FONT_LIST = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonlight', 'VG5000', 'ChaumontScript', 'Helgoland', 'MagielBlack', 'Altgotisch'];
@@ -2044,16 +2124,15 @@ fontDialBtn.onclick = () => {
 updateFontDots(); // sync visuals to the default selection on load
 
 
-// 4 pip dots. The first is always solid (the baseline starting state); the
-// remaining 3 fill in — one per gray-level tier (2/3/4 gray) — as you scrub.
-// Each fills smoothly (not a hard snap) proportional to progress through its
-// tier, and un-fills again if you drag back down.
+// 4 pip bars. The first is always solid (the baseline); the remaining 3 fill
+// in one after another as you scrub toward punchier. Each fills smoothly (not
+// a hard snap) and un-fills again if you drag back down.
 const TONE_PIPS = [tonePip0, tonePip1, tonePip2, tonePip3];
 function setToneRings(cyclesValue) {
   TONE_PIPS.forEach((el, i) => {
     if (i === 0) { el.style.opacity = '1'; return; } // baseline pip, always on
-    const tier = i - 1;
-    const growFrac = Math.max(0, Math.min(1, cyclesValue - tier));
+    const segment = i - 1;
+    const growFrac = Math.max(0, Math.min(1, cyclesValue - segment));
     el.style.opacity = `${0.15 + growFrac * 0.85}`;
   });
 }
@@ -2114,7 +2193,7 @@ previewWrap.addEventListener('touchend', () => {
 const FILTER_LINE_COLORS = { red: '#e2584a', green: '#5ec48f', blue: '#5b9fe0' };
 function updateIndicators() {
   // tone bars: 4 stacked bars, bottom one always on, the rest fill upward
-  // one per gray-level tier as you scrub
+  // as you scrub toward punchier
   const cycles = toneCycles(stepIndex);
   setToneRings(cycles);
 
@@ -2240,7 +2319,7 @@ postcardInput.oninput = () => {
 };
 postcardPosBtn.onclick = () => {
   postcardPosition = postcardPosition === 'bottom' ? 'top' : 'bottom';
-  postcardPosIcon.setAttribute('y', postcardPosition === 'bottom' ? '15' : '3');
+  updatePostcardPosIcon();
   if (naturalW) render();
 };
 
@@ -2249,15 +2328,8 @@ const crcTable = (() => { const t=[]; for(let n=0;n<256;n++){let c=n;for(let k=0
 function crc32(bytes){ let c=0xFFFFFFFF; for(let i=0;i<bytes.length;i++){c=crcTable[(c^bytes[i])&0xFF]^(c>>>8);} return (c^0xFFFFFFFF)>>>0; }
 function u32be(n){ return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]); }
 
-// GDEY042T81 (SSD1683) is a native 4-grayscale panel, so each pixel is packed
-// as a 2-bit code (0 = black .. 3 = white) rather than 1 bit. Whatever
-// firmware eventually reads this can re-encode these codes into the
-// controller's own old-data/new-data bitplane format however it needs to —
-// this app doesn't need to know that detail, just deliver 4 real gray levels.
-// The gray value is already quantized by applyDither() to whichever level
-// count (2/3/4-gray) was chosen via the tone-curve scrub, so dividing by 85
-// and rounding recovers that exact level as a 0-3 code without re-thresholding
-// it back down to pure black/white.
+// Everything is pure black & white now: each pixel is 1 bit (0 = black,
+// 1 = white). The values are already quantized to 0/255 by applyDither().
 // packs a grayscale buffer at `bpp` bits per pixel (2^bpp gray levels,
 // 0=black .. max=white), MSB-first within each byte
 function packBits(gray, W, H, bpp) {
@@ -2309,8 +2381,8 @@ async function buildChunkedPNG() {
     }
   } else {
     const gray = liveCanvas._grayCache;
-    const packed = packBits(gray, W, H, 2);
-    const header = new Uint8Array([(W>>8)&255,W&255,(H>>8)&255,H&255,2]);
+    const packed = packBits(gray, W, H, 1);
+    const header = new Uint8Array([(W>>8)&255,W&255,(H>>8)&255,H&255,1]); // bpp = 1 (black & white)
     const chunkData = new Uint8Array(header.length+packed.length);
     chunkData.set(header,0); chunkData.set(packed,header.length);
     customChunks.push(makeChunk(CHUNK_TYPE, chunkData));

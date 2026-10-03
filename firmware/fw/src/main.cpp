@@ -17,6 +17,7 @@
 #include "epd_png.h"
 #include "ota_guard.h"
 #include "tls_resume.h"
+#include "epd_gray.h"
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
 // stamped in by CI (-DFW_VERSION="<git sha>"); an unstamped local build is "dev"
@@ -33,8 +34,7 @@ const int EPD_RST = D12;  // GPIO4
 const int EPD_DC = D7;    // GPIO13
 const int EPD_CS = D6;    // GPIO14
 
-GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
-    GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
+GxEPD2_BW<Panel420, Panel420::HEIGHT> display(Panel420(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));  // stock driver + 4-gray (epd_gray.h)
 
 const uint32_t STILL_HOLD_MS = 0;      // [PLACEHOLDER] extra time each image stays up during the automatic pass (0: the next goes up as soon as it is in)
 const int ANIM_LOOPS = 1;              // times an animation plays through before moving on
@@ -49,6 +49,7 @@ const uint32_t FAST_WIFI_MS = 6000;                          // [PLACEHOLDER] fa
 const uint32_t DHCP_REUSE_S = 1800;                          // [PLACEHOLDER] reuse the cached IP address this long before asking DHCP again
 const uint32_t BUNDLE_STALL_MS = 15000;                      // [PLACEHOLDER] a sync response that stops delivering data for this long is abandoned
 const uint32_t BUNDLE_BUDGET_MS = 120000;                    // [PLACEHOLDER] total time allowed for the sync response
+const bool GRAY_STILLS = true;                               // stills the user settles on (image 1 after the pass, NEXT steps) in 4-level gray: a full refresh; the pass stays fast b/w
 const bool FAST_DRAW = true;                                 // send frames to the panel directly (skips the per-pixel library loop); set false if the display glitches
 const bool FULL_REFRESH_ON_WAKE = false;                     // set true if partial refreshes after deep sleep ghost or glitch
 
@@ -1054,6 +1055,19 @@ class MonoCanvas : public Adafruit_GFX {
 
 // draws one packed frame; partial = fast refresh without the full-screen flash.
 // badge > 0 also draws that number bottom-left; syncBadge adds the top-left \"Syncing...\" badge
+// the same for a packed 2-bit frame (code 0 = black .. 3 = white), for badges on gray stills
+class Gray2Canvas : public Adafruit_GFX {
+  uint8_t* buf;
+ public:
+  Gray2Canvas(uint8_t* b, int16_t w, int16_t h) : Adafruit_GFX(w, h), buf(b) {}
+  void drawPixel(int16_t x, int16_t y, uint16_t color) override {
+    if (x < 0 || y < 0 || x >= width() || y >= height()) return;
+    uint8_t& byte = buf[y * ((width() * 2 + 7) / 8) + (x >> 2)];
+    uint8_t shift = 6 - 2 * (x & 3);
+    byte = (byte & ~(3 << shift)) | ((color == GxEPD_WHITE ? 3 : 0) << shift);
+  }
+};
+
 bool wokeFromSleep = false;   // set in setup(): the panel was hibernated, not freshly powered
 bool drewThisWake = false;
 uint32_t lastBuildMs = 0, lastPanelMs = 0;  // of the last drawFrame: making the picture vs sending it and refreshing
@@ -1083,6 +1097,67 @@ void ditherToMono(const EpdImage& img, const uint8_t* src, uint8_t* dst) {
 }
 
 // Sends a full-size landscape frame straight to the panel with the same
+// ---------- 4-level gray (epd_gray.h) ----------
+// A gray refresh leaves gray pixels on screen and gray bit planes in the
+// controller's RAM, so the next fast b/w partial refresh can't take its
+// "previous image" from there. drawDirect() then builds one from shownGray:
+// black and white pixels as they are, gray ones as the OPPOSITE of their new
+// value, so the partial waveform actively drives every gray pixel to b/w.
+// shownGray survives deep sleep by its image id (rebuilt in setup())
+const uint32_t GRAY_FRAME_BYTES = Panel420::PLANE_BYTES * 2;
+uint8_t* grayWork = nullptr;   // the frame with its badge (PSRAM)
+uint8_t* grayPlane = nullptr;  // second bit plane, also the "previous" plane for the partial after gray
+uint8_t* shownGray = nullptr;  // the gray frame on screen
+bool screenGray = false;       // what's on screen was drawn in gray
+bool shownGrayValid = false;   // ...and shownGray holds it
+bool graySettled = false;      // set by drawIndex()/drawIndexStill(): this draw may be gray
+RTC_DATA_ATTR bool rtcScreenGray = false;
+RTC_DATA_ATTR char rtcGrayId[64];
+RTC_DATA_ATTR int rtcGrayBadge = 0;
+
+bool grayBuffers() {
+  if (!grayWork) grayWork = (uint8_t*)ps_malloc(GRAY_FRAME_BYTES);
+  if (!grayPlane) grayPlane = (uint8_t*)ps_malloc(Panel420::PLANE_BYTES);
+  if (!shownGray) shownGray = (uint8_t*)ps_malloc(GRAY_FRAME_BYTES);
+  return grayWork && grayPlane && shownGray;
+}
+
+// a full-size 2-bit still in 4-level gray (full refresh). False if it can't
+bool drawGray(const EpdImage& img, int badge) {
+  const int W = Panel420::WIDTH, H = Panel420::HEIGHT;
+  if (!GRAY_STILLS || img.bpp != 2 || img.frames != 1 || img.w != W || img.h != H || !grayBuffers()) return false;
+  uint32_t t0 = millis();
+  memcpy(grayWork, frameBuf, GRAY_FRAME_BYTES);
+  if (badge > 0) {
+    Gray2Canvas canvas(grayWork, W, H);
+    drawBadge(canvas, badge);
+  }
+  Panel420::grayPlanes(grayWork, monoBuf, grayPlane);
+  lastBuildMs = millis() - t0;
+  uint32_t t1 = millis();
+  display.epd2.writeGray(monoBuf, grayPlane);
+  lastPanelMs = millis() - t1;
+  Serial.printf("  gray refresh %u ms (build %u)\n", (unsigned)lastPanelMs, (unsigned)lastBuildMs);
+  memcpy(shownGray, grayWork, GRAY_FRAME_BYTES);
+  screenGray = shownGrayValid = true;
+  return true;
+}
+
+// the "previous image" plane for a b/w partial right after a gray image (see above)
+void bridgeFromGray(const uint8_t* next, uint8_t* prev) {
+  for (uint32_t o = 0; o < Panel420::PLANE_BYTES; o++) {
+    const uint8_t* g = shownGray + o * 2;
+    uint8_t out = 0;
+    for (int k = 0; k < 8; k++) {
+      uint8_t code = (g[k >> 2] >> (6 - 2 * (k & 3))) & 3;
+      uint8_t nextWhite = (next[o] >> (7 - k)) & 1;
+      uint8_t bit = code == 3 ? 1 : code == 0 ? 0 : !nextWhite;
+      out = (out << 1) | bit;
+    }
+    prev[o] = out;
+  }
+}
+
 // controller commands the library's own paging uses (see GxEPD2_BW::nextPage),
 // skipping the buffer and the per-pixel drawing. The frames are already packed
 // the way the panel wants them (MSB first, 1 = white). False if it can't (other
@@ -1112,8 +1187,13 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
 
   uint32_t t1 = millis();
   auto& e = display.epd2;
+  if (partial && screenGray && !shownGrayValid) partial = false;  // gray on screen but unknown: a full refresh is safe
   if (partial) {
     e.writeImage(bitmap, 0, 0, W, H);
+    if (screenGray) {
+      bridgeFromGray(bitmap, grayPlane);
+      e.writeImageToPrevious(grayPlane, 0, 0, W, H);
+    }
     e.refresh(0, 0, W, H);
     e.writeImageAgain(bitmap, 0, 0, W, H);  // so the next partial update knows what is on screen
   } else {
@@ -1123,6 +1203,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
     e.powerOff();
   }
   lastPanelMs = millis() - t1;
+  screenGray = false;
   return true;
 }
 
@@ -1134,8 +1215,12 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
     Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
     return;
   }
+  // a still the user settles on: 4-level gray (always a full refresh)
+  if (graySettled && !syncBadge && drawGray(img, badge)) return;
   // full-size landscape frames (badges included) go straight to the panel; anything else uses the library
   if (drawDirect(img, partial, badge, syncBadge)) return;
+  if (screenGray) partial = false;  // the library can't bridge from gray
+  screenGray = false;
 
   if (partial) display.setPartialWindow(0, 0, img.w, img.h);
   else display.setFullWindow();
@@ -1636,10 +1721,22 @@ bool loadFirstFrame(const String& id, EpdImage& img) {
 }
 
 // draws image idx as a still: an animation shows its first frame without playing
+// after a settled draw: what is on screen, for rebuilding shownGray after deep sleep
+void rememberScreen(int idx, int badge) {
+  rtcScreenGray = screenGray;
+  if (screenGray) {
+    strlcpy(rtcGrayId, storedIds[idx].c_str(), sizeof(rtcGrayId));
+    rtcGrayBadge = badge;
+  }
+}
+
 void drawIndexStill(int idx, int badge, bool full) {
   logFirstDraw();
   EpdImage img;
+  graySettled = true;
   if (loadFirstFrame(storedIds[idx], img)) drawFrame(img, !full, badge);
+  graySettled = false;
+  rememberScreen(idx, badge);
   rtcViewIdx = idx;
   rtcBadge = badge;
   cycleOk = true;
@@ -1648,7 +1745,10 @@ void drawIndexStill(int idx, int badge, bool full) {
 // draws image idx (newest-first); full = flashing full refresh (clears ghosting)
 void drawIndex(int idx, int badge, bool full) {
   logFirstDraw();
+  graySettled = true;
   showImage(storedIds[idx], idx + 1, storedIds.size(), full, badge);
+  graySettled = false;
+  rememberScreen(idx, badge);
   rtcViewIdx = idx;
   rtcBadge = badge;
   cycleOk = true;
@@ -1838,6 +1938,7 @@ void idleWindow() {
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
 
   saveSeenFlags();  // before a firmware update's reboot, too
+  rtcScreenGray = screenGray;  // a b/w draw since the last settled gray one clears it
   if (cycleOk) updateBeforeSleep();
 
   // a button still held would wake us again at once
@@ -1899,6 +2000,21 @@ void setup() {
 
   loadStoredIds();
   if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
+
+  // the last wake left a gray image on screen: rebuild it (before a sync can
+  // evict its file) so the first fast b/w refresh can bridge from it
+  if (wokeFromSleep && rtcScreenGray) {
+    screenGray = true;  // if it can't be rebuilt, the next draw is a full refresh instead
+    EpdImage img;
+    if (grayBuffers() && loadFirstFrame(String(rtcGrayId), img) && img.bpp == 2) {
+      memcpy(shownGray, frameBuf, GRAY_FRAME_BYTES);
+      if (rtcGrayBadge > 0) {
+        Gray2Canvas canvas(shownGray, Panel420::WIDTH, Panel420::HEIGHT);
+        drawBadge(canvas, rtcGrayBadge);
+      }
+      shownGrayValid = true;
+    }
+  }
 
   if (buttonWake) {  // no WiFi, just step through what's stored
     idleWindow();

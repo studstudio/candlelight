@@ -244,6 +244,37 @@ function resolveGeo(cityName, override) {
   return { ...base, ...(override || {}) };
 }
 
+// What the lamp actually reads from an image PNG is only the signature, the
+// e-ink payload chunks (epRa / epRb) and IEND. The embedded PNG preview
+// (IHDR / IDAT ...) is most of the file and the lamp never decodes it, so the
+// sync response leaves it out. That is far fewer bytes to download and, more
+// importantly, to write to flash (erasing flash is the slow part). Returns the
+// original bytes untouched if the file can't be parsed.
+function stripForLamp(bytes) {
+  const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (bytes.length < 20 || SIG.some((b, i) => bytes[i] !== b)) return bytes;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const keep = [];
+  let pos = 8;
+  while (pos + 12 <= bytes.length) {
+    const len = dv.getUint32(pos);
+    const end = pos + 12 + len; // length + type + data + crc
+    if (end > bytes.length) return bytes; // truncated: send it as is and let the lamp judge it
+    const type = String.fromCharCode(bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]);
+    if (type === 'IEND') break;
+    if (type === 'epRa' || type === 'epRb') keep.push(bytes.subarray(pos, end));
+    pos = end;
+  }
+  if (!keep.length) return bytes;
+  const IEND = [0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
+  const out = new Uint8Array(8 + keep.reduce((n, c) => n + c.length, 0) + IEND.length);
+  out.set(bytes.subarray(0, 8), 0);
+  let o = 8;
+  for (const c of keep) { out.set(c, o); o += c.length; }
+  out.set(IEND, o);
+  return out;
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
@@ -484,58 +515,50 @@ export default {
     // ---- sync: everything one wake needs in ONE response, so the lamp makes a
     // single secure connection instead of one per image. Body = a text header
     // line, then for each queued item a text header line followed by exactly
-    // `size` raw bytes:
+    // `size` raw bytes (the image with its PNG preview stripped, see above):
     //   {"v":1,"count":N,"firmware":{"version":..,"size":..}|null}\n
     //   {"itemId":..,"size":..,"sentAt":..,"sentGeo":..}\n<size bytes>   (repeated)
     // Nothing is deleted here: the lamp confirms what it stored with POST /ack
     // (one request for all of them). The older /queue + /items routes still work
-    // as the lamp's fallback. ----
+    // as the lamp's fallback and serve the full PNGs. ----
     if (action === 'sync' && request.method === 'GET') {
       const prefix = `queue/${lampId}/`;
-      const items = await getQueueItems(env, lampId, { include: ['customMetadata'] });
-      const fw = await env.LAMP_IMAGES.head('firmware/latest.bin');
+      const listed = await getQueueItems(env, lampId, { include: ['customMetadata'] });
+      const [fw, datas] = await Promise.all([
+        env.LAMP_IMAGES.head('firmware/latest.bin'),
+        // all the images are fetched at once rather than one after another
+        Promise.all(listed.map(async it => {
+          const obj = await env.LAMP_IMAGES.get(it.key);
+          return obj ? stripForLamp(new Uint8Array(await obj.arrayBuffer())) : null;
+        })),
+      ]);
+      const entries = listed.map((it, i) => ({ it, data: datas[i] })).filter(e => e.data); // drop any that vanished
       const enc = new TextEncoder();
       const head = enc.encode(JSON.stringify({
         v: 1,
-        count: items.length,
+        count: entries.length,
         firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
       }) + '\n');
-      const heads = items.map(obj => {
-        const md = obj.customMetadata || {};
+      const heads = entries.map(({ it, data }) => {
+        const md = it.customMetadata || {};
         return enc.encode(JSON.stringify({
-          itemId: obj.key.slice(prefix.length),
-          size: obj.size,
+          itemId: it.key.slice(prefix.length),
+          size: data.length,
           sentAt: md.sentAt ? parseInt(md.sentAt, 10) : null,
           sentGeo: md.sentGeo ? JSON.parse(md.sentGeo) : null,
         }) + '\n');
       });
-      // the total is known up front, so the lamp gets a Content-Length instead of chunked framing
-      const total = heads.reduce((n, h, i) => n + h.length + items[i].size, head.length);
-      const { readable, writable } = new FixedLengthStream(total);
-      ctx.waitUntil((async () => {
-        const writer = writable.getWriter();
-        try {
-          await writer.write(head);
-          for (let i = 0; i < items.length; i++) {
-            await writer.write(heads[i]);
-            const obj = await env.LAMP_IMAGES.get(items[i].key);
-            if (!obj) throw new Error('item vanished mid-sync');
-            const reader = obj.body.getReader();
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              await writer.write(value);
-            }
-          }
-          await writer.close();
-        } catch (e) {
-          await writer.abort(e); // the lamp sees a short body and falls back
-        }
-      })());
+      const out = new Uint8Array(heads.reduce((n, h, i) => n + h.length + entries[i].data.length, head.length));
+      out.set(head, 0);
+      let o = head.length;
+      entries.forEach(({ data }, i) => {
+        out.set(heads[i], o); o += heads[i].length;
+        out.set(data, o); o += data.length;
+      });
       // delivery events are logged in the background so they don't delay the response
-      ctx.waitUntil(Promise.all(items.map(obj =>
-        recordDownloadEvent(env, lampId, obj.key.slice(prefix.length), request).catch(() => {}))));
-      return new Response(readable, {
+      ctx.waitUntil(Promise.all(entries.map(({ it }) =>
+        recordDownloadEvent(env, lampId, it.key.slice(prefix.length), request).catch(() => {}))));
+      return new Response(out, {
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/octet-stream' },
       });
     }
@@ -548,8 +571,7 @@ export default {
         ? body.ids.filter(id => typeof id === 'string' && id.length > 0 && id.length < 200 && !id.includes('/'))
         : [];
       await Promise.all(ids.map(id => env.LAMP_IMAGES.delete(`queue/${lampId}/${id}`)));
-      const left = await getQueueItems(env, lampId);
-      return json({ ok: true, acked: ids.length, queueDepth: left.length });
+      return json({ ok: true, acked: ids.length });
     }
 
     if (action === 'queue' && request.method === 'GET') {

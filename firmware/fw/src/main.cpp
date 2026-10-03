@@ -423,6 +423,8 @@ bool readLineFrom(WiFiClient* s, String& out) {
   return false;
 }
 
+uint32_t copyFlashUs = 0;  // time spent inside File::write by copyBytes (flash erase + program), to tell flash from network
+
 // copies the next n bytes of the response into f, or throws them away if f is null
 bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline) {
   uint8_t buf[1460];
@@ -438,25 +440,30 @@ bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline) {
     }
     int got = s->readBytes(buf, min((size_t)avail, min(n, sizeof(buf))));
     if (got <= 0) continue;
-    if (f && f->write(buf, got) != (size_t)got) return false;
+    if (f) {
+      uint32_t tw = micros();
+      size_t wrote = f->write(buf, got);
+      copyFlashUs += micros() - tw;
+      if (wrote != (size_t)got) return false;
+    }
     n -= got;
     last = millis();
   }
   return true;
 }
 
-// confirms a batch of stored items to the worker in one request
-bool ackItems(const std::vector<String>& ids) {
+// confirms a batch of stored items to the worker in one request, on `client`.
+// If the connection from the sync is still open it is reused, which saves a whole
+// new secure handshake; otherwise HTTPClient simply opens a new one
+bool ackOnClient(WiFiClientSecure& client, const std::vector<String>& ids) {
   if (ids.empty()) return true;
   JsonDocument doc;
   JsonArray arr = doc["ids"].to<JsonArray>();
   for (const String& id : ids) arr.add(id);
   String body;
   serializeJson(doc, body);
-  WiFiClientSecure client;
-  client.setInsecure();  // prototype only
   HTTPClient http;
-  http.setReuse(false);
+  http.setReuse(false);  // done with the connection after this
   http.setTimeout(10000);
   http.begin(client, lampUrl("/ack"));
   http.addHeader("Content-Type", "application/json");
@@ -465,13 +472,20 @@ bool ackItems(const std::vector<String>& ids) {
   return code == 200;
 }
 
+// the same on a brand-new connection (the fallback)
+bool ackItems(const std::vector<String>& ids) {
+  WiFiClientSecure client;
+  client.setInsecure();  // prototype only
+  return ackOnClient(client, ids);
+}
+
 // downloads everything waiting in a single response. added = images stored
 SyncResult syncBundle(int& added) {
   added = 0;
   WiFiClientSecure client;
   client.setInsecure();  // prototype only
   HTTPClient http;
-  http.setReuse(false);
+  http.setReuse(true);  // keep the connection open afterwards for the ack
   http.setTimeout(10000);
   uint32_t tStart = millis();
   http.begin(client, lampUrl("/sync"));
@@ -524,6 +538,7 @@ SyncResult syncBundle(int& added) {
     uint32_t tItem = millis();
     File f = LittleFS.open(TMP_PATH, "w");
     if (!f) { result = SYNC_PARTIAL; break; }
+    copyFlashUs = 0;
     bool copied = copyBytes(stream, &f, size, deadline);
     f.close();
     uint32_t tDownloaded = millis();
@@ -539,14 +554,20 @@ SyncResult syncBundle(int& added) {
     toAck.push_back(itemId);  // stored, or unusable: either way it's done with
     uint32_t dl = tDownloaded - tItem;
     double kb = size / 1024.0;
-    Serial.printf("  timing: download %u ms (%.1f KB, %.0f KB/s), validate+store %u ms\n", (unsigned)dl, kb,
-                  dl ? kb * 1000.0 / dl : 0.0, (unsigned)(millis() - tDownloaded));
+    uint32_t flashMs = copyFlashUs / 1000;
+    Serial.printf("  timing: download %u ms (%.1f KB, %.0f KB/s) = network %u + flash writes %u, validate+store %u ms\n", (unsigned)dl, kb,
+                  dl ? kb * 1000.0 / dl : 0.0, (unsigned)(dl > flashMs ? dl - flashMs : 0), (unsigned)flashMs,
+                  (unsigned)(millis() - tDownloaded));
   }
   http.end();
 
   if (!toAck.empty()) {
     uint32_t tAck = millis();
-    bool acked = ackItems(toAck);
+    bool acked = ackOnClient(client, toAck);
+    if (!acked) {
+      Serial.println("  ack on the open connection failed, retrying on a new one");
+      acked = ackItems(toAck);
+    }
     Serial.printf("Ack of %u item(s) %s in %u ms\n", (unsigned)toAck.size(), acked ? "done" : "FAILED (will dedupe next sync)",
                   (unsigned)(millis() - tAck));
   }

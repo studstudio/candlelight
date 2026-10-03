@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <WiFiManager.h>
 #include <esp_wifi.h>
-#include <ping/ping_sock.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
 #include <qrcode.h>
@@ -469,7 +468,6 @@ bool seenDirty = false;            // storedSeen changed and isn't in the manife
 // download loop) draws the next once the one on screen has been up
 // STILL_HOLD_MS. The last one waiting when nothing more is coming is held back:
 // quickPass() puts the newest up as the resting image (with the badge)
-bool speedTestPending = false;  // [DIAGNOSTIC] run the link test at the end of this wake (see speedTest)
 std::vector<String> passQueue;
 bool passRunning = false;     // a pass is playing (a press stops it)
 bool passMoreComing = false;  // the sync still has images to deliver
@@ -1507,28 +1505,6 @@ bool hasSavedWiFi() {
 // (which keeps the lamp awake for minutes) opens only for a lamp with no WiFi
 // configured at all. A saved network that won't connect never opens it: skip
 // the sync and sleep (hold BOOT 8 s to forget the network and set up again)
-// [DIAGNOSTIC] pings the router and the internet in the background (5 each)
-// while the sync runs, to tell a slow WiFi/router from a slow internet path.
-// Results print as they come in, tagged [ping router] / [ping internet]
-void pingDiag(IPAddress target, const char* label) {
-  esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
-  IP_ADDR4(&cfg.target_addr, target[0], target[1], target[2], target[3]);
-  cfg.count = 5;
-  cfg.interval_ms = 300;
-  cfg.timeout_ms = 2000;
-  esp_ping_callbacks_t cbs = {};
-  cbs.cb_args = (void*)label;
-  cbs.on_ping_success = [](esp_ping_handle_t h, void* arg) {
-    uint32_t ms = 0;
-    esp_ping_get_profile(h, ESP_PING_PROF_TIMEGAP, &ms, sizeof(ms));
-    Serial.printf("[ping %s] %u ms\n", (const char*)arg, (unsigned)ms);
-  };
-  cbs.on_ping_timeout = [](esp_ping_handle_t h, void* arg) { Serial.printf("[ping %s] timeout\n", (const char*)arg); };
-  cbs.on_ping_end = [](esp_ping_handle_t h, void* arg) { esp_ping_delete_session(h); };
-  esp_ping_handle_t h;
-  if (esp_ping_new_session(&cfg, &cbs, &h) == ESP_OK) esp_ping_start(h);
-}
-
 bool connectForSync(bool portalIfUnconfigured) {
   WiFi.mode(WIFI_STA);  // also loads the saved credentials
   if (!hasSavedWiFi()) {
@@ -1588,8 +1564,6 @@ bool connectForSync(bool portalIfUnconfigured) {
                   usedStatic ? "cached channel + IP" : (fastTried && connected && rtcWifiChannel) ? "cached channel, DHCP" : "full connect",
                   (unsigned)(millis() - t0), (unsigned)millis());
     rtcManualFails = 0;  // WiFi works, whatever happened on an earlier hold
-    pingDiag(WiFi.gatewayIP(), "router");
-    pingDiag(IPAddress(1, 1, 1, 1), "internet");
     return true;
   }
   Serial.println("WiFi didn't connect, skipping sync");
@@ -1812,7 +1786,6 @@ void manualSync() {
   if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
   redrawCurrent(true);  // "Syncing..." top-left: the hold registered
   syncRequested = false;  // handled: left set, the pass would read it as a press and stop
-  speedTestPending = true;  // [DIAGNOSTIC] link test at the end of this wake
   otaguard::clearBad();
   int added = 0;
   if (!doSync(false, added)) {
@@ -1859,96 +1832,12 @@ void idleWindow() {
   }
 }
 
-// [DIAGNOSTIC, temporary] after a manual sync, at the very end of the wake
-// (nobody waits for it): fetches 100 KB from the worker over HTTPS and then
-// plain HTTP, with raw requests (no HTTPClient) and bulk reads, and logs the
-// connect time, time to first byte and throughput of each. Tells the ESP32's
-// TLS apart from its network stack. Remove once answered
-void speedTestOne(Client& c, bool tls) {
-  String host = workerHost();
-  const char* name = tls ? "HTTPS" : "HTTP";
-  uint32_t t0 = millis();
-  if (tls ? !connectWorker((ResumableTLS&)c, "[speed HTTPS]") : !c.connect(host.c_str(), 80)) {
-    Serial.printf("[speed %s] connect failed\n", name);
-    return;
-  }
-  Serial.printf("[speed %s] connect %u ms\n", name, (unsigned)(millis() - t0));
-  for (long n : {0L, 100000L}) {
-    String req = "GET /speedtest?n=" + String(n) + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: keep-alive\r\n\r\n";
-    uint32_t t1 = millis(), tFirst = 0, tBody = 0;
-    c.write((const uint8_t*)req.c_str(), req.length());
-    long len = -1, got = 0;
-    bool headersDone = false;
-    String line;
-    uint8_t buf[2048];
-    uint32_t last = millis();
-    while (millis() - last < 10000) {
-      otaguard::tick();
-      int a = c.available();
-      if (a <= 0) {
-        if (!c.connected()) break;
-        delay(1);
-        continue;
-      }
-      if (!tFirst) tFirst = millis();
-      last = millis();
-      if (!headersDone) {
-        int ch = c.read();
-        if (ch < 0) continue;
-        if (ch == '\n') {
-          if (!line.length()) {
-            headersDone = true;
-            tBody = millis();
-            if (len <= 0) break;
-          } else {
-            String l = line;
-            l.toLowerCase();
-            if (l.startsWith("content-length:")) len = l.substring(15).toInt();
-            line = "";
-          }
-        } else if (ch != '\r') {
-          line += (char)ch;
-        }
-      } else {
-        int r = c.read(buf, (size_t)min((long)sizeof(buf), len - got));
-        if (r > 0) got += r;
-        if (got >= len) break;
-      }
-    }
-    uint32_t tEnd = millis();
-    if (n == 0) {
-      Serial.printf("[speed %s] empty response: first byte after %u ms\n", name, (unsigned)(tFirst ? tFirst - t1 : 0));
-    } else {
-      uint32_t bodyMs = tBody ? tEnd - tBody : 0;
-      Serial.printf("[speed %s] %ld of %ld bytes: first byte after %u ms, body %u ms = %.0f KB/s\n", name, got, len,
-                    (unsigned)(tFirst ? tFirst - t1 : 0), (unsigned)bodyMs, bodyMs ? got / 1.024 / bodyMs : 0.0);
-    }
-  }
-  c.stop();
-}
-
-void speedTest() {
-  Serial.println("[speed] link test (diagnostic)");
-  if (!connectForSync(false)) return;
-  {
-    ResumableTLS sc;
-    speedTestOne(sc, true);
-  }
-  {
-    WiFiClient pc;
-    speedTestOne(pc, false);
-  }
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-}
-
 [[noreturn]] void goToSleep() {
   waitForWriter();                     // the images must be on flash (and acked) before sleep wipes PSRAM
   if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
 
   saveSeenFlags();  // before a firmware update's reboot, too
-  if (cycleOk && speedTestPending) speedTest();
   if (cycleOk) updateBeforeSleep();
 
   // a button still held would wake us again at once
@@ -1967,6 +1856,9 @@ void speedTest() {
 }
 
 void setup() {
+  // a send buffer, so printing returns at once and the UART drains it in the
+  // background (unbuffered, every line stalled the code ~87 us per character)
+  Serial.setTxBufferSize(4096);
   Serial.begin(115200);
   otaguard::begin(FW_VERSION);  // before anything that could fail
 #ifdef FW_TEST_CRASH  // test builds only: proves the rollback works

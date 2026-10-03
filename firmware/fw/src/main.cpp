@@ -881,34 +881,50 @@ bool pixelIsBlack(uint8_t code, uint8_t bpp, int x, int y) {
 }
 
 // boxed text on a white background so it reads over any image
-void drawBoxedText(const char* txt, int x, int y) {
-  display.setTextSize(2);
-  display.setTextColor(GxEPD_BLACK);
+// g is the display (library drawing) or a MonoCanvas (the fast path's picture)
+void drawBoxedText(Adafruit_GFX& g, const char* txt, int x, int y) {
+  g.setTextSize(2);
+  g.setTextColor(GxEPD_BLACK);
   int16_t bx, by;
   uint16_t bw, bh;
-  display.getTextBounds(txt, 0, 0, &bx, &by, &bw, &bh);
+  g.getTextBounds(txt, 0, 0, &bx, &by, &bw, &bh);
   const int pad = 5;
   int w = bw + 2 * pad, h = bh + 2 * pad;
-  if (x < 0) x = display.width() + x - w;   // negative = measured from the right edge
-  if (y < 0) y = display.height() + y - h;  // negative = measured from the bottom edge
-  display.fillRect(x, y, w, h, GxEPD_WHITE);
-  display.drawRect(x, y, w, h, GxEPD_BLACK);
-  display.drawRect(x + 1, y + 1, w - 2, h - 2, GxEPD_BLACK);
-  display.setCursor(x + pad - bx, y + pad - by);
-  display.print(txt);
+  if (x < 0) x = g.width() + x - w;   // negative = measured from the right edge
+  if (y < 0) y = g.height() + y - h;  // negative = measured from the bottom edge
+  g.fillRect(x, y, w, h, GxEPD_WHITE);
+  g.drawRect(x, y, w, h, GxEPD_BLACK);
+  g.drawRect(x + 1, y + 1, w - 2, h - 2, GxEPD_BLACK);
+  g.setCursor(x + pad - bx, y + pad - by);
+  g.print(txt);
 }
 
 // the number of unseen images other than the one on screen, bottom-left corner
-void drawBadge(int n) {
+void drawBadge(Adafruit_GFX& g, int n) {
   char txt[8];
   snprintf(txt, sizeof(txt), "%d", n);
-  drawBoxedText(txt, 6, -6);
+  drawBoxedText(g, txt, 6, -6);
 }
 
 // top-left corner: feedback that the 10 s sync hold registered
-void drawSyncBadge() {
-  drawBoxedText("Syncing...", 6, 6);
+void drawSyncBadge(Adafruit_GFX& g) {
+  drawBoxedText(g, "Syncing...", 6, 6);
 }
+
+// draws into a packed 1-bit picture laid out the way the panel takes it
+// (row-major, MSB first, 1 = white), so badges go on the fast path too
+class MonoCanvas : public Adafruit_GFX {
+  uint8_t* buf;
+ public:
+  MonoCanvas(uint8_t* b, int16_t w, int16_t h) : Adafruit_GFX(w, h), buf(b) {}
+  void drawPixel(int16_t x, int16_t y, uint16_t color) override {
+    if (x < 0 || y < 0 || x >= width() || y >= height()) return;
+    uint8_t& byte = buf[y * ((width() + 7) / 8) + (x >> 3)];
+    uint8_t mask = 0x80 >> (x & 7);
+    if (color == GxEPD_WHITE) byte |= mask;
+    else byte &= ~mask;
+  }
+};
 
 // draws one packed frame; partial = fast refresh without the full-screen flash.
 // badge > 0 also draws that number bottom-left; syncBadge adds the top-left \"Syncing...\" badge
@@ -945,18 +961,26 @@ void ditherToMono(const EpdImage& img, const uint8_t* src, uint8_t* dst) {
 // skipping the buffer and the per-pixel drawing. The frames are already packed
 // the way the panel wants them (MSB first, 1 = white). False if it can't (other
 // size, or FAST_DRAW off), and the caller draws the normal way
-bool drawDirect(const EpdImage& img, bool partial) {
+bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
   const int W = GxEPD2_420_GDEY042T81::WIDTH, H = GxEPD2_420_GDEY042T81::HEIGHT;
   if (!FAST_DRAW || img.w != W || img.h != H) return false;
   uint32_t t0 = millis();
   const uint8_t* bitmap;
-  if (img.bpp == 1) {
-    bitmap = frameBuf;
-  } else if (img.bpp == 2) {
+  if (img.bpp == 2) {
     ditherToMono(img, frameBuf, monoBuf);
+    bitmap = monoBuf;
+  } else if (img.bpp == 1 && badge <= 0 && !syncBadge) {
+    bitmap = frameBuf;
+  } else if (img.bpp == 1) {
+    memcpy(monoBuf, frameBuf, sizeof(monoBuf));  // a badge goes on a copy, the frame stays as read
     bitmap = monoBuf;
   } else {
     return false;
+  }
+  if (badge > 0 || syncBadge) {
+    MonoCanvas canvas(monoBuf, W, H);
+    if (badge > 0) drawBadge(canvas, badge);
+    if (syncBadge) drawSyncBadge(canvas);
   }
   lastBuildMs = millis() - t0;
 
@@ -984,8 +1008,8 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
     Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
     return;
   }
-  // frames with a badge on them need the library's drawing; everything else can go straight to the panel
-  if (badge <= 0 && !syncBadge && drawDirect(img, partial)) return;
+  // full-size landscape frames (badges included) go straight to the panel; anything else uses the library
+  if (drawDirect(img, partial, badge, syncBadge)) return;
 
   if (partial) display.setPartialWindow(0, 0, img.w, img.h);
   else display.setFullWindow();
@@ -1000,8 +1024,8 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
         if (pixelIsBlack(epdPixel(frameBuf, img, x, y), img.bpp, x, y)) display.drawPixel(x, y, GxEPD_BLACK);
       }
     }
-    if (badge > 0) drawBadge(badge);
-    if (syncBadge) drawSyncBadge();
+    if (badge > 0) drawBadge(display, badge);
+    if (syncBadge) drawSyncBadge(display);
     tBuild += millis() - t0;
     uint32_t t1 = millis();
     more = display.nextPage();
@@ -1138,12 +1162,22 @@ int countUnseen() {
   return n;
 }
 
-// the badge number: unseen images other than the newest, which is the one the
-// badge sits on (so 4 new images show a 3 next to image 1)
-int badgeCount() {
+// the badge number on image idx: unseen images other than the one on screen
+// (so 4 new images show a 3 on image 1, then 2, 1 and none as NEXT steps through them)
+int badgeFor(int idx) {
   int n = 0;
-  for (size_t i = 1; i < storedSeen.size(); i++) n += !storedSeen[i];
+  for (int i = 0; i < (int)storedSeen.size(); i++) n += i != idx && !storedSeen[i];
   return n;
+}
+
+// the next unseen image after idx (wrapping round), or -1 when there are none
+int nextUnseenAfter(int idx) {
+  int total = storedSeen.size();
+  for (int k = 1; k <= total; k++) {
+    int i = (idx + k) % total;
+    if (i != idx && !storedSeen[i]) return i;
+  }
+  return -1;
 }
 
 void markSeen(int idx) {
@@ -1313,6 +1347,7 @@ void connectWiFi() {
 // State that has to survive sleep lives in RTC memory.
 
 RTC_DATA_ATTR int rtcViewIdx = 0;     // image on screen, in newest-first order
+RTC_DATA_ATTR bool rtcInTour = false; // NEXT is stepping through the unseen images (ends by wrapping to image 1)
 // what the last successful connect looked like, so the next wake can skip the channel scan and DHCP
 RTC_DATA_ATTR uint8_t rtcWifiChannel = 0;  // 0 = nothing cached
 RTC_DATA_ATTR uint8_t rtcBssid[6];
@@ -1462,18 +1497,19 @@ void updateBeforeSleep() {
   WiFi.mode(WIFI_OFF);
 }
 
-// draws image idx (newest-first). The first image gets the full refresh, and
-// only it carries the badge
-void drawIndex(int idx, int badge) {
+// draws image idx (newest-first); full = flashing full refresh (clears ghosting)
+void drawIndex(int idx, int badge, bool full) {
   static bool logged = false;
   if (!logged) {
     logged = true;
     Serial.printf("First draw starts %u ms after wake\n", (unsigned)millis());
   }
-  showImage(storedIds[idx], idx + 1, storedIds.size(), idx == 0, idx == 0 ? badge : 0);
+  showImage(storedIds[idx], idx + 1, storedIds.size(), full, badge);
   rtcViewIdx = idx;
   cycleOk = true;
 }
+
+void stepNext();
 
 // quick pass through the UNSEEN images only (never viewed with the button),
 // newest to oldest, then rest on the newest with the unseen-count badge. Images
@@ -1487,25 +1523,24 @@ void quickPass() {
   for (int i = 0; i < total; i++) {
     if (!storedSeen[i]) pass.push_back(i);
   }
-  int badge = badgeCount();
-  Serial.printf("%d unseen image(s), badge %d\n", (int)pass.size(), badge);
+  Serial.printf("%d unseen image(s), badge %d\n", (int)pass.size(), badgeFor(0));
 
+  // the pass itself is all fast partial refreshes; only coming to rest on image 1 is a full one
   if (pass.size() > 1 || (pass.size() == 1 && pass[0] != 0)) {
     for (size_t k = 0; k < pass.size(); k++) {
-      drawIndex(pass[k], 0);
+      drawIndex(pass[k], 0, false);
       if (waitForNext(STILL_HOLD_MS)) {
         replayRequested = false;  // during the pass any press just steps on
-        markSeen(pass[k]);        // pressing means the user is here
-        int next = (pass[k] + 1) % total;
-        markSeen(next);
-        drawIndex(next, next == 0 ? badgeCount() : 0);
+        rtcInTour = true;         // pressing means the user is here: on through the unseen ones
+        stepNext();
         return;
       }
       if (syncRequested) return;
     }
     Serial.println("Pass complete, resting on the newest image (press the button to step)");
   }
-  drawIndex(0, badge);
+  rtcInTour = countUnseen() > 0;
+  drawIndex(0, badgeFor(0), true);
 }
 
 // redraws the image on screen as a still (first frame) with or without the
@@ -1523,23 +1558,32 @@ void redrawCurrent(bool syncBadge) {
     ok = f && epdParse(f, img) && epdReadFrame(f, img, 0, frameBuf);
     if (f) f.close();
   }
-  if (ok) drawFrame(img, true, rtcViewIdx == 0 ? badgeCount() : 0, syncBadge);
+  if (ok) drawFrame(img, true, badgeFor(rtcViewIdx), syncBadge);
 }
 
 // pressing NEXT means the user is here: what's on screen counts as viewed, and
-// so does the next image, which is drawn. The badge reappears when you wrap
-// back to the newest, showing how many images are still unviewed
+// so does the image it steps to. While unseen images remain it steps only
+// through those (the badge counting down on each); after the last one it wraps
+// back to image 1, and from there it is plain 1, 2 ... 12, 1 again
 void stepNext() {
   int total = storedIds.size();
   markSeen(rtcViewIdx);
-  int next = (rtcViewIdx + 1) % total;
+  int next = nextUnseenAfter(rtcViewIdx);
+  if (next >= 0) {
+    rtcInTour = true;
+  } else if (rtcInTour) {
+    next = 0;  // done with the unseen ones: back to the newest
+    rtcInTour = false;
+  } else {
+    next = (rtcViewIdx + 1) % total;
+  }
   markSeen(next);
-  drawIndex(next, next == 0 ? badgeCount() : 0);
+  drawIndex(next, badgeFor(next), next == 0);  // full refresh whenever it lands on image 1
 }
 
 // plays the animation on screen again (it rests on its first frame afterwards)
 void replayCurrent() {
-  showImage(storedIds[rtcViewIdx], rtcViewIdx + 1, storedIds.size(), false, rtcViewIdx == 0 ? badgeCount() : 0);
+  showImage(storedIds[rtcViewIdx], rtcViewIdx + 1, storedIds.size(), false, badgeFor(rtcViewIdx));
   cycleOk = true;
 }
 
@@ -1649,6 +1693,7 @@ void setup() {
   wokeFromSleep = buttonWake || timerWake;
   if (esp_reset_reason() == ESP_RST_POWERON) {  // RTC memory also survives soft resets (e.g. after an update)
     rtcViewIdx = 0;
+    rtcInTour = false;
     rtcManualFails = 0;
   }
   Serial.printf("Wake: %s, PSRAM %u KB free\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset",
@@ -1691,7 +1736,7 @@ void setup() {
   } else if (otaguard::updatePending() && !storedIds.empty()) {
     // first run of a new firmware with nothing new to show: still prove the display path
     Serial.println("First run of a new firmware: proving the display path before keeping it");
-    drawIndex(rtcViewIdx, rtcViewIdx == 0 ? badgeCount() : 0);
+    drawIndex(rtcViewIdx, badgeFor(rtcViewIdx), rtcViewIdx == 0);
   }
   goToSleep();
 }

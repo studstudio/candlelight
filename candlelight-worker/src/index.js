@@ -485,10 +485,16 @@ export default {
       const sentAt = Date.now();
       const itemId = `${sentAt}-${crypto.randomUUID().slice(0, 8)}.png`;
       // sentAt/sentGeo ride along on the R2 object itself so /queue can hand
-      // them to the firmware in one call (customMetadata values must be strings)
+      // them to the firmware in one call (customMetadata values must be strings).
+      // lampSize = the size /sync will send (preview stripped): knowing every
+      // item's size up front lets /sync stream with an exact Content-Length
       await env.LAMP_IMAGES.put(`queue/${lampId}/${itemId}`, bytes, {
         httpMetadata: { contentType: 'image/png' },
-        customMetadata: { sentAt: String(sentAt), sentGeo: JSON.stringify(geoFromRequest(request)) },
+        customMetadata: {
+          sentAt: String(sentAt),
+          sentGeo: JSON.stringify(geoFromRequest(request)),
+          lampSize: String(stripForLamp(new Uint8Array(bytes)).length),
+        },
       });
       await env.LAMP_KV.put(`meta:${lampId}`, JSON.stringify({ lastUpload: sentAt }));
       await recordSentEvent(env, lampId, itemId, request, sentAt);
@@ -523,31 +529,72 @@ export default {
     // as the lamp's fallback and serve the full PNGs. ----
     if (action === 'sync' && request.method === 'GET') {
       const prefix = `queue/${lampId}/`;
-      const listed = await getQueueItems(env, lampId, { include: ['customMetadata'] });
-      const [fw, datas] = await Promise.all([
+      const [listed, fw] = await Promise.all([
+        getQueueItems(env, lampId, { include: ['customMetadata'] }),
         env.LAMP_IMAGES.head('firmware/latest.bin'),
-        // all the images are fetched at once rather than one after another
-        Promise.all(listed.map(async it => {
-          const obj = await env.LAMP_IMAGES.get(it.key);
-          return obj ? stripForLamp(new Uint8Array(await obj.arrayBuffer())) : null;
-        })),
       ]);
-      const entries = listed.map((it, i) => ({ it, data: datas[i] })).filter(e => e.data); // drop any that vanished
       const enc = new TextEncoder();
-      const head = enc.encode(JSON.stringify({
-        v: 1,
-        count: entries.length,
-        firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
-      }) + '\n');
-      const heads = entries.map(({ it, data }) => {
+      const itemHead = (it, size) => {
         const md = it.customMetadata || {};
         return enc.encode(JSON.stringify({
           itemId: it.key.slice(prefix.length),
-          size: data.length,
+          size,
           sentAt: md.sentAt ? parseInt(md.sentAt, 10) : null,
           sentGeo: md.sentGeo ? JSON.parse(md.sentGeo) : null,
         }) + '\n');
+      };
+      const headLine = count => enc.encode(JSON.stringify({
+        v: 1,
+        count,
+        firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
+      }) + '\n');
+      // all the images are fetched at once rather than one after another
+      const fetched = listed.map(async it => {
+        const obj = await env.LAMP_IMAGES.get(it.key);
+        return obj ? stripForLamp(new Uint8Array(await obj.arrayBuffer())) : null;
       });
+      // delivery events are logged in the background so they don't delay the response
+      ctx.waitUntil(Promise.all(listed.map(it =>
+        recordDownloadEvent(env, lampId, it.key.slice(prefix.length), request).catch(() => {}))));
+
+      // Streamed: when every item's size is known from upload (lampSize), the
+      // header goes out at once and each image as soon as its fetch is done, so
+      // the lamp downloads while the rest are still being fetched. The exact
+      // Content-Length keeps the body unchunked: same bytes as the buffered
+      // response, so any firmware reads it. An item that vanished, or whose size
+      // doesn't match, is sent as zeros of the promised size: the lamp finds no
+      // payload in it, discards it and acks it, and the framing stays intact
+      const sizes = listed.map(it => parseInt(it.customMetadata?.lampSize, 10));
+      if (sizes.every(n => Number.isInteger(n) && n > 0)) {
+        const head = headLine(listed.length);
+        const heads = listed.map((it, i) => itemHead(it, sizes[i]));
+        const total = heads.reduce((n, h, i) => n + h.length + sizes[i], head.length);
+        const { readable, writable } = new FixedLengthStream(total);
+        const writer = writable.getWriter();
+        ctx.waitUntil((async () => {
+          try {
+            await writer.write(head);
+            for (let i = 0; i < listed.length; i++) {
+              let data = await fetched[i];
+              if (!data || data.length !== sizes[i]) data = new Uint8Array(sizes[i]);
+              await writer.write(heads[i]);
+              await writer.write(data);
+            }
+            await writer.close();
+          } catch (e) {
+            await writer.abort(e).catch(() => {});  // the lamp sees a short body and falls back
+          }
+        })());
+        return new Response(readable, {
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/octet-stream' },
+        });
+      }
+
+      // buffered (items queued before lampSize existed): fetch everything, then send
+      const datas = await Promise.all(fetched);
+      const entries = listed.map((it, i) => ({ it, data: datas[i] })).filter(e => e.data); // drop any that vanished
+      const head = headLine(entries.length);
+      const heads = entries.map(({ it, data }) => itemHead(it, data.length));
       const out = new Uint8Array(heads.reduce((n, h, i) => n + h.length + entries[i].data.length, head.length));
       out.set(head, 0);
       let o = head.length;
@@ -555,9 +602,6 @@ export default {
         out.set(heads[i], o); o += heads[i].length;
         out.set(data, o); o += data.length;
       });
-      // delivery events are logged in the background so they don't delay the response
-      ctx.waitUntil(Promise.all(entries.map(({ it }) =>
-        recordDownloadEvent(env, lampId, it.key.slice(prefix.length), request).catch(() => {}))));
       return new Response(out, {
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/octet-stream' },
       });

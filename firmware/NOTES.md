@@ -18,17 +18,21 @@ The lamp sleeps almost all the time (the e-ink panel keeps its image unpowered) 
 
 | Wake | What it does |
 |---|---|
-| Power-up / reset / crash / firmware update | connect (setup portal only if no WiFi is saved), sync, quick 1 s pass through all images, rest on the newest with the new-image badge, stay up 30 s for the button, sleep |
-| Sleep timer (every 10 min while prototyping) | connect with a 20 s timeout, sync, pass + badge only if new images arrived, sleep. No WiFi: skip the sync and sleep, never the portal |
+| Power-up / reset / crash / firmware update | connect (setup portal only if no WiFi is saved), sync, quick pass through the **unseen** images (just the newest if none are unseen), rest on the newest with the badge, stay up 30 s for the button, sleep |
+| Sleep timer (every 10 min while prototyping) | connect with a 20 s timeout, sync, quick pass + badge only if new images arrived, sleep. No WiFi: skip the sync and sleep, never the portal |
 | NEXT button | no WiFi: step to the next image (partial refresh; full refresh when wrapping to the newest), stay up 30 s after the last press, sleep |
 
 - Firmware updates: the worker includes the current firmware version in its `/queue` response, so every sync wake learns about updates at no extra cost (no separate request). If the version differs and isn't blocklisted, the lamp downloads it after the image sync. `GET /firmware/version` still exists for the recovery app.
 - "Power-up" means a real power-on, a reset, a crash or the restart after an update. It does not mean a wake from deep sleep.
-- Badge: one small dot per image downloaded but not yet stepped through, stacked in a column up the bottom-left corner (white ring so it reads over any image). It accumulates across wakes and clears on the first button press.
+- Seen / unseen: every stored image has a `seen` flag in `manifest.json` (so it survives power loss). New downloads are **unseen**. An image becomes **seen** only when the user views it with the button: pressing NEXT marks the image on screen and the one it steps to as seen (a 2 s replay marks the current one). Being drawn by the automatic quick pass does not count. Images stored before this existed count as seen.
+- Quick pass: after a sync that downloaded something it cycles through **all unseen images**, newest first, including unviewed ones from earlier syncs (the user is away while syncs happen, so nothing gets buried), then rests on the newest. Already-seen images are skipped but stay reachable with the button. If only the newest is unseen it is simply drawn once. On power-up with nothing unseen it just draws the newest.
+- Badge: one small **solid** dot per unseen image, in a **horizontal row** along the bottom-left corner, **not counting the image that is on screen** (4 new images: image 1 plus 3 dots). It is drawn on the newest image whenever the lamp shows it, so wrapping back to the newest while still having unviewed images shows how many are left. A press while resting on the newest moves the lamp on and the badge goes with it. Solid black dots can disappear against a dark corner of an image; a white halo is the fix if that happens.
+- Sync feedback: when the 10 s hold fires, the lamp redraws the image on screen (as a still, first frame) with a **solid dot in the top-left corner**. When the sync ends it either plays the quick pass (which redraws everything) or redraws the image without the dot.
+- When the lamp is full (`MAX_IMAGES`), the oldest **seen** image is removed to make room; an unseen one is only removed if every stored image is unseen.
 - NEXT button holds (timed from the moment the press began, even on a wake):
   - tap (under 2 s): next image
   - 2 s or more, then release: replay the animation on screen; on a still it is just a step
-  - 10 s (fires while held): "sync now" for the impatient: the same sync a timer wake does (images, plus a firmware update if the worker has one), clears the blocklist, replays the pass. If WiFi doesn't connect it just skips, and the lamp counts it. On the **second failed 10 s sync in a row** it opens the `Candlelight-XXXX` setup portal with the QR screen (one 3 min attempt; if nobody joins, the current image is put back and the lamp sleeps), so the user can see what's wrong and fix the WiFi. A 10 s hold with working WiFi never shows the portal, and any successful connection resets the count
+  - 10 s (fires while held): "sync now" for the impatient: the same sync a timer wake does (images, plus a firmware update if the worker has one), clears the blocklist, and plays the quick pass if anything is unseen. If WiFi doesn't connect it just skips, and the lamp counts it. On the **second failed 10 s sync in a row** it opens the `Candlelight-XXXX` setup portal with the QR screen (one 3 min attempt; if nobody joins, the current image is put back and the lamp sleeps), so the user can see what's wrong and fix the WiFi. A 10 s hold with working WiFi never shows the portal, and any successful connection resets the count
   - 8 s hold on BOOT (D5) forgets the saved WiFi and restarts into the setup portal with the QR screen. To reach it from sleep, press NEXT to wake the lamp, then hold BOOT right away (inside the 30 s awake window)
 - Firmware download is our own loop in `downloadFirmware()` (not HTTPUpdate, whose stall handling can hang for many minutes): abandoned after 150 s total (a 1.1MB image needs only ~7.5 KB/s) or 15 s without data, retried at the next sync, and it is not counted as a crash. The stall limit is the real protection against a dead connection; the total only has to be longer than a slow-but-working download.
 - State kept across sleep in RTC memory: current image, unseen count, wake count. It is reset on a true power-on.
@@ -56,7 +60,7 @@ grep -rn PLACEHOLDER firmware/fw/src firmware/recovery/src
 | `SYNC_INTERVAL_S` | 600 s (10 min) | Deep-sleep time between timer wakes. Sets battery life, the longest wait before a new image arrives, and the longest wait before a firmware update arrives. Earlier plan for the final product: 30 min or more |
 | `WIFI_TIMEOUT_MS` | 20 000 ms | How long a sync wake waits for the saved WiFi before skipping the sync and sleeping |
 | `AWAKE_IDLE_MS` | 30 000 ms | How long the lamp stays awake after its last activity (a button press, or the end of the pass) so NEXT can step through images |
-| `STILL_HOLD_MS` | 1 000 ms | How long each image stays up during the quick pass, **on top of** the e-ink refresh time (about 1 to 2 s partial, about 4 s full) |
+| `STILL_HOLD_MS` | 500 ms | How long each image stays up during the quick pass, **on top of** the e-ink refresh time (about 1 to 2 s partial, about 4 s full) |
 | `OTA_BUDGET_MS` | 150 000 ms | Total time limit for downloading new firmware; past it the download is abandoned and retried at the next sync |
 | `OTA_STALL_MS` | 15 000 ms | A firmware download that gets no data for this long is abandoned |
 | `REPLAY_HOLD_MS` | 2 000 ms | NEXT held this long, then released, replays an animation (a tap shorter than this is "next") |
@@ -119,7 +123,7 @@ Change these in step, or something quietly stops working:
 | `OTA_BUDGET_MS` | The firmware needs at least size divided by budget: 1.1 MB over 150 s is about 7.5 KB/s. If the firmware grows or links are slow, a budget that is too short means the update can never finish and keeps retrying |
 | `OTA_STALL_MS` | Keep it above normal WiFi hiccups (a few seconds), or healthy downloads get cut off |
 | `SYNC_INTERVAL_S` | Also the delay before a firmware update or a new image shows up. Combined with the awake time per wake (WiFi, image downloads, pass) it determines battery life |
-| `STILL_HOLD_MS` | Total pass time is images × (refresh + hold), and that is awake time on every wake that brings new images |
+| `STILL_HOLD_MS` | Total pass time is unseen images × (refresh + hold), and that is awake time on every wake that brings new images |
 | Recovery values | Only change via USB flash. They are independent of the lamp's values |
 
 ## Recovery app (`recovery/`, runs from the factory partition)

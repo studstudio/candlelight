@@ -33,7 +33,7 @@ const int EPD_CS = D6;    // GPIO14
 GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> display(
     GxEPD2_420_GDEY042T81(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-const uint32_t STILL_HOLD_MS = 1000;   // [PLACEHOLDER] how long each image stays up during the automatic pass
+const uint32_t STILL_HOLD_MS = 500;    // [PLACEHOLDER] how long each image stays up during the automatic pass
 const int ANIM_LOOPS = 1;              // times an animation plays through before moving on
 
 // ---- sleep schedule ----
@@ -323,12 +323,17 @@ int syncQueue() {
     }
     Serial.printf("  %ux%u, %u-bpp, %u frame(s)\n", img.w, img.h, img.bpp, img.frames);
 
-    // device holds MAX_IMAGES at most: the oldest image makes room for this one
+    // device holds MAX_IMAGES at most: the oldest image the user has already
+    // viewed makes room for this one (an unviewed one only if all are unviewed)
     if ((int)stored.size() >= MAX_IMAGES) {
-      String oldId = stored[0]["id"] | "";
+      size_t victim = 0;
+      for (size_t i = 0; i < stored.size(); i++) {
+        if (stored[i]["seen"] | true) { victim = i; break; }
+      }
+      String oldId = stored[victim]["id"] | "";
       LittleFS.remove("/" + oldId);
-      stored.remove(0);
-      Serial.printf("  evicted oldest: %s\n", oldId.c_str());
+      stored.remove(victim);
+      Serial.printf("  evicted: %s\n", oldId.c_str());
     }
 
     LittleFS.rename(TMP_PATH, "/" + String(itemId));
@@ -338,6 +343,7 @@ int syncQueue() {
     entry["geo"] = item["sentGeo"];
     entry["frames"] = img.frames;
     entry["intervalMs"] = img.intervalMs;
+    entry["seen"] = false;  // not viewed with the button yet
     if (!saveManifest(manifestDoc)) {
       Serial.println("  manifest write failed");
       break;
@@ -374,24 +380,27 @@ bool pixelIsBlack(uint8_t code, uint8_t bpp, int x, int y) {
   }
 }
 
-// one small dot per unseen image, stacked in a column up the bottom-left corner.
-// Each dot has a white ring so it reads over any image
+// one small solid dot per unseen image (not counting the one on screen), in a
+// row along the bottom-left corner
 void drawBadge(int n) {
-  const int r = 3, ring = 2, step = 14, margin = 8;
-  int x = margin + r + ring;
+  const int r = 3, step = 12, margin = 8;
   for (int i = 0; i < n; i++) {
-    int y = display.height() - margin - r - ring - i * step;
-    if (y < r + ring) break;  // off the top of the panel
-    display.fillCircle(x, y, r + ring, GxEPD_WHITE);
-    display.fillCircle(x, y, r, GxEPD_BLACK);
+    int x = margin + r + i * step;
+    if (x > display.width() - margin) break;  // off the right edge
+    display.fillCircle(x, display.height() - margin - r, r, GxEPD_BLACK);
   }
 }
 
+// solid dot in the top-left corner: feedback that the 10 s sync hold registered
+void drawSyncDot() {
+  display.fillCircle(14, 14, 6, GxEPD_BLACK);
+}
+
 // draws one packed frame; partial = fast refresh without the full-screen flash.
-// badge > 0 also draws that many dots in the bottom-left corner
+// badge > 0 also draws that many dots along the bottom-left; syncDot adds the top-left feedback dot
 bool wokeFromSleep = false;   // set in setup(): the panel was hibernated, not freshly powered
 bool drewThisWake = false;
-void drawFrame(const EpdImage& img, bool partial, int badge = 0) {
+void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncDot = false) {
   if (FULL_REFRESH_ON_WAKE && wokeFromSleep && !drewThisWake) partial = false;
   drewThisWake = true;
   display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
@@ -410,6 +419,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0) {
       }
     }
     if (badge > 0) drawBadge(badge);
+    if (syncDot) drawSyncDot();
   } while (display.nextPage());
 }
 
@@ -421,7 +431,35 @@ volatile bool syncRequested = false;
 volatile bool replayRequested = false;
 
 // full = flashing full-screen refresh (clears ghosting); otherwise a fast partial one
-// badge > 0 draws that many dots in the bottom-left corner (on an animation, on its resting first frame)
+// prints how long each animation frame took to draw, how long the code then
+// waited to reach the target interval, and the real time from one frame start to
+// the next. If draw time exceeds the target interval the panel can't keep up
+struct FrameTiming { uint32_t startMs, drawMs, waitMs; };
+void printAnimTiming(const std::vector<FrameTiming>& t, uint16_t targetMs, bool interrupted) {
+  if (t.empty()) return;
+  Serial.printf("  animation timing: target %u ms/frame, %u frame(s) played%s\n", targetMs, (unsigned)t.size(),
+                interrupted ? " (stopped by a button press)" : "");
+  uint32_t minP = 0xFFFFFFFF, maxP = 0, sumP = 0, maxDraw = 0;
+  for (size_t k = 0; k < t.size(); k++) {
+    if (t[k].drawMs > maxDraw) maxDraw = t[k].drawMs;
+    if (k == 0) {
+      Serial.printf("    frame %2u: draw %4u ms, wait %4u ms\n", (unsigned)(k + 1), (unsigned)t[k].drawMs, (unsigned)t[k].waitMs);
+      continue;
+    }
+    uint32_t period = t[k].startMs - t[k - 1].startMs;  // frame start to frame start: what you actually see
+    if (period < minP) minP = period;
+    if (period > maxP) maxP = period;
+    sumP += period;
+    Serial.printf("    frame %2u: draw %4u ms, wait %4u ms, %4u ms after the previous frame%s\n", (unsigned)(k + 1),
+                  (unsigned)t[k].drawMs, (unsigned)t[k].waitMs, (unsigned)period, t[k].drawMs > targetMs ? "  <- draw slower than target" : "");
+  }
+  if (t.size() > 1) {
+    Serial.printf("    frame-to-frame: avg %u ms, min %u, max %u (target %u); slowest draw %u ms\n",
+                  (unsigned)(sumP / (t.size() - 1)), (unsigned)minP, (unsigned)maxP, targetMs, (unsigned)maxDraw);
+  }
+}
+
+// badge > 0 draws that many dots along the bottom-left (on an animation, on its resting first frame)
 void showImage(const String& itemId, size_t num, size_t total, bool full, int badge = 0) {
   File f = LittleFS.open("/" + itemId, "r");
   EpdImage img;
@@ -439,37 +477,96 @@ void showImage(const String& itemId, size_t num, size_t total, bool full, int ba
     return;
   }
 
-  // animation: only the first frame can be a full refresh, the rest are partial
+  // animation: only the first frame can be a full refresh, the rest are partial.
+  // Timing is recorded per frame and printed afterwards (printing in between would skew it)
+  std::vector<FrameTiming> timing;
+  timing.reserve(img.frames * ANIM_LOOPS);
   bool first = full;
-  for (int loop = 0; loop < ANIM_LOOPS; loop++) {
+  bool interrupted = false;
+  for (int loop = 0; loop < ANIM_LOOPS && !interrupted; loop++) {
     for (uint8_t i = 0; i < img.frames; i++) {
-      if (nextPressed || replayRequested || syncRequested) { f.close(); return; }  // button skips the rest of the animation
+      if (nextPressed || replayRequested || syncRequested) {  // button skips the rest of the animation
+        interrupted = true;
+        break;
+      }
       uint32_t t0 = millis();
       if (!epdReadFrame(f, img, i, frameBuf)) break;
       drawFrame(img, !first);
       first = false;
       uint32_t spent = millis() - t0;
-      if (spent < img.intervalMs) delay(img.intervalMs - spent);
+      uint32_t wait = spent < img.intervalMs ? img.intervalMs - spent : 0;
+      if (wait) delay(wait);
+      timing.push_back({t0, spent, wait});
     }
   }
+  printAnimTiming(timing, img.intervalMs, interrupted);
+  if (interrupted) {
+    f.close();
+    return;
+  }
   // come to rest on the first frame (with the badge, if any)
+  uint32_t restStart = millis();
   if (epdReadFrame(f, img, 0, frameBuf)) drawFrame(img, true, badge);
+  Serial.printf("  rest frame drawn in %u ms\n", (unsigned)(millis() - restStart));
   f.close();
 }
 
 std::vector<String> storedIds;  // newest first (display order); the manifest itself is oldest first
 
 std::vector<bool> storedAnimated;  // same order as storedIds
+std::vector<bool> storedSeen;      // viewed with the button (an image only drawn by the quick pass doesn't count)
+bool seenDirty = false;            // storedSeen changed and isn't in the manifest yet
 
 void loadStoredIds() {
   storedIds.clear();
   storedAnimated.clear();
+  storedSeen.clear();
   JsonDocument doc;
   loadManifest(doc);
   for (JsonObject e : doc.as<JsonArray>()) {
     storedIds.insert(storedIds.begin(), e["id"].as<String>());
     storedAnimated.insert(storedAnimated.begin(), (e["frames"] | 1) > 1);
+    storedSeen.insert(storedSeen.begin(), e["seen"] | true);  // images stored before this existed count as seen
   }
+}
+
+int countUnseen() {
+  int n = 0;
+  for (bool seen : storedSeen) n += !seen;
+  return n;
+}
+
+// the badge number: unseen images other than the newest, which is the one the
+// badge sits on (so 4 new images show 3 dots next to image 1)
+int badgeCount() {
+  int n = 0;
+  for (size_t i = 1; i < storedSeen.size(); i++) n += !storedSeen[i];
+  return n;
+}
+
+void markSeen(int idx) {
+  if (idx >= 0 && idx < (int)storedSeen.size() && !storedSeen[idx]) {
+    storedSeen[idx] = true;
+    seenDirty = true;
+  }
+}
+
+// writes the seen flags into the manifest (called before sleeping and before a
+// sync, which rewrites the manifest)
+void saveSeenFlags() {
+  if (!seenDirty) return;
+  JsonDocument doc;
+  loadManifest(doc);
+  for (JsonObject e : doc.as<JsonArray>()) {
+    String id = e["id"].as<String>();
+    for (size_t i = 0; i < storedIds.size(); i++) {
+      if (storedIds[i] == id) {
+        e["seen"] = (bool)storedSeen[i];
+        break;
+      }
+    }
+  }
+  if (saveManifest(doc)) seenDirty = false;
 }
 
 // ---------- WiFi setup (captive portal) ----------
@@ -613,7 +710,6 @@ void connectWiFi() {
 // State that has to survive sleep lives in RTC memory.
 
 RTC_DATA_ATTR int rtcViewIdx = 0;     // image on screen, in newest-first order
-RTC_DATA_ATTR int rtcUnseen = 0;      // downloaded images not stepped through yet: the badge number
 RTC_DATA_ATTR int rtcManualFails = 0; // 10 s syncs in a row that couldn't connect (the 2nd opens the setup portal)
 
 bool displayReady = false;  // display.init() has run, so it's safe to hibernate
@@ -674,6 +770,7 @@ bool doSync(bool portalIfUnconfigured, int& added) {
   added = 0;
   if (!connectForSync(portalIfUnconfigured)) return false;
   cycleOk = true;
+  saveSeenFlags();  // the sync rewrites the manifest from flash, so save our changes first
   added = syncQueue();
   updateFirmwareIfNeeded();  // reboots into the new firmware if there is one
   WiFi.disconnect(true);
@@ -689,29 +786,65 @@ void drawIndex(int idx, int badge) {
   cycleOk = true;
 }
 
-// quick pass through everything, newest to oldest, then rest on the newest with
-// the badge. A button press steps on and ends the pass; a sync request ends it
-// too and is left for the caller
-void quickPass(int badge) {
+// quick pass through the UNSEEN images only (never viewed with the button),
+// newest to oldest, then rest on the newest with a dot per unseen image. Images
+// already viewed are skipped but stay reachable with the button; unviewed ones
+// from earlier syncs are included, so nothing gets buried while nobody's home.
+// A button press steps on and ends the pass; a sync request ends it too and is
+// left for the caller. With nothing unseen it just draws the newest image once
+void quickPass() {
   int total = storedIds.size();
+  std::vector<int> pass;
   for (int i = 0; i < total; i++) {
-    drawIndex(i, 0);
-    if (waitForNext(STILL_HOLD_MS)) {
-      replayRequested = false;  // during the pass any press just steps on
-      rtcUnseen = 0;  // they're looking through them now
-      drawIndex((i + 1) % total, 0);
-      return;
-    }
-    if (syncRequested) return;
+    if (!storedSeen[i]) pass.push_back(i);
   }
-  Serial.println("Pass complete, resting on the newest image (press the button to step)");
-  rtcUnseen = badge;
+  int badge = badgeCount();
+  Serial.printf("%d unseen image(s), %d dot(s)\n", (int)pass.size(), badge);
+
+  if (pass.size() > 1 || (pass.size() == 1 && pass[0] != 0)) {
+    for (size_t k = 0; k < pass.size(); k++) {
+      drawIndex(pass[k], 0);
+      if (waitForNext(STILL_HOLD_MS)) {
+        replayRequested = false;  // during the pass any press just steps on
+        markSeen(pass[k]);        // pressing means the user is here
+        int next = (pass[k] + 1) % total;
+        markSeen(next);
+        drawIndex(next, next == 0 ? badgeCount() : 0);
+        return;
+      }
+      if (syncRequested) return;
+    }
+    Serial.println("Pass complete, resting on the newest image (press the button to step)");
+  }
   drawIndex(0, badge);
+}
+
+// redraws the image on screen as a still (first frame) with or without the
+// sync dot, as a fast partial refresh. The panel can't be updated around one
+// spot without the picture, so the picture is re-read and drawn again
+void redrawCurrent(bool syncDot) {
+  if (storedIds.empty()) return;
+  File f = LittleFS.open("/" + storedIds[rtcViewIdx], "r");
+  EpdImage img;
+  bool ok = f && epdParse(f, img) && epdReadFrame(f, img, 0, frameBuf);
+  if (f) f.close();
+  if (ok) drawFrame(img, true, rtcViewIdx == 0 ? badgeCount() : 0, syncDot);
+}
+
+// pressing NEXT means the user is here: what's on screen counts as viewed, and
+// so does the next image, which is drawn. The badge reappears when you wrap
+// back to the newest, showing how many images are still unviewed
+void stepNext() {
+  int total = storedIds.size();
+  markSeen(rtcViewIdx);
+  int next = (rtcViewIdx + 1) % total;
+  markSeen(next);
+  drawIndex(next, next == 0 ? badgeCount() : 0);
 }
 
 // plays the animation on screen again (it rests on its first frame afterwards)
 void replayCurrent() {
-  showImage(storedIds[rtcViewIdx], rtcViewIdx + 1, storedIds.size(), false, rtcViewIdx == 0 ? rtcUnseen : 0);
+  showImage(storedIds[rtcViewIdx], rtcViewIdx + 1, storedIds.size(), false, rtcViewIdx == 0 ? badgeCount() : 0);
   cycleOk = true;
 }
 
@@ -725,7 +858,7 @@ bool openSetupPortal() {
   Serial.println("Setup mode: join " + apName);
   drawSetupScreen(apName);
   bool online = wm.startConfigPortal(apName.c_str());
-  if (!online && !storedIds.empty()) drawIndex(rtcViewIdx, rtcViewIdx == 0 ? rtcUnseen : 0);  // nobody came: put the image back
+  // if nobody came, manualSync() puts the image back when it finishes
   return online;
 }
 
@@ -734,6 +867,8 @@ bool openSetupPortal() {
 // to connect on two of these in a row, so a lamp with working WiFi never sees it
 void manualSync() {
   Serial.println("NEXT held 10s: syncing with the worker");
+  if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
+  redrawCurrent(true);  // solid dot top-left: the hold registered
   otaguard::clearBad();
   int added = 0;
   if (!doSync(false, added)) {
@@ -747,8 +882,9 @@ void manualSync() {
   loadStoredIds();
   nextPressed = false;
   syncRequested = false;
-  rtcUnseen += added;
-  if (!storedIds.empty()) quickPass(rtcUnseen);
+  if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
+  if (!storedIds.empty() && countUnseen() > 0) quickPass();  // redraws everything, so the dot goes with it
+  else redrawCurrent(false);                                 // nothing new: just take the dot away
 }
 
 // stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
@@ -763,16 +899,17 @@ void idleWindow() {
       last = millis();
     } else if (replayRequested) {
       replayRequested = false;
-      if (!storedIds.empty() && storedAnimated[rtcViewIdx]) {
-        replayCurrent();
-      } else if (!storedIds.empty()) {  // nothing to replay on a still: it's just a step
-        rtcUnseen = 0;
-        drawIndex((rtcViewIdx + 1) % storedIds.size(), 0);
+      if (!storedIds.empty()) {
+        if (storedAnimated[rtcViewIdx]) {
+          markSeen(rtcViewIdx);
+          replayCurrent();
+        } else {
+          stepNext();  // nothing to replay on a still: it's just a step
+        }
       }
       last = millis();
     } else if (pressed) {
-      rtcUnseen = 0;
-      if (!storedIds.empty()) drawIndex((rtcViewIdx + 1) % storedIds.size(), 0);
+      if (!storedIds.empty()) stepNext();
       last = millis();
     }
   }
@@ -781,6 +918,8 @@ void idleWindow() {
 [[noreturn]] void goToSleep() {
   if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
+
+  saveSeenFlags();
 
   // a button still held would wake us again at once
   uint32_t t0 = millis();
@@ -813,7 +952,6 @@ void setup() {
   wokeFromSleep = buttonWake || timerWake;
   if (esp_reset_reason() == ESP_RST_POWERON) {  // RTC memory also survives soft resets (e.g. after an update)
     rtcViewIdx = 0;
-    rtcUnseen = 0;
     rtcManualFails = 0;
   }
   Serial.printf("Wake: %s\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset");
@@ -842,20 +980,20 @@ void setup() {
     goToSleep();
   }
 
-  // power-up/reset: sync and replay the pass. Timer: sync, and pass only if there's news
+  // power-up/reset: sync, then the quick pass. Timer: sync, and the pass only if there's news
   Serial.printf("Firmware: %s\n", FW_VERSION);
   int added = 0;
   doSync(!timerWake, added);
   loadStoredIds();
-  rtcUnseen += added;
 
+  // power-up always shows something (the panel's state is unknown); a timer wake only when images arrived
   if (!storedIds.empty() && (!timerWake || added > 0)) {
-    quickPass(rtcUnseen);
+    quickPass();
     idleWindow();
   } else if (otaguard::updatePending() && !storedIds.empty()) {
     // first run of a new firmware with nothing new to show: still prove the display path
     Serial.println("First run of a new firmware: proving the display path before keeping it");
-    drawIndex(rtcViewIdx, rtcViewIdx == 0 ? rtcUnseen : 0);
+    drawIndex(rtcViewIdx, rtcViewIdx == 0 ? badgeCount() : 0);
   }
   goToSleep();
 }

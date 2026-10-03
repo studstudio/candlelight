@@ -347,7 +347,7 @@ void updateFirmwareIfNeeded() {
     return;
   }
   if (otaguard::isBad(workerFwVersion)) {
-    Serial.printf("Firmware %s failed on this lamp before, skipping (hold NEXT 10s to retry it)\n", workerFwVersion.c_str());
+    Serial.printf("Firmware %s failed on this lamp before, skipping (hold NEXT 5s to retry it)\n", workerFwVersion.c_str());
     return;
   }
 
@@ -906,7 +906,7 @@ void drawBadge(Adafruit_GFX& g, int n) {
   drawBoxedText(g, txt, 6, -6);
 }
 
-// top-left corner: feedback that the 10 s sync hold registered
+// top-left corner: feedback that the 5 s sync hold registered
 void drawSyncBadge(Adafruit_GFX& g) {
   drawBoxedText(g, "Syncing...", 6, 6);
 }
@@ -1211,7 +1211,7 @@ void saveSeenFlags() {
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
 const int NEXT_BUTTON = 25;                  // GPIO25 (labelled D2): momentary switch to GND
 const uint32_t REPLAY_HOLD_MS = 2000;        // [PLACEHOLDER] hold NEXT 2 s or more (then let go) to replay an animation
-const uint32_t SYNC_HOLD_MS = 10000;         // [PLACEHOLDER] hold NEXT this long to re-check the worker for new images/firmware
+const uint32_t SYNC_HOLD_MS = 5000;          // [PLACEHOLDER] hold NEXT this long to re-check the worker for new images/firmware
 const uint32_t RESET_HOLD_MS = 8000;         // [PLACEHOLDER] hold this long to forget the saved WiFi
 const uint32_t PORTAL_TIMEOUT_S = 180;       // [PLACEHOLDER] setup mode stays open this long, then retries the saved network
 
@@ -1353,7 +1353,7 @@ RTC_DATA_ATTR uint8_t rtcWifiChannel = 0;  // 0 = nothing cached
 RTC_DATA_ATTR uint8_t rtcBssid[6];
 RTC_DATA_ATTR uint32_t rtcIp = 0, rtcGw = 0, rtcMask = 0, rtcDns = 0;
 RTC_DATA_ATTR uint32_t rtcDhcpAgeS = 0;    // seconds since the cached address came from DHCP
-RTC_DATA_ATTR int rtcManualFails = 0; // 10 s syncs in a row that couldn't connect (the 2nd opens the setup portal)
+RTC_DATA_ATTR int rtcManualFails = 0; // 5 s-hold syncs in a row that couldn't connect (the 2nd opens the setup portal)
 
 bool displayReady = false;  // display.init() has run, so it's safe to hibernate
 bool cycleOk = false;  // this wake reached the worker or drew something, i.e. the firmware did its job
@@ -1601,11 +1601,11 @@ bool openSetupPortal() {
   return online;
 }
 
-// 10 s hold: "sync now" for the impatient. Same sync a timer wake does, plus a
+// 5 s hold: "sync now" for the impatient. Same sync a timer wake does, plus a
 // retry of a blocklisted firmware. The setup portal opens only if WiFi fails
 // to connect on two of these in a row, so a lamp with working WiFi never sees it
 void manualSync() {
-  Serial.println("NEXT held 10s: syncing with the worker");
+  Serial.printf("NEXT held %us: syncing with the worker\n", (unsigned)(SYNC_HOLD_MS / 1000));
   if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
   redrawCurrent(true);  // "Syncing..." top-left: the hold registered
   otaguard::clearBad();
@@ -1627,7 +1627,7 @@ void manualSync() {
 }
 
 // stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
-// can step through the images; a 2 s hold replays an animation, a 10 s hold syncs
+// can step through the images; a 2 s hold replays an animation, a 5 s hold syncs
 void idleWindow() {
   uint32_t last = millis();
   while (millis() - last < AWAKE_IDLE_MS) {

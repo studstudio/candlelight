@@ -187,10 +187,16 @@
     background: var(--bg);
     display: flex; align-items: center; justify-content: center;
   }
+  /* the canvas pixels stay pure black/white (they're what gets exported);
+     the filter only changes how they LOOK, squeezing the range to roughly
+     what the panel shows: dark gray "black" on warm light gray "white".
+     Width/height are set by sizePreviewCanvas() to a whole number of device
+     pixels per panel pixel, so the dither is never resampled into smooth gray */
   .preview-wrap canvas {
     max-width: 100%; height: auto; display: block;
-    image-rendering: pixelated;
     image-rendering: -webkit-optimize-contrast;
+    image-rendering: pixelated;
+    filter: contrast(0.62) sepia(0.15);
     background: #000;
   }
 
@@ -1074,6 +1080,18 @@ animIntervalSlider.oninput = () => {
   animIntervalValue.textContent = (Math.round(animIntervalSec * 10) / 10) + 's';
 };
 
+// shows the preview at the largest WHOLE multiple of device pixels per panel
+// pixel that fits, so each panel pixel is a crisp block instead of being
+// blended with its neighbours (which made the dither look like smooth gray).
+// Falls back to plain fit-to-width on a screen too small for even 1:1.
+function sizePreviewCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const k = Math.floor(previewWrap.clientWidth * dpr / targetW);
+  if (k < 1) { liveCanvas.style.width = ''; liveCanvas.style.height = ''; return; }
+  liveCanvas.style.width = (k * targetW / dpr) + 'px';
+  liveCanvas.style.height = (k * targetH / dpr) + 'px';
+}
+
 // composites and draws one whole frame (base + its overlays) straight to
 // the canvas without disturbing whichever frame is currently being edited
 // (crop box, sliders, etc.) — used only for the play/pause preview loop
@@ -1874,6 +1892,7 @@ function computeLayerGray(layer, W, H) {
 // through onto whatever is underneath it.
 function render() {
   if (!naturalW) return;
+  sizePreviewCanvas();
   snapshotActiveLayerState(); // make sure the layer being edited right now is up to date before compositing
 
   const W = targetW, H = targetH;
@@ -2470,6 +2489,8 @@ document.addEventListener('gestureend', (e) => e.preventDefault());
 renderContacts();
 setShareToGallery(false);
 liveCanvas.width = targetW; liveCanvas.height = targetH;
+sizePreviewCanvas();
+window.addEventListener('resize', sizePreviewCanvas);
 scratchCanvas.width = targetW; scratchCanvas.height = targetH;
 updateIndicators(); // sync the ring indicators to the default state
 updateLayerTabs(); // empty until a base photo is chosen

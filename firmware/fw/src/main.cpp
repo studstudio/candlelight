@@ -14,6 +14,7 @@
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
 #include <qrcode.h>
+#include <Fonts/FreeSans9pt7b.h>
 #include "epd_png.h"
 #include "ota_guard.h"
 #include "tls_resume.h"
@@ -1037,35 +1038,46 @@ void drawSyncBadge(Adafruit_GFX& g) {
   drawBoxedText(g, "Syncing...", 6, 6);
 }
 
-// bottom-right corner: where and when the image on screen was sent (the 2 s
-// hold on a still). info is up to two lines split by '\n'; a line too long for
-// the screen is cut short with "..."
-void drawInfoBox(Adafruit_GFX& g, const char* info) {
-  const int pad = 6, gap = 4, charW = 12, lineH = 16;  // text size 2: 12x16 per character
-  const int maxChars = (g.width() - 12 - 2 * pad) / charW;
-  char lines[2][48] = {{0}, {0}};
-  int n = 0;
+// bottom-left corner: where and when the image on screen was sent (the 2 s
+// hold on a still), in a small sans font to keep the box out of the picture.
+// info is up to two lines split by '\n'; a line too wide for the screen is cut
+// short. aboveBadge lifts it over the unseen-count badge that shares the corner
+void drawInfoBox(Adafruit_GFX& g, const char* info, bool aboveBadge) {
+  const int pad = 4, margin = 3, lineH = 16;
+  g.setFont(&FreeSans9pt7b);
+  g.setTextSize(1);
+  g.setTextColor(GxEPD_BLACK);
+  char lines[2][40] = {{0}, {0}};
+  int n = 0, w = 0, top = 0, bottom = 0;  // widest line; ink above / below the baseline (all lines)
   for (const char* p = info; *p && n < 2; n++) {
     const char* end = strchr(p, '\n');
-    int len = end ? end - p : strlen(p);
-    int keep = std::min(len, std::min(maxChars, (int)sizeof(lines[n]) - 1));
-    memcpy(lines[n], p, keep);
-    if (keep < len && keep >= 3) memcpy(lines[n] + keep - 3, "...", 3);
-    p = end ? end + 1 : p + len;
+    int len = std::min(end ? (int)(end - p) : (int)strlen(p), (int)sizeof(lines[n]) - 1);
+    memcpy(lines[n], p, len);
+    int16_t bx, by;
+    uint16_t bw, bh;
+    for (;;) {  // drop characters until it fits
+      g.getTextBounds(lines[n], 0, 0, &bx, &by, &bw, &bh);
+      if (bx + bw + 2 * pad + 2 * margin <= g.width() || len == 0) break;
+      lines[n][--len] = 0;
+    }
+    w = std::max(w, bx + (int)bw);
+    top = std::max(top, (int)-by);
+    bottom = std::max(bottom, by + (int)bh);
+    p = end ? end + 1 : p + strlen(p);
   }
-  if (!n) return;
-  int widest = std::max(strlen(lines[0]), strlen(lines[1]));
-  int w = widest * charW + 2 * pad, h = n * lineH + (n - 1) * gap + 2 * pad;
-  int x = g.width() - 6 - w, y = g.height() - 6 - h;
-  g.fillRect(x, y, w, h, GxEPD_WHITE);
-  g.drawRect(x, y, w, h, GxEPD_BLACK);
-  g.drawRect(x + 1, y + 1, w - 2, h - 2, GxEPD_BLACK);
-  g.setTextSize(2);
-  g.setTextColor(GxEPD_BLACK);
-  for (int i = 0; i < n; i++) {
-    g.setCursor(x + pad, y + pad + i * (lineH + gap));
-    g.print(lines[i]);
+  if (n) {
+    int h = top + (n - 1) * lineH + bottom + 2 * pad;
+    int bw = w + 2 * pad;
+    const int badgeH = 6 + 16 + 2 * 5;  // drawBadge: 6 from the edge, text size 2 (16 high), padding 5
+    int x = margin, y = g.height() - margin - h - (aboveBadge ? badgeH : 0);
+    g.fillRect(x, y, bw, h, GxEPD_WHITE);
+    g.drawRect(x, y, bw, h, GxEPD_BLACK);
+    for (int i = 0; i < n; i++) {
+      g.setCursor(x + pad, y + pad + top + i * lineH);  // this font's cursor is the baseline
+      g.print(lines[i]);
+    }
   }
+  g.setFont(nullptr);  // back to the built-in font the badges use
 }
 
 // draws into a packed 1-bit picture laid out the way the panel takes it
@@ -1085,7 +1097,7 @@ class MonoCanvas : public Adafruit_GFX {
 
 // draws one packed frame; partial = fast refresh without the full-screen flash.
 // badge > 0 also draws that number bottom-left; syncBadge adds the top-left \"Syncing...\" badge;
-// info (if not null) adds the bottom-right info box
+// info (if not null) adds the bottom-left info box
 bool wokeFromSleep = false;   // set in setup(): the panel was hibernated, not freshly powered
 bool drewThisWake = false;
 uint32_t lastBuildMs = 0, lastPanelMs = 0;  // of the last drawFrame: making the picture vs sending it and refreshing
@@ -1139,7 +1151,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
     MonoCanvas canvas(monoBuf, W, H);
     if (badge > 0) drawBadge(canvas, badge);
     if (syncBadge) drawSyncBadge(canvas);
-    if (info) drawInfoBox(canvas, info);
+    if (info) drawInfoBox(canvas, info, badge > 0);
   }
   lastBuildMs = millis() - t0;
 
@@ -1185,7 +1197,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
     }
     if (badge > 0) drawBadge(display, badge);
     if (syncBadge) drawSyncBadge(display);
-    if (info) drawInfoBox(display, info);
+    if (info) drawInfoBox(display, info, badge > 0);
     tBuild += millis() - t0;
     uint32_t t1 = millis();
     more = display.nextPage();
@@ -1765,9 +1777,10 @@ void redrawCurrent(bool syncBadge) {
   rtcInfoShown = false;
 }
 
-// the info box text for the image on screen: where it was sent from, then when
-// (the sender's local time). The worker sends both ready to print (geo.place,
-// geo.localTime); images stored before it did fall back to city/country and UTC
+// the info box text for the image on screen: the city it was sent from, then
+// the weekday and time there ("Sun 3:12 PM"). The worker sends both ready to
+// print (geo.place, geo.localTime); an image stored before it did shows just
+// the city, since the lamp can't work out another place's local time itself
 String infoText(int idx) {
   JsonDocument doc;
   loadManifest(doc);
@@ -1779,26 +1792,12 @@ String infoText(int idx) {
     }
   }
   JsonVariantConst geo = entry["geo"];
-  String place = geo["place"] | "";
-  if (place.isEmpty()) {
-    const char* city = geo["city"] | (geo["region"] | "");
-    const char* country = geo["country"] | "";
-    place = String(city) + (*city && *country ? ", " : "") + country;
-  }
-  String asciiPlace;  // the font has no accents: drop anything that isn't plain ASCII
-  for (char c : place) if (c >= 0x20 && c < 0x7f) asciiPlace += c;
-  if (asciiPlace.isEmpty()) asciiPlace = "Somewhere";
-
+  const char* place = geo["place"] | (geo["city"] | (geo["region"] | ""));
+  String city;  // the font has no accents: drop anything that isn't plain ASCII
+  for (const char* c = place; *c; c++) if (*c >= 0x20 && *c < 0x7f) city += *c;
+  if (city.isEmpty()) city = "Somewhere";
   String when = geo["localTime"] | "";
-  if (when.isEmpty() && !entry["sentAt"].isNull()) {
-    time_t secs = (time_t)(entry["sentAt"].as<long long>() / 1000);
-    struct tm tm;
-    gmtime_r(&secs, &tm);
-    char buf[32];
-    strftime(buf, sizeof(buf), "%a %b %e, %H:%M UTC", &tm);
-    when = buf;
-  }
-  return when.isEmpty() ? asciiPlace : asciiPlace + "\n" + when;
+  return when.isEmpty() ? city : city + "\n" + when;
 }
 
 // 2 s hold on a still: shows the info box over it, as a fast partial refresh.

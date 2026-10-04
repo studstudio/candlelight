@@ -61,8 +61,8 @@ function geoFromRequest(request) {
 // The lamp's info box (2 s hold on a still) prints where and when an image was
 // sent. The lamp's font is plain ASCII and it can't turn an IANA timezone into
 // a local time, so the worker does both and hands over ready-to-print strings:
-//   place:     "Brooklyn, US"
-//   localTime: "Sat Oct 4, 3:12 PM" in the sender's own timezone (UTC, labelled, if unknown)
+//   place:     "Brooklyn" (the city alone)
+//   localTime: "Sun 3:12 PM" in the sender's own timezone (null if that is unknown)
 function toAscii(str) {
   return String(str)
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // é -> e
@@ -72,17 +72,14 @@ function toAscii(str) {
 
 function lampGeo(sentAt, geo) {
   if (!geo) return geo;
-  const place = [geo.city || geo.region, geo.country].filter(Boolean).join(', ');
+  const place = geo.city || geo.region;
   let localTime = null;
-  if (sentAt) {
-    const opts = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  if (sentAt && geo.timezone) {
     try {
-      localTime = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: geo.timezone || 'UTC' }).format(new Date(sentAt));
-    } catch { // a timezone Intl doesn't know
-      localTime = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: 'UTC' }).format(new Date(sentAt));
-      geo = { ...geo, timezone: null };
-    }
-    localTime = toAscii(localTime).replace(',', '') + (geo.timezone ? '' : ' UTC'); // "Sat Oct 4, 3:12 PM"
+      localTime = toAscii(new Intl.DateTimeFormat('en-US', {
+        weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: geo.timezone,
+      }).format(new Date(sentAt)));
+    } catch {} // a timezone Intl doesn't know: no time rather than a wrong one
   }
   return { ...geo, place: place ? toAscii(place) : null, localTime };
 }

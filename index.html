@@ -146,15 +146,34 @@
   .tool-btn { width: 36px; height: 34px; }
   .message-toggle-btn { margin-left: auto; } /* far right, balancing the + on the left */
   .tool-btn.active { color: var(--ember); }
+  #shaderBtn { overflow: hidden; transition: width .38s cubic-bezier(.3,.9,.3,1), opacity .3s ease .08s; }
+  #shaderBtn.rolled-in { width: 0; opacity: 0; pointer-events: none; }
+  #replacePhotoBtn { transition: color .2s; }
   /* message cursor icon: just highlights orange while the message box is open */
   .crop-toggle { position: absolute; left: 50%; top: 0; transform: translateX(-50%); width: 56px; height: 34px; opacity: 0.8; }
   .photo-wrap.collapsed { display: none; }
   .shader-panel { margin: 10px 0 4px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  .preview-wrap.touch-on { cursor: crosshair; outline: 1px solid var(--ember); outline-offset: -1px; }
+  #shaderTouchBtn.on { color: var(--ember); border-color: var(--ember); }
   .shader-panel .moire-label { flex-basis: 64px; }
   .shader-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cream-dim); padding: 0 2px; }
   .shader-play { flex: 0 0 auto; padding: 4px 12px; font-size: 12px; }
+  #shaderPlayBtn { margin-left: 10px; padding: 3px 11px; }
+  #shaderHead { justify-content: flex-start; }
   .shader-panel .moire-label { flex-basis: 84px; }
   #shaderBackdrop .modal-sheet { max-height: 86vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .st-box { display: flex; gap: 8px; margin: 0 0 6px; }
+  .st-box input, .st-adv input, .st-adv textarea { flex: 1; min-width: 0; box-sizing: border-box; width: 100%; background: var(--bg); color: var(--cream); border: 1px solid var(--line) !important; border-radius: 0 !important; padding: 8px 10px !important; font: inherit; font-size: 13px; outline: none; }
+  .st-adv textarea { font-family: ui-monospace, Menlo, monospace; font-size: 11px; margin-top: 6px; resize: vertical; }
+  .st-box button, .st-adv button { background: transparent; color: var(--cream-dim); border: 1px solid var(--line); border-radius: 0; padding: 8px 14px; font-size: 12px; }
+  .st-adv button { margin-top: 6px; }
+  .st-status { min-height: 16px; font-size: 11px; color: var(--neutral-grey); margin: 0 0 6px; line-height: 1.4; }
+  .st-status.err { color: #e2584a; }
+  .st-adv { margin: 0 0 12px; font-size: 11px; color: var(--neutral-grey); }
+  .st-adv summary { cursor: pointer; padding: 2px 0; }
+  .st-adv input { margin-top: 6px; }
+  .shader-card { position: relative; }
+  .st-del { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; line-height: 20px; text-align: center; background: rgba(0,0,0,0.6); color: var(--cream-dim); font-size: 14px; }
   .shader-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .shader-card { background: var(--bg); border: 1px solid var(--line); color: var(--cream-dim); padding: 0; text-align: left; font-size: 12px; overflow: hidden; }
   .shader-card canvas { display: block; width: 100%; height: auto; background: #000; }
@@ -217,6 +236,23 @@
 
   hr.divider { border: none; border-top: 1px solid var(--line); margin: 26px 0 18px; }
 
+  .anim-btn-row { display: flex; gap: 8px; margin-top: 8px; }
+  .anim-btn-row .pill { flex: 1 1 0; min-width: 0; padding: 9px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* two sliders per row, collapsible sections */
+  .sec-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cream-dim); padding: 2px 2px; margin-top: 14px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+  .sec-head .chev { width: 12px; height: 8px; margin-left: 8px; transition: transform .2s; flex: none; }
+  .sec-head .name { display: flex; align-items: center; }
+  .collapsed > .sec-head .chev, .collapsed .sec-head .chev.self { transform: rotate(180deg); }
+  .collapsed > .sec-body { display: none; }
+  .slider-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 18px; }
+  .slider-grid .moire-row { min-width: 0; gap: 6px; }
+  .slider-grid .moire-label { flex: 0 0 38px !important; font-size: 10.5px; line-height: 1.15; overflow-wrap: anywhere; }
+  .slider-grid .moire-row input[type=range] { min-width: 0; width: 100%; }
+  .slider-grid .full { grid-column: 1 / -1; }
+  .slider-grid .full .moire-label { flex: 0 0 38px !important; }
+  #shaderParams { display: contents; }
+  .locked { opacity: 0.72; transition: opacity .25s; }
+  .preview-wrap.playing { outline: 1px solid rgba(226,88,74,0.0); }
   .moire-row {
     display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 0 2px;
   }
@@ -350,8 +386,11 @@
     <input type="range" id="animIntervalSlider" min="0.5" max="2" step="0.1" value="0.5">
     <span class="anim-interval-value" id="animIntervalValue">0.5s</span>
   </div>
-  <button class="pill" id="animPlayBtn" style="margin-top:8px; width:100%; padding:9px 0;">▶ preview</button>
-  <button class="pill" id="duplicateFrameBtn" style="margin-top:8px; width:100%; padding:9px 0;">⧉ duplicate current frame</button>
+  <div class="anim-btn-row">
+    <button class="pill" id="animPlayBtn">▶ preview</button>
+    <button class="pill" id="duplicateFrameBtn">⧉ duplicate</button>
+    <button class="pill" id="applyAllBtn">apply to all</button>
+  </div>
 </div>
 
 
@@ -361,21 +400,17 @@
   <button class="tool-btn" id="replacePhotoBtn" type="button" title="add / replace photo" aria-label="add or replace photo">
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
   </button>
-  <button class="tool-btn" id="shaderBtn" type="button" title="add a shader" aria-label="add a shader">
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12c2-5 4-5 6 0s4 5 6 0 4-5 6 0"/></svg>
+  <button class="tool-btn rolled-in" id="shaderBtn" type="button" title="add a shader" aria-label="add a shader">
+    <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12.5" r="5.6"/><path d="M12 12.5L14.6 8.6"/><path d="M5.2 19.2l-1.1 1.1M3.4 12.5H2M5.2 5.8L4.1 4.7M18.8 19.2l1.1 1.1M20.6 12.5H22M18.8 5.8l1.1-1.1" stroke-width="1.3" opacity=".7"/></svg>
   </button>
   <button class="tool-btn message-toggle-btn" id="messageToggleBtn" type="button" title="add a message" aria-label="add a message"><svg class="msg-cursor" viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 17h12"/></svg></button>
-  <button class="crop-toggle" id="cropToggleBtn" type="button" aria-label="show or hide crop area" aria-expanded="true">
+  <button class="crop-toggle" id="cropToggleBtn" type="button" aria-label="show or hide crop area" aria-expanded="false">
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="cropChevron" d="M6 15l6-6 6 6"/></svg>
   </button>
 </div>
 <div class="photo-wrap" id="photoWrap">
   <img id="sourceImg" src="" style="display:none;">
-  <div class="empty-state" id="emptyState">
-    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3.5"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/></svg>
-    <span>tap to choose a photo</span>
-    <button type="button" class="empty-shader-link" id="emptyShaderBtn">or pick a shader</button>
-  </div>
+  <div class="empty-state" id="emptyState"></div>
   <div class="crop-box" id="cropBox" style="display:none;">
     <div class="handle handle-tl" data-corner="tl"></div>
     <div class="handle handle-tr" data-corner="tr"></div>
@@ -436,15 +471,27 @@
 </div>
 
 <div class="shader-panel" id="shaderPanel" style="display:none;">
-  <div class="shader-head"><span class="shader-name" id="shaderName">shader</span><button class="pill shader-play" id="shaderPlayBtn" type="button" aria-label="play or pause the shader loop">▶</button></div>
+  <div class="shader-head sec-head" id="shaderHead" style="margin-top:0;"><span class="name"><span class="shader-name" id="shaderName">shader</span><svg class="chev" viewBox="0 0 12 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 6.2 6 1.8l4.5 4.4"/></svg><button class="pill shader-play" id="shaderPlayBtn" type="button" aria-label="play or pause the shader loop">▶</button></span></div>
+  <div class="sec-body slider-grid" id="shaderBody">
   <div class="moire-row"><span class="moire-label">time</span><input type="range" id="shaderTime" min="0" max="100" value="25"></div>
+  <div class="moire-row full" id="shaderTouchRow" style="display:none;">
+    <span class="moire-label">touch</span>
+    <button class="pill shader-play" id="shaderTouchBtn" type="button">touch the preview</button>
+    <span class="anim-interval-value" id="shaderTouchCount" style="flex:1; text-align:left; padding-left:10px;"></span>
+    <span id="shaderTouchClear" role="button" tabindex="0" style="font-size:12px; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer;">clear</span>
+  </div>
   <div id="shaderParams"></div>
-  <div class="moire-row" id="shaderBakeRow" style="display:none;">
-    <span class="moire-label">bake</span><input type="range" id="shaderBakeCount" min="2" max="10" value="8"><span class="anim-interval-value" id="shaderBakeCountVal">8</span>
+  <div class="moire-row full" id="shaderBakeRow" style="display:none;">
+    <span class="moire-label">bake</span><input type="range" id="shaderBakeCount" min="2" max="10" value="10"><span class="anim-interval-value" id="shaderBakeCountVal">10</span>
+    <span class="moire-label">step</span><input type="range" id="shaderBakeStep" min="1" max="10" value="3"><span class="anim-interval-value" id="shaderBakeStepVal">3%</span>
     <button class="pill shader-play" id="shaderBakeBtn" type="button">bake</button>
+  </div>
   </div>
 </div>
 
+<div class="tex-section" id="texSection">
+<div class="sec-head" id="texHead"><span class="name">sliders<svg class="chev" viewBox="0 0 12 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 6.2 6 1.8l4.5 4.4"/></svg></span></div>
+<div class="sec-body slider-grid">
 <div class="moire-row opacity-row"><span class="moire-label">opacity</span><input type="range" id="opacitySlider" min="0" max="100" value="100"></div>
 <div class="moire-row"><span class="moire-label">grid</span><input type="range" id="gridSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">hatch</span><input type="range" id="hatchSlider" min="0" max="100" value="0"></div>
@@ -455,7 +502,8 @@
 <div class="moire-row"><span class="moire-label">organic</span><input type="range" id="organicSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">outline</span><input type="range" id="outlineSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">dot stipple</span><input type="range" id="dotStippleSlider" min="0" max="100" value="0"></div>
-<div id="applyAllBtn" role="button" tabindex="0" style="display:none; margin:12px 0 0; text-align:center; font-size:12px; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">apply to all</div>
+</div>
+</div>
 <div id="resetSlidersBtn" role="button" tabindex="0" style="margin:8px 0 0; text-align:center; font-size:12px; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">reset sliders</div>
 <p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
@@ -490,6 +538,16 @@
 <div class="modal-backdrop" id="shaderBackdrop">
   <div class="modal-sheet">
     <h2>pick a shader</h2>
+    <div class="st-box">
+      <input id="stInput" type="text" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="shadertoy link or id">
+      <button id="stLoad" type="button">load</button>
+    </div>
+    <div class="st-status" id="stStatus"></div>
+    <details class="st-adv" id="stAdv"><summary>api key · or paste code</summary>
+      <input id="stKey" type="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="shadertoy api key (free, from shadertoy.com/myapps)">
+      <textarea id="stCode" rows="5" spellcheck="false" placeholder="paste a shader with void mainImage(out vec4 fragColor, in vec2 fragCoord)"></textarea>
+      <button id="stUseCode" type="button">use pasted code</button>
+    </details>
     <div class="shader-grid" id="shaderGrid"></div>
     <div class="modal-actions" style="margin-top:14px;"><button class="btn-cancel" id="shaderCancel" type="button">cancel</button></div>
   </div>
@@ -624,6 +682,7 @@ let pendingNewFrameIdx = null; // flag (null/true), set only by the filmstrip's 
 // single entry point for every file-picker open, so stale intent from a
 // cancelled pick (no 'change' event fires on cancel) can never leak into the next one
 function openFilePicker(targetLayer, opts = {}) {
+  document.getElementById('shaderBtn').classList.remove('rolled-in'); // rolls out while the picker opens
   pendingUploadTargetLayer = targetLayer;
   pendingNewFrameIdx = opts.newFrame ? true : null;
   fileInput.multiple = !!opts.multiple;
@@ -1101,7 +1160,8 @@ function setMode(next) {
   modeCycleBtn.classList.toggle('active', mode === 'cycle');
   frameFilmstrip.style.display = mode === 'cycle' ? 'flex' : 'none';
   animControls.style.display = mode === 'cycle' ? 'block' : 'none';
-  document.getElementById('applyAllBtn').style.display = mode === 'cycle' ? 'block' : 'none'; // frames only exist in cycle
+  document.getElementById('applyAllBtn').style.display = mode === 'cycle' ? '' : 'none'; // frames only exist in cycle
+  saveImageBtn.textContent = mode === 'cycle' ? 'save frames' : 'save image';
 
   activeLayerIdx = 0;
   const stack = currentStack();
@@ -1154,16 +1214,51 @@ function renderFrameForPreview(idx) {
 
 function stopAnimPreview() {
   animPlaying = false;
+  setEditLock(false);
   if (animPlayTimer) { clearInterval(animPlayTimer); animPlayTimer = null; }
   animPlayBtn.textContent = '▶ preview';
   render(); // restore the currently-edited frame to the canvas
 }
+
+// ----- grey out editing while the cycle preview is running -----
+const EDIT_LOCK_SELECTORS = ['.crop-toolbar', '#photoWrap', '#layerTabs', '#frameFilmstrip', '#shaderPanel', '#texSection',
+  '#resetSlidersBtn', '#duplicateFrameBtn', '#applyAllBtn'];
+function setEditLock(on) {
+  EDIT_LOCK_SELECTORS.forEach(sel => document.querySelectorAll(sel).forEach(el => el.classList.toggle('locked', on)));
+  const pillRow = document.getElementById('invertBtn').parentElement;
+  pillRow.classList.toggle('locked', on);
+}
+
+// taps on anything locked don't edit; they just say why (a quiet one-line notice)
+let lockHintAt = 0, toastEl = null, toastTimer = null;
+function quietToast(msg) { // a small note floating at the bottom of the screen, wherever you're scrolled to
+  if (!toastEl) {
+    toastEl = document.createElement('div');
+    toastEl.style.cssText = 'position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:9998;background:rgba(20,16,13,0.92);color:#bfb8aa;border:1px solid #3a342c;padding:8px 14px;font-size:12px;letter-spacing:0.02em;pointer-events:none;opacity:0;transition:opacity .25s;max-width:86vw;text-align:center;';
+    document.body.appendChild(toastEl);
+  }
+  toastEl.textContent = msg; toastEl.style.opacity = '1';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { toastEl.style.opacity = '0'; }, 1600);
+}
+function lockedHit(e) {
+  if (!animPlaying) return;
+  const t = e.target;
+  if (!t || !t.closest || !EDIT_LOCK_SELECTORS.some(sel => t.closest(sel))) return;
+  if (e.cancelable) e.preventDefault();
+  e.stopPropagation();
+  const now = Date.now();
+  if (now - lockHintAt > 1800) { lockHintAt = now; quietToast('preview is running — stop it to edit'); }
+}
+['touchstart', 'mousedown', 'click'].forEach(ev => document.addEventListener(ev, lockedHit, { capture: true, passive: false }));
 
 animPlayBtn.onclick = () => {
   if (animPlaying) { stopAnimPreview(); return; }
   const filled = frames.map((f,i)=>({f,i})).filter(x => frameIsFilled(x.f));
   if (filled.length === 0) return;
   animPlaying = true;
+  if (typeof stopShaderPlay === 'function') stopShaderPlay();
+  if (typeof setShaderTouchMode === 'function') setShaderTouchMode(false);
+  setEditLock(true);
   animPlayBtn.textContent = '■ stop';
   let cursor = 0;
   renderFrameForPreview(filled[0].i);
@@ -1309,7 +1404,27 @@ const replacePhotoBtn = document.getElementById('replacePhotoBtn');
 // icon acts on "the photo you're looking at right now"
 // in Cycle the base "+" takes several photos at once: into an empty frame 1 each becomes a frame; on a filled
 // base the first replaces it and the rest follow as new frames
-replacePhotoBtn.onclick = () => openFilePicker(activeLayerIdx, { multiple: mode === 'cycle' && activeLayerIdx === 0 });
+// + is a toggle: the first tap lights it up and opens the picker, and it stays lit
+// (picker closed, cancelled, photo chosen) until it's tapped again
+// Turning it off reacts on pointerdown, not click: right after the system picker closes
+// some phones swallow the first tap's click, which made it take an extra tap to un-light.
+let plusSwallowClick = false;
+replacePhotoBtn.addEventListener('pointerdown', () => {
+  if (replacePhotoBtn.classList.contains('active')) { replacePhotoBtn.classList.remove('active'); plusSwallowClick = true; }
+});
+// it lights while the picker is open and clears when the picker is dismissed: cancel / photo
+// chosen, or any tap elsewhere on the page (some phones fire no event when a picker is cancelled)
+function endPlusHighlight() { replacePhotoBtn.classList.remove('active'); }
+fileInput.addEventListener('cancel', endPlusHighlight);
+fileInput.addEventListener('change', endPlusHighlight);
+document.addEventListener('pointerdown', (e) => {
+  if (replacePhotoBtn.classList.contains('active') && !replacePhotoBtn.contains(e.target)) endPlusHighlight();
+}, true);
+replacePhotoBtn.onclick = () => {
+  if (plusSwallowClick) { plusSwallowClick = false; return; }
+  replacePhotoBtn.classList.add('active');
+  openFilePicker(activeLayerIdx, { multiple: mode === 'cycle' && activeLayerIdx === 0 });
+};
 
 // ---------- message panel toggle: folds/unfolds between photo and preview ----------
 const postcardCollapse = document.getElementById('postcardCollapse');
@@ -1348,6 +1463,7 @@ const SHADER_HEADER = `
 precision highp float;
 uniform vec2 u_res; uniform float u_phase;
 uniform float u_p0; uniform float u_p1; uniform float u_p2; uniform float u_p3; uniform float u_p4; uniform float u_p5;
+uniform vec3 u_touch[16];   // taps/drags: x,y in 0..1 (y up) and the phase they happened at; z < -5 = unused
 const float TAU = 6.2831853;
 float hash(vec2 p){ p = fract(p*vec2(5.3983, 5.4427)); p += dot(p.yx, p.xy + vec2(21.5351, 14.3137)); return fract(p.x*p.y*95.4337); }
 float vnoise(vec2 p){
@@ -1862,15 +1978,164 @@ void main(){
   v += 0.10 * exp(-pow(uv.x / (u_p0 * 1.8), 2.0)) * exp(-y * 3.0);   // glow at the base
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
+  },
+  {
+    id: 'touchripples', name: 'touch ripples', grow: true, touch: true, phase: 0.0,
+    demo: [[0.32, 0.58, 0.04], [0.68, 0.42, 0.14], [0.5, 0.3, 0.26]],
+    params: [
+      { label: 'wavelength', min: 20, max: 80, value: 46 }, { label: 'fade', min: 0.5, max: 4.0, value: 1.4 },
+      { label: 'spread speed', min: 0.3, max: 1.5, value: 0.8 }, { label: 'ring length', min: 0.5, max: 3.0, value: 1.5 },
+      { label: 'drizzle', min: 0.0, max: 1.0, value: 0.35 }, { label: 'light & relief', min: 0.3, max: 3.0, value: 1.3 } ],
+    code: `
+float rippleH(vec2 p){
+  float asp = u_res.x / u_res.y;
+  float h = 0.0;
+  for (int i = 0; i < 16; i++) {
+    vec3 tc = u_touch[i];
+    if (tc.z < -5.0) continue;
+    float age = u_phase - tc.z;
+    if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    float d = length(p - c), R = age * u_p2 * 1.3;
+    float wp = 0.02 + 0.05 * u_p3;
+    float pk = exp(-0.5 * pow((d - R) / wp, 2.0));
+    h += sin((d - R) * u_p0) * pk * exp(-age * u_p1 * 3.0) / (1.0 + 5.0 * d);
+  }
+  for (int k = 0; k < 6; k++) {                          // a gentle drizzle so the pond is never dead still
+    float fk = float(k);
+    if (hash(vec2(fk, 3.7)) > u_p4 + 0.05) continue;
+    float age = fract(u_phase + hash(vec2(fk, 9.1)));
+    vec2 c = (vec2(hash(vec2(fk, 1.3)), hash(vec2(fk, 5.9))) - 0.5) * vec2(asp * 0.9, 0.8);
+    float d = length(p - c), R = age * u_p2 * 0.9;
+    float pk = exp(-0.5 * pow((d - R) / (0.02 + 0.04 * u_p3), 2.0));
+    h += 0.55 * sin((d - R) * u_p0) * pk * exp(-age * u_p1 * 3.0) / (1.0 + 6.0 * d);
+  }
+  return h;
+}
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  float e = 0.003;
+  float h0 = rippleH(uv), hx = rippleH(uv + vec2(e, 0.0)), hy = rippleH(uv + vec2(0.0, e));
+  float k = 0.035 * u_p5;
+  vec3 n = normalize(vec3(-(hx - h0) / e * k, -(hy - h0) / e * k, 1.0));
+  vec3 L = normalize(vec3(-0.5, 0.6, 0.65));
+  float diff = dot(n, L);
+  float spec = pow(max(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0), 36.0);
+  float base = 0.34 + 0.06 * fbm(uv * 2.5) - 0.05 * dot(uv, uv);
+  float v = base + 0.46 * (diff - 0.65) + 0.55 * spec;
+  gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
+}`
+  },
+  {
+    id: 'touchink', name: 'ink bloom', grow: true, touch: true, phase: 0.0,
+    demo: [[0.3, 0.55, 0.05], [0.62, 0.45, 0.18], [0.5, 0.7, 0.3]],
+    params: [
+      { label: 'bloom size', min: 0.3, max: 2.0, value: 1.0 }, { label: 'bleed', min: 0.0, max: 1.0, value: 0.6 },
+      { label: 'fade', min: 0.0, max: 1.0, value: 0.4 }, { label: 'spread speed', min: 0.3, max: 3.0, value: 1.0 },
+      { label: 'paper grain', min: 0.0, max: 1.0, value: 0.4 }, { label: 'ambient drops', min: 0.0, max: 1.0, value: 0.5 } ],
+    code: `
+float inkAt(vec2 uv, vec2 c, float age, float seed){
+  vec2 q = uv - c;
+  float R = 0.03 + u_p0 * 0.20 * (1.0 - exp(-age * u_p3 * 3.5));
+  vec2 w = (vec2(fbm(q * 3.5 + seed * 9.0 + age * 0.4), fbm(q * 3.5 + 7.0 + seed * 9.0 - age * 0.3)) - 0.5);
+  q += u_p1 * 0.22 * w * smoothstep(0.0, 0.5, age) * (0.4 + R * 3.0);
+  float d = length(q);
+  float edge = R * (1.0 + u_p1 * 0.7 * (fbm(q * 8.0 + seed * 5.0) - 0.5));
+  float cov = 1.0 - smoothstep(edge * 0.80, edge, d);
+  float dens = cov * (0.62 + 0.38 * fbm(q * 10.0 + age * 0.6 + seed));
+  dens *= 1.0 - smoothstep(0.30, 1.0, age) * u_p2;
+  return clamp(dens, 0.0, 1.0);
+}
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  float asp = u_res.x / u_res.y;
+  float ink = 0.0;
+  for (int i = 0; i < 16; i++) {
+    vec3 tc = u_touch[i];
+    if (tc.z < -5.0) continue;
+    float age = u_phase - tc.z;
+    if (age < 0.0) continue;
+    float dd = inkAt(uv, (tc.xy - 0.5) * vec2(asp, 1.0), age, tc.x * 7.0 + tc.y * 3.0);
+    ink = 1.0 - (1.0 - ink) * (1.0 - dd);
+  }
+  for (int k = 0; k < 3; k++) {
+    float fk = float(k);
+    if (hash(vec2(fk, 2.2)) > u_p5) continue;
+    float age = fract(u_phase + hash(vec2(fk, 8.8)));
+    vec2 c = (vec2(hash(vec2(fk, 4.1)), hash(vec2(fk, 6.3))) - 0.5) * vec2(asp * 0.8, 0.7);
+    float dd = inkAt(uv, c, age, fk * 3.1 + 11.0) * 0.9;
+    ink = 1.0 - (1.0 - ink) * (1.0 - dd);
+  }
+  float paper = 0.93 - 0.07 * u_p4 * fbm(uv * 38.0) - 0.03 * dot(uv, uv);
+  float v = paper * (1.0 - 0.93 * ink);
+  gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
+}`
+  },
+  {
+    id: 'touchglow', name: 'firefly lantern', grow: true, touch: true, phase: 0.0,
+    demo: [[0.4, 0.5, 0.08], [0.62, 0.55, 0.3]],
+    params: [
+      { label: 'fireflies', min: 4, max: 28, value: 14 }, { label: 'wander', min: 0.2, max: 2.0, value: 1.0 },
+      { label: 'linger', min: 0.2, max: 2.0, value: 0.8 }, { label: 'halo', min: 0.0, max: 1.0, value: 0.6 },
+      { label: 'touch glow', min: 0.0, max: 1.0, value: 0.7 }, { label: 'seed', min: 0, max: 20, value: 3 } ],
+    code: `
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  float T = u_phase * TAU;
+  float asp = u_res.x / u_res.y;
+  float v = 0.03 + 0.04 * (1.0 - length(uv));
+  float n = floor(u_p0 + 0.5);
+  for (int i = 0; i < 28; i++) {
+    if (float(i) >= n) break;
+    float fi = float(i);
+    float h1 = hash(vec2(fi, u_p5)), h2 = hash(vec2(fi + 11.0, u_p5 + 3.0)), h3 = hash(vec2(fi + 23.0, u_p5 + 7.0));
+    vec2 bp = (vec2(h1, h2) - 0.5) * vec2(asp * 0.95, 0.85);
+    vec2 pos = bp + 0.30 * u_p1 * (vec2(lnoise(vec2(fi, 1.0), T, h3 * 6.0, 1.0), lnoise(vec2(fi, 2.0), T, h3 * 6.0 + 1.5, 1.0)) - 0.5);
+    float boost = 0.0; vec2 pull = vec2(0.0);
+    for (int t = 0; t < 16; t++) {
+      vec3 tc = u_touch[t];
+      if (tc.z < -5.0) continue;
+      float age = u_phase - tc.z;
+      if (age < 0.0) continue;
+      vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+      vec2 dv = c - pos;
+      float dd = dot(dv, dv), life = exp(-age * (3.0 / u_p2));
+      pull += dv * exp(-dd * 7.0) * life * 0.8;
+      boost += exp(-dd * 5.0) * life;
+    }
+    pos += pull;
+    float blink = 0.55 + 0.45 * sin(TAU * floor(1.0 + h2 * 2.0) * u_phase + h3 * TAU);
+    float inten = (0.30 + 1.7 * boost) * blink;
+    float r = 0.0055 + 0.004 * h1;
+    vec2 d = uv - pos;
+    float dd2 = dot(d, d);
+    v += inten * (exp(-dd2 / (r * r)) + 0.45 * u_p3 * exp(-dd2 / (r * r * 32.0)));
+  }
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t];
+    if (tc.z < -5.0) continue;
+    float age = u_phase - tc.z;
+    if (age < 0.0) continue;
+    vec2 d = uv - (tc.xy - 0.5) * vec2(asp, 1.0);
+    float dd = dot(d, d);
+    float life = exp(-age * (3.5 / u_p2));
+    v += u_p4 * life * (0.35 * exp(-dd / 0.006) + 0.12 * exp(-dd / 0.05));
+  }
+  gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
+}`
   }
 ];
 
-const glState = { gl: null, canvas: null, programs: {}, buf: null, failed: false };
+const glState = { gl: null, canvas: null, programs: {}, buf: null, failed: false, v2: false, lastError: '', noiseTex: null };
 function ensureGL() {
   if (glState.gl || glState.failed) return glState.gl;
   try {
     const c = document.createElement('canvas'); c.width = PANEL_W; c.height = PANEL_H;
-    const gl = c.getContext('webgl', { preserveDrawingBuffer: true, antialias: false });
+    const opts = { preserveDrawingBuffer: true, antialias: false };
+    // WebGL2 first: Shadertoy shaders are GLSL ES 3.00, and a WebGL2 context still accepts our own ES 1.00 presets
+    let gl = c.getContext('webgl2', opts);
+    glState.v2 = !!gl;
+    if (!gl) gl = c.getContext('webgl', opts);
     if (!gl) throw new Error('webgl unavailable');
     c.addEventListener('webglcontextlost', e => { e.preventDefault(); glState.gl = null; glState.programs = {}; glState.buf = null; });
     glState.buf = gl.createBuffer();
@@ -1890,16 +2155,17 @@ function getShaderProgram(preset) {
   };
   try {
     const p = gl.createProgram();
-    gl.attachShader(p, compile(gl.VERTEX_SHADER, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }'));
-    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, SHADER_HEADER + preset.code));
+    const v2st = preset.st && glState.v2;
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, (v2st ? '#version 300 es\nin' : 'attribute') + ' vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }'));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, preset.st ? buildShadertoySource(preset, glState.v2) : SHADER_HEADER + preset.code));
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     glState.programs[preset.id] = p;
     return p;
-  } catch (err) { console.warn('shader "' + preset.id + '" failed —', err.message); return null; }
+  } catch (err) { glState.lastError = String(err.message || err); console.warn('shader "' + preset.id + '" failed —', glState.lastError); return null; }
 }
 // draws a preset at (params, phase) into the shared GL canvas
-function drawShader(preset, paramValues, phase) {
+function drawShader(preset, paramValues, phase, touches) {
   const gl = ensureGL(); if (!gl) return false;
   const prog = getShaderProgram(preset); if (!prog) return false;
   gl.useProgram(prog);
@@ -1909,14 +2175,127 @@ function drawShader(preset, paramValues, phase) {
   gl.uniform2f(gl.getUniformLocation(prog, 'u_res'), PANEL_W, PANEL_H);
   gl.uniform1f(gl.getUniformLocation(prog, 'u_phase'), phase);
   for (let i = 0; i < 6; i++) gl.uniform1f(gl.getUniformLocation(prog, 'u_p' + i), paramValues[i] === undefined ? 0 : paramValues[i]);
+  // taps / drags recorded on this layer: [x, y, phase] each, packed as vec3[16]; unused slots get z = -10
+  const tv = new Float32Array(48).fill(-10);
+  tv.forEach((_, i) => { if (i % 3 !== 2) tv[i] = 0; });
+  (touches || []).slice(-16).forEach((t, i) => { tv[i * 3] = t[0]; tv[i * 3 + 1] = t[1]; tv[i * 3 + 2] = t[2]; });
+  const tl = gl.getUniformLocation(prog, 'u_touch');
+  if (tl) gl.uniform3fv(tl, tv);
+  glState.curTouches = touches || [];
+  if (preset.st) setShadertoyUniforms(gl, prog, paramValues, phase);
   gl.viewport(0, 0, PANEL_W, PANEL_H);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   return true;
 }
+
+// ---------- Shadertoy import ----------
+// A Shadertoy "Image" pass is wrapped so it runs here: iTime sweeps from a start time
+// across a chosen length as the shader's time slider (phase) goes 0..1, then it starts
+// over (Shadertoy shaders don't loop, so these behave like the growing presets).
+// Only the Image pass (plus any Common code) is used — extra buffer passes, cubemaps,
+// video, microphone etc. aren't available, and texture inputs get a noise texture.
+const ST_PARAMS = [
+  { label: 'run length (s)', min: 1, max: 30, value: 8 }, { label: 'start time (s)', min: 0, max: 120, value: 0 },
+  { label: 'zoom', min: 0.5, max: 3.0, value: 1.0 }, { label: 'exposure', min: 0.4, max: 2.5, value: 1.0 } ];
+function buildShadertoySource(preset, v2) {
+  const head = (v2 ? '#version 300 es\n' : '') + 'precision highp float;\nprecision highp int;\n' +
+    'uniform vec3 iResolution; uniform float iTime; uniform float iTimeDelta; uniform int iFrame; uniform float iFrameRate;\n' +
+    'uniform vec4 iMouse; uniform vec4 iDate; uniform float iChannelTime[4]; uniform vec3 iChannelResolution[4];\n' +
+    'uniform sampler2D iChannel0; uniform sampler2D iChannel1; uniform sampler2D iChannel2; uniform sampler2D iChannel3;\n' +
+    'uniform float u_p2; uniform float u_p3;\n' +
+    (v2 ? 'out vec4 stOut;\n#define texture2D texture\n' : '#define texture texture2D\n');
+  const tail = '\nvoid main(){\n  vec2 fc = (gl_FragCoord.xy - 0.5 * iResolution.xy) / max(u_p2, 0.01) + 0.5 * iResolution.xy;\n' +
+    '  vec4 c = vec4(0.0, 0.0, 0.0, 1.0);\n  mainImage(c, fc);\n  vec3 col = clamp(c.rgb * u_p3, 0.0, 1.0);\n' +
+    (v2 ? '  stOut = vec4(col, 1.0);\n' : '  gl_FragColor = vec4(col, 1.0);\n') + '}\n';
+  return head + (preset.st.common || '') + '\n' + preset.st.code + tail;
+}
+function getNoiseTexture(gl) {
+  if (glState.noiseTex) return glState.noiseTex;
+  const N = 256, data = new Uint8Array(N * N * 4);
+  let seed = 12345;
+  for (let i = 0; i < data.length; i++) { seed = (seed * 1664525 + 1013904223) >>> 0; data[i] = seed >>> 24; }
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, N, N, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  glState.noiseTex = t;
+  return t;
+}
+function setShadertoyUniforms(gl, prog, pv, phase) {
+  const U = n => gl.getUniformLocation(prog, n);
+  const t = (pv[1] || 0) + phase * (pv[0] || 8);
+  const d = new Date();
+  gl.uniform3f(U('iResolution'), PANEL_W, PANEL_H, 1);
+  gl.uniform1f(U('iTime'), t);
+  gl.uniform1f(U('iTimeDelta'), 1 / 30);
+  gl.uniform1f(U('iFrameRate'), 30);
+  gl.uniform1i(U('iFrame'), Math.floor(t * 30));
+  const lt = (glState.curTouches || []).slice(-1)[0]; // newest tap stands in for the mouse
+  if (lt && phase >= lt[2]) gl.uniform4f(U('iMouse'), lt[0] * PANEL_W, lt[1] * PANEL_H, phase - lt[2] < 0.06 ? lt[0] * PANEL_W : -lt[0] * PANEL_W, 0);
+  else gl.uniform4f(U('iMouse'), 0, 0, 0, 0);
+  gl.uniform4f(U('iDate'), d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds());
+  const tex = getNoiseTexture(gl);
+  for (let i = 0; i < 4; i++) {
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(U('iChannel' + i), i);
+  }
+  gl.activeTexture(gl.TEXTURE0);
+}
+function registerShadertoy(def) { // def: { sid, name, author, code, common }
+  const id = 'st_' + def.sid;
+  let preset = SHADERS.find(p => p.id === id);
+  const fresh = !preset;
+  if (!preset) { preset = { id }; SHADERS.push(preset); }
+  Object.assign(preset, {
+    name: def.name + (def.author ? ' · ' + def.author : ''), grow: true, phase: 0.25, touch: /iMouse/.test(def.code),
+    params: ST_PARAMS.map(p => ({ ...p })), st: { code: def.code, common: def.common || '' }, stMeta: def
+  });
+  delete glState.programs[id];
+  return preset;
+}
+const ST_STORE_KEY = 'lamp.shadertoy.v1';
+function stLoadSaved() { try { return JSON.parse(localStorage.getItem(ST_STORE_KEY) || '[]'); } catch (e) { return []; } }
+function stSave(def) {
+  try {
+    const list = stLoadSaved().filter(d => d.sid !== def.sid);
+    list.unshift(def);
+    localStorage.setItem(ST_STORE_KEY, JSON.stringify(list.slice(0, 12)));
+  } catch (e) { /* storage unavailable: the shader still works for this session */ }
+}
+function stForget(sid) {
+  try { localStorage.setItem(ST_STORE_KEY, JSON.stringify(stLoadSaved().filter(d => d.sid !== sid))); } catch (e) {}
+  const i = SHADERS.findIndex(p => p.id === 'st_' + sid); if (i >= 0) SHADERS.splice(i, 1);
+}
+stLoadSaved().forEach(registerShadertoy);
+function parseShadertoyId(text) {
+  const m = String(text).match(/shadertoy\.com\/(?:view|embed)\/([A-Za-z0-9]{4,8})/i) || String(text).trim().match(/^([A-Za-z0-9]{6})$/);
+  return m ? m[1] : null;
+}
+// turns a Shadertoy API response into { name, author, code, common, notes }
+function shadertoyFromApi(json, sid) {
+  if (json.Error) throw new Error(json.Error);
+  const sh = json.Shader; if (!sh) throw new Error('unexpected reply from Shadertoy');
+  const passes = sh.renderpass || [];
+  const img = passes.find(p => p.type === 'image');
+  if (!img) throw new Error('no Image pass in this shader');
+  const common = passes.filter(p => p.type === 'common').map(p => p.code).join('\n');
+  const extras = passes.filter(p => p.type !== 'image' && p.type !== 'common').length;
+  const odd = (img.inputs || []).filter(i => i.ctype && i.ctype !== 'texture').map(i => i.ctype);
+  const notes = [];
+  if (extras) notes.push(extras + ' buffer pass' + (extras > 1 ? 'es' : '') + ' skipped');
+  if (odd.length) notes.push('uses ' + [...new Set(odd)].join('/') + ' input (not available)');
+  if ((img.inputs || []).some(i => i.ctype === 'texture')) notes.push('texture inputs replaced by noise');
+  return { sid, name: sh.info.name || sid, author: sh.info.username || '', code: img.code, common, notes };
+}
 function shaderPreset(id) { return SHADERS.find(s => s.id === id); }
 function renderShaderLayer(layer) {
   const preset = shaderPreset(layer.shader.id);
-  if (!preset || !drawShader(preset, layer.shader.params, layer.shader.phase)) return false;
+  if (!preset || !drawShader(preset, layer.shader.params, layer.shader.phase, layer.shader.touches)) return false;
   layer.img.getContext('2d').drawImage(glState.canvas, 0, 0);
   return true;
 }
@@ -1963,6 +2342,7 @@ function addShaderLayer(presetId) {
   updateFrameFilmstrip();
   render();
   updateSendState();
+  if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false); // a new base opens the crop area, like a photo does
 }
 
 // ----- picker sheet -----
@@ -1975,16 +2355,79 @@ function openShaderSheet() {
     const card = document.createElement('button');
     card.type = 'button'; card.className = 'shader-card';
     const thumb = document.createElement('canvas'); thumb.width = 200; thumb.height = 150;
-    if (drawShader(preset, preset.params.map(p => p.value), preset.phase ?? 0.25)) thumb.getContext('2d').drawImage(glState.canvas, 0, 0, 200, 150);
+    if (drawShader(preset, preset.params.map(p => p.value), preset.touch ? 0.5 : (preset.phase ?? 0.25), preset.demo)) thumb.getContext('2d').drawImage(glState.canvas, 0, 0, 200, 150);
     const label = document.createElement('span'); label.textContent = preset.name;
     card.appendChild(thumb); card.appendChild(label);
     card.onclick = () => { shaderBackdrop.classList.remove('open'); addShaderLayer(preset.id); };
+    if (preset.st) { // an imported shader: small x to forget it
+      const del = document.createElement('span'); del.className = 'st-del'; del.textContent = '×'; del.title = 'remove';
+      del.onclick = (e) => { e.stopPropagation(); stForget(preset.stMeta.sid); openShaderSheet(); };
+      card.appendChild(del);
+    }
     shaderGrid.appendChild(card);
   });
   shaderBackdrop.classList.add('open');
 }
-document.getElementById('shaderBtn').onclick = openShaderSheet;
-document.getElementById('emptyShaderBtn').onclick = openShaderSheet;
+// ----- shadertoy box -----
+const stInput = document.getElementById('stInput'), stStatus = document.getElementById('stStatus');
+const stKey = document.getElementById('stKey'), stCode = document.getElementById('stCode'), stAdv = document.getElementById('stAdv');
+try { stKey.value = localStorage.getItem('lamp.shadertoy.key') || ''; } catch (e) {}
+function stSay(msg, err) { stStatus.textContent = msg; stStatus.classList.toggle('err', !!err); }
+function stAdopt(def) { // compile it, keep it, and drop it straight onto the lamp like a picked preset
+  const preset = registerShadertoy(def);
+  if (!drawShader(preset, preset.params.map(p => p.value), 0.25)) {
+    const msg = (glState.lastError || 'it did not compile').split('\n').find(l => /error/i.test(l)) || glState.lastError;
+    stForget(def.sid); stSay("couldn't compile: " + String(msg).slice(0, 160), true); return;
+  }
+  stSave(def);
+  stSay(def.notes && def.notes.length ? 'loaded — ' + def.notes.join('; ') : 'loaded', false);
+  shaderBackdrop.classList.remove('open');
+  addShaderLayer(preset.id);
+  flashStatus('shadertoy: ' + def.name + (def.author ? ' by ' + def.author : '') + (def.notes && def.notes.length ? ' (' + def.notes.join('; ') + ')' : ''), 'success');
+}
+async function stLoadFromLink() {
+  const sid = parseShadertoyId(stInput.value);
+  if (!sid) { stSay('paste a shadertoy.com/view/… link (or the 6-letter id)', true); return; }
+  const key = stKey.value.trim();
+  if (!key) { stAdv.open = true; stSay('shadertoy needs a free api key to hand over shader code — add one below, or paste the code instead', true); return; }
+  try { localStorage.setItem('lamp.shadertoy.key', key); } catch (e) {}
+  stSay('fetching…', false);
+  let json;
+  try {
+    const res = await fetch('https://www.shadertoy.com/api/v1/shaders/' + sid + '?key=' + encodeURIComponent(key));
+    json = await res.json();
+  } catch (e) { stAdv.open = true; stSay("couldn't reach shadertoy from here (blocked or offline) — paste the code below instead", true); return; }
+  try { stAdopt(shadertoyFromApi(json, sid)); } catch (e) { stSay(e.message, true); }
+}
+document.getElementById('stLoad').onclick = stLoadFromLink;
+stInput.onkeydown = (e) => { if (e.key === 'Enter') stLoadFromLink(); };
+document.getElementById('stUseCode').onclick = () => {
+  const code = stCode.value.trim();
+  if (!/mainImage\s*\(/.test(code)) { stSay('that needs a void mainImage(out vec4 fragColor, in vec2 fragCoord) function', true); return; }
+  const sid = 'p' + (Math.abs([...code].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7)) % 1e6);
+  const nm = (code.match(/\/\/\s*([^\n]{3,40})/) || [])[1];
+  stAdopt({ sid, name: nm ? nm.trim() : 'pasted shader', author: '', code, common: '', notes: [] });
+};
+
+// same behavior as +: first tap lights it and opens the sheet; a second tap on it un-lights
+// (on pointerdown so a swallowed post-modal click can't cost an extra tap)
+const shaderBtnEl = document.getElementById('shaderBtn');
+let shaderSwallowClick = false;
+shaderBtnEl.addEventListener('pointerdown', () => {
+  if (shaderBtnEl.classList.contains('active')) { shaderBtnEl.classList.remove('active'); shaderSwallowClick = true; }
+});
+shaderBtnEl.onclick = () => {
+  if (shaderSwallowClick) { shaderSwallowClick = false; return; }
+  shaderBtnEl.classList.add('active');
+  openShaderSheet();
+  if (!shaderBackdrop.classList.contains('open')) shaderBtnEl.classList.remove('active'); // sheet couldn't open
+};
+// lit while the sheet is open; clears when it closes (pick, cancel, backdrop tap) or on a tap elsewhere
+new MutationObserver(() => { if (!shaderBackdrop.classList.contains('open')) shaderBtnEl.classList.remove('active'); })
+  .observe(shaderBackdrop, { attributes: true, attributeFilter: ['class'] });
+document.addEventListener('pointerdown', (e) => {
+  if (shaderBtnEl.classList.contains('active') && !shaderBtnEl.contains(e.target) && !shaderBackdrop.classList.contains('open')) shaderBtnEl.classList.remove('active');
+}, true);
 document.getElementById('shaderCancel').onclick = () => shaderBackdrop.classList.remove('open');
 shaderBackdrop.onclick = (e) => { if (e.target === shaderBackdrop) shaderBackdrop.classList.remove('open'); };
 
@@ -2014,6 +2457,54 @@ const shaderBakeCountVal = document.getElementById('shaderBakeCountVal');
 const shaderBakeBtn = document.getElementById('shaderBakeBtn');
 let shaderPlayTimer = null, shaderHold = 0;
 
+// ----- touch: tap or drag the preview to poke a touch-reactive shader -----
+// Each touch is stored on the layer as [x, y, phase-when-it-happened], so scrubbing,
+// playing and baking all replay the gesture: the shader reads the list and works out
+// how old each touch is. A tap while stopped starts playback so you see it respond.
+const shaderTouchRow = document.getElementById('shaderTouchRow');
+const shaderTouchBtn = document.getElementById('shaderTouchBtn');
+const shaderTouchCount = document.getElementById('shaderTouchCount');
+let shaderTouchMode = false, shaderTouchLast = null;
+function setShaderTouchMode(on) {
+  shaderTouchMode = !!on;
+  shaderTouchBtn.classList.toggle('on', shaderTouchMode);
+  shaderTouchBtn.textContent = shaderTouchMode ? 'touching…' : 'touch the preview';
+  previewWrap.classList.toggle('touch-on', shaderTouchMode);
+}
+function updateTouchCount() {
+  const l = activeShaderLayer();
+  const n = l && l.shader.touches ? l.shader.touches.length : 0;
+  shaderTouchCount.textContent = n ? n + (n === 1 ? ' touch' : ' touches') : '';
+}
+shaderTouchBtn.onclick = () => {
+  setShaderTouchMode(!shaderTouchMode);
+  if (shaderTouchMode) flashStatus('tap or drag the preview', 'success');
+};
+document.getElementById('shaderTouchClear').onclick = () => {
+  const l = activeShaderLayer(); if (!l) return;
+  l.shader.touches = [];
+  renderShaderLayer(l); refreshShaderSource(l); render(); updateTouchCount();
+};
+function shaderTouchAt(clientX, clientY, isMove) {
+  const layer = activeShaderLayer(); if (!layer || !shaderTouchMode) return;
+  const r = liveCanvas.getBoundingClientRect();
+  const u = (clientX - r.left) / r.width, v = 1 - (clientY - r.top) / r.height;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return;
+  const list = layer.shader.touches || (layer.shader.touches = []);
+  if (isMove && shaderTouchLast && Math.hypot(u - shaderTouchLast[0], (v - shaderTouchLast[1]) * 0.75) < 0.035) return;
+  shaderTouchLast = [u, v];
+  list.push([u, v, layer.shader.phase]);
+  if (list.length > 16) list.shift();
+  updateTouchCount();
+  if (!shaderPlayTimer) startShaderPlay();
+}
+previewWrap.addEventListener('touchstart', (e) => { if (!shaderTouchMode || !activeShaderLayer()) return; e.preventDefault(); shaderTouchLast = null; shaderTouchAt(e.touches[0].clientX, e.touches[0].clientY, false); }, { passive: false });
+previewWrap.addEventListener('touchmove', (e) => { if (!shaderTouchMode || !activeShaderLayer()) return; e.preventDefault(); shaderTouchAt(e.touches[0].clientX, e.touches[0].clientY, true); }, { passive: false });
+let shaderMouseDown = false;
+previewWrap.addEventListener('mousedown', (e) => { if (!shaderTouchMode || !activeShaderLayer()) return; shaderMouseDown = true; shaderTouchLast = null; shaderTouchAt(e.clientX, e.clientY, false); });
+window.addEventListener('mousemove', (e) => { if (shaderMouseDown) shaderTouchAt(e.clientX, e.clientY, true); });
+window.addEventListener('mouseup', () => { shaderMouseDown = false; });
+
 function activeShaderLayer() { const l = currentStack()[activeLayerIdx]; return l && l.shader ? l : null; }
 function sliderToParam(preset, i, v) { const p = preset.params[i]; return p.min + (p.max - p.min) * v / 100; }
 function paramToSlider(preset, i, val) { const p = preset.params[i]; return Math.round((val - p.min) / (p.max - p.min) * 100); }
@@ -2031,6 +2522,9 @@ function updateShaderPanel() {
     shaderSliders[i].value = paramToSlider(preset, i, layer.shader.params[i]);
   });
   shaderBakeRow.style.display = mode === 'cycle' ? 'flex' : 'none';
+  shaderTouchRow.style.display = preset.touch ? 'flex' : 'none';
+  if (!preset.touch) setShaderTouchMode(false);
+  updateTouchCount();
 }
 let shaderSrcPending = false;
 function refreshShaderSource(layer) { // keeps the crop view's picture in step with the shader
@@ -2054,50 +2548,58 @@ function stopShaderPlay() {
   shaderHold = 0;
   shaderPlayBtn.textContent = '▶';
 }
-shaderPlayBtn.onclick = () => {
-  if (shaderPlayTimer) { stopShaderPlay(); return; }
+function startShaderPlay() {
+  if (shaderPlayTimer) return;
+  const first = activeShaderLayer();
+  const fast = first && shaderPreset(first.shader.id).touch;   // touch shaders play smoother so taps feel responsive
+  const tick = fast ? 50 : 120, k = fast ? 0.42 : 1;
   shaderPlayBtn.textContent = '■';
   shaderPlayTimer = setInterval(() => {
     const layer = activeShaderLayer();
     if (!layer) { stopShaderPlay(); return; }
     if (shaderPreset(layer.shader.id).grow) {
       // growth doesn't loop: grow to full, rest a moment, then start over from nothing
-      if (layer.shader.phase >= 1) { shaderHold++; if (shaderHold > 22) { shaderHold = 0; layer.shader.phase = 0; } }
-      else layer.shader.phase = Math.min(1, layer.shader.phase + 0.012);
+      if (layer.shader.phase >= 1) { shaderHold++; if (shaderHold > 22 / k) { shaderHold = 0; layer.shader.phase = 0; } }
+      else layer.shader.phase = Math.min(1, layer.shader.phase + 0.012 * k);
     } else layer.shader.phase = (layer.shader.phase + 0.02) % 1; // one loop every ~6s
     shaderTime.value = Math.round(layer.shader.phase * 100);
     renderShaderLayer(layer);
     refreshShaderSource(layer);
     render();
-  }, 120);
-};
+  }, tick);
+}
+shaderPlayBtn.onclick = () => { if (shaderPlayTimer) stopShaderPlay(); else startShaderPlay(); };
 
+const shaderBakeStep = document.getElementById('shaderBakeStep');
+const shaderBakeStepVal = document.getElementById('shaderBakeStepVal');
 shaderBakeCount.oninput = () => { shaderBakeCountVal.textContent = shaderBakeCount.value; };
-// bake: the frame you're on keeps its time; N-1 copies follow it, each a step further
-// around the loop, so playing the cycle plays the shader's loop. Existing frames
-// after it are kept (total capped at MAX_FRAMES).
+shaderBakeStep.oninput = () => { shaderBakeStepVal.textContent = shaderBakeStep.value + '%'; };
+// bake: replaces the whole cycle. The frame you're on keeps its time and becomes frame 1; N-1 copies follow it, each a small fixed
+// step further along (the 'step' slider, % of the loop), so frames sit close together.
 function bakeShaderFrames() {
   if (mode !== 'cycle') return;
   const layer = activeShaderLayer(); if (!layer) return;
   stopShaderPlay();
   snapshotActiveLayerState();
   const src = frames[activeFrameIdx];
-  const filled = frames.filter(frameIsFilled).length;
-  const n = Math.min(parseInt(shaderBakeCount.value, 10), MAX_FRAMES - (filled - 1));
-  if (n < 2) { flashStatus('no free frames left to bake into', 'fail'); return; }
+  // a bake starts fresh: every other frame is cleared, the frame you're on becomes frame 1
+  const n = parseInt(shaderBakeCount.value, 10);
   const grow = !!shaderPreset(layer.shader.id).grow;
   if (grow && layer.shader.phase > 0.9) { layer.shader.phase = 0; renderShaderLayer(layer); shaderTime.value = 0; refreshShaderSource(layer); }
   const startPhase = layer.shader.phase;
+  const step = parseInt(shaderBakeStep.value, 10) / 100; // phase advance per frame: small = frames sit close together
   const clones = [];
   for (let i = 1; i < n; i++) {
     const stack = src.map(cloneLayer);
     const sl = stack[activeLayerIdx];
     // looping shaders go once around; growing ones go from here to fully grown
-    sl.shader.phase = grow ? startPhase + (1 - startPhase) * i / (n - 1) : (startPhase + i / n) % 1;
+    sl.shader.phase = grow ? Math.min(1, startPhase + i * step) : (startPhase + i * step) % 1;
     renderShaderLayer(sl);
     clones.push(stack);
   }
-  frames.splice(activeFrameIdx + 1, 0, ...clones);
+  frames = [src, ...clones];
+  activeFrameIdx = 0;
+  heldFrameIdx = null;
   updateFrameFilmstrip();
   flashStatus('baked ' + n + ' frames', 'success');
 }
@@ -2469,6 +2971,7 @@ function setCropCollapsed(collapsed) {
   if (!collapsed) window.dispatchEvent(new Event('resize'));
 }
 cropToggleBtn.onclick = () => setCropCollapsed(!photoWrap.classList.contains('collapsed'));
+setCropCollapsed(true); // starts folded; loading a photo opens it
 
 window.addEventListener('resize', () => {
   if (!naturalW) return;
@@ -3035,6 +3538,8 @@ let scrubState = null;
 let scrubPillTimeout = null;
 let hasEverCycledFilter = false; // the very first tap still cycles immediately, as before
 previewWrap.addEventListener('touchstart', (e) => {
+  if (animPlaying) return; // preview is running: editing is locked
+  if (shaderTouchMode && activeShaderLayer()) return; // the preview is a touch pad right now
   if (!naturalW || e.touches.length !== 1) return;
   const t = e.touches[0];
   scrubState = {
@@ -3135,7 +3640,58 @@ patternBtn.onclick = () => {
 // blocker will kill it) and then point that already-open tab at the image
 // once the blob is ready. That way the editor tab is never touched, and
 // "save to Photos" is just a long-press on the image in the new tab.
+// ----- save the whole cycle as a set of images -----
+// Every frame is composited and exported as the real 1-bit 400x300 PNG (not the tinted
+// preview look), then shown together on one page: press and hold an image to save it
+// to Photos, or tap it to download. If the browser blocks the new tab it opens as an
+// overlay in this page instead.
+function frameToDataURL(stack) {
+  const composite = compositeStack(stack, 2);
+  if (!composite) return null;
+  const W = targetW, H = targetH;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const cx = c.getContext('2d');
+  const img = cx.createImageData(W, H), d = img.data;
+  for (let i = 0; i < W * H; i++) { const v = composite[i] < 128 ? 0 : 255; d[i*4] = v; d[i*4+1] = v; d[i*4+2] = v; d[i*4+3] = 255; }
+  cx.putImageData(img, 0, 0);
+  return c.toDataURL('image/png');
+}
+function framesGalleryHTML(urls, standalone) {
+  const figs = urls.map((u, i) => {
+    const n = String(i + 1).padStart(2, '0');
+    return `<figure><a href="${u}" download="lamp-frame-${n}.png"><img src="${u}" alt="frame ${i + 1}"></a><figcaption>frame ${i + 1} of ${urls.length}</figcaption></figure>`;
+  }).join('');
+  const css = 'body{margin:0;background:#14100d;color:#bfb8aa;font:13px -apple-system,system-ui,sans-serif;padding:18px 16px 60px}' +
+    'h1{font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;margin:0 0 4px}p{margin:0 0 18px;color:#8a8478;line-height:1.4}' +
+    'figure{margin:0 0 18px}img{display:block;width:100%;max-width:800px;image-rendering:pixelated;background:#fff}' +
+    'figcaption{margin-top:6px;font-size:11px;color:#8a8478}a{color:inherit}';
+  const body = `<h1>lamp frames · ${urls.length}</h1><p>press and hold an image to save it, or tap to download · ${animIntervalSec}s per frame</p>${figs}`;
+  return standalone
+    ? `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>lamp frames</title><style>${css}</style>${body}`
+    : { css, body };
+}
+function saveCycleFrames() {
+  snapshotActiveLayerState();
+  const stacks = frames.filter(frameIsFilled);
+  if (!stacks.length) return;
+  const newTab = window.open('', '_blank'); // opened right in the tap so Safari doesn't block it
+  const urls = stacks.map(frameToDataURL).filter(Boolean);
+  if (!urls.length) { if (newTab) newTab.close(); flashStatus("couldn't render the frames", 'fail'); return; }
+  if (newTab) {
+    newTab.document.open(); newTab.document.write(framesGalleryHTML(urls, true)); newTab.document.close();
+    flashStatus('opened ' + urls.length + ' frames — press and hold to save', 'success');
+    return;
+  }
+  const { css, body } = framesGalleryHTML(urls, false);
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9999;overflow:auto;-webkit-overflow-scrolling:touch;';
+  ov.innerHTML = `<style>${css.replace(/body\{[^}]*\}/, '')}</style><div style="background:#14100d;color:#bfb8aa;font:13px -apple-system,system-ui,sans-serif;padding:18px 16px 60px;min-height:100%;box-sizing:border-box">${body}</div><button type="button" style="position:fixed;top:12px;right:12px;background:#14100d;color:#bfb8aa;border:1px solid #3a342c;padding:8px 14px;font-size:12px;">close</button>`;
+  ov.querySelector('button').onclick = () => ov.remove();
+  document.body.appendChild(ov);
+}
+
 saveImageBtn.onclick = async () => {
+  if (mode === 'cycle') { saveCycleFrames(); return; }
   if (!naturalW || saveImageBtn.disabled) return;
   saveImageBtn.disabled = true;
   const originalLabel = saveImageBtn.textContent;
@@ -3366,6 +3922,18 @@ setShareToGallery(false);
 liveCanvas.width = targetW; liveCanvas.height = targetH;
 sizePreviewCanvas();
 window.addEventListener('resize', sizePreviewCanvas);
+
+// collapsible sections: the shader sliders and the regular sliders collapse separately
+function wireCollapse(sec, head, key) {
+  try { if (localStorage.getItem('lamp.collapsed.' + key) === '1') sec.classList.add('collapsed'); } catch (e) {}
+  head.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return; // the play button in the shader header isn't a toggle
+    sec.classList.toggle('collapsed');
+    try { localStorage.setItem('lamp.collapsed.' + key, sec.classList.contains('collapsed') ? '1' : '0'); } catch (err) {}
+  });
+}
+wireCollapse(document.getElementById('shaderPanel'), document.getElementById('shaderHead'), 'shader');
+wireCollapse(document.getElementById('texSection'), document.getElementById('texHead'), 'tex');
 scratchCanvas.width = targetW; scratchCanvas.height = targetH;
 updateIndicators(); // sync the ring indicators to the default state
 updateLayerTabs(); // empty until a base photo is chosen

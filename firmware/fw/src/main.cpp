@@ -1037,6 +1037,37 @@ void drawSyncBadge(Adafruit_GFX& g) {
   drawBoxedText(g, "Syncing...", 6, 6);
 }
 
+// bottom-right corner: where and when the image on screen was sent (the 2 s
+// hold on a still). info is up to two lines split by '\n'; a line too long for
+// the screen is cut short with "..."
+void drawInfoBox(Adafruit_GFX& g, const char* info) {
+  const int pad = 6, gap = 4, charW = 12, lineH = 16;  // text size 2: 12x16 per character
+  const int maxChars = (g.width() - 12 - 2 * pad) / charW;
+  char lines[2][48] = {{0}, {0}};
+  int n = 0;
+  for (const char* p = info; *p && n < 2; n++) {
+    const char* end = strchr(p, '\n');
+    int len = end ? end - p : strlen(p);
+    int keep = std::min(len, std::min(maxChars, (int)sizeof(lines[n]) - 1));
+    memcpy(lines[n], p, keep);
+    if (keep < len && keep >= 3) memcpy(lines[n] + keep - 3, "...", 3);
+    p = end ? end + 1 : p + len;
+  }
+  if (!n) return;
+  int widest = std::max(strlen(lines[0]), strlen(lines[1]));
+  int w = widest * charW + 2 * pad, h = n * lineH + (n - 1) * gap + 2 * pad;
+  int x = g.width() - 6 - w, y = g.height() - 6 - h;
+  g.fillRect(x, y, w, h, GxEPD_WHITE);
+  g.drawRect(x, y, w, h, GxEPD_BLACK);
+  g.drawRect(x + 1, y + 1, w - 2, h - 2, GxEPD_BLACK);
+  g.setTextSize(2);
+  g.setTextColor(GxEPD_BLACK);
+  for (int i = 0; i < n; i++) {
+    g.setCursor(x + pad, y + pad + i * (lineH + gap));
+    g.print(lines[i]);
+  }
+}
+
 // draws into a packed 1-bit picture laid out the way the panel takes it
 // (row-major, MSB first, 1 = white), so badges go on the fast path too
 class MonoCanvas : public Adafruit_GFX {
@@ -1053,7 +1084,8 @@ class MonoCanvas : public Adafruit_GFX {
 };
 
 // draws one packed frame; partial = fast refresh without the full-screen flash.
-// badge > 0 also draws that number bottom-left; syncBadge adds the top-left \"Syncing...\" badge
+// badge > 0 also draws that number bottom-left; syncBadge adds the top-left \"Syncing...\" badge;
+// info (if not null) adds the bottom-right info box
 bool wokeFromSleep = false;   // set in setup(): the panel was hibernated, not freshly powered
 bool drewThisWake = false;
 uint32_t lastBuildMs = 0, lastPanelMs = 0;  // of the last drawFrame: making the picture vs sending it and refreshing
@@ -1087,7 +1119,7 @@ void ditherToMono(const EpdImage& img, const uint8_t* src, uint8_t* dst) {
 // skipping the buffer and the per-pixel drawing. The frames are already packed
 // the way the panel wants them (MSB first, 1 = white). False if it can't (other
 // size, or FAST_DRAW off), and the caller draws the normal way
-bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
+bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, const char* info) {
   const int W = GxEPD2_420_GDEY042T81::WIDTH, H = GxEPD2_420_GDEY042T81::HEIGHT;
   if (!FAST_DRAW || img.w != W || img.h != H) return false;
   uint32_t t0 = millis();
@@ -1095,7 +1127,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
   if (img.bpp == 2) {
     ditherToMono(img, frameBuf, monoBuf);
     bitmap = monoBuf;
-  } else if (img.bpp == 1 && badge <= 0 && !syncBadge) {
+  } else if (img.bpp == 1 && badge <= 0 && !syncBadge && !info) {
     bitmap = frameBuf;
   } else if (img.bpp == 1) {
     memcpy(monoBuf, frameBuf, sizeof(monoBuf));  // a badge goes on a copy, the frame stays as read
@@ -1103,10 +1135,11 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
   } else {
     return false;
   }
-  if (badge > 0 || syncBadge) {
+  if (badge > 0 || syncBadge || info) {
     MonoCanvas canvas(monoBuf, W, H);
     if (badge > 0) drawBadge(canvas, badge);
     if (syncBadge) drawSyncBadge(canvas);
+    if (info) drawInfoBox(canvas, info);
   }
   lastBuildMs = millis() - t0;
 
@@ -1126,7 +1159,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge) {
   return true;
 }
 
-void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge = false) {
+void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge = false, const char* info = nullptr) {
   if (FULL_REFRESH_ON_WAKE && wokeFromSleep && !drewThisWake) partial = false;
   drewThisWake = true;
   display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
@@ -1135,7 +1168,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
     return;
   }
   // full-size landscape frames (badges included) go straight to the panel; anything else uses the library
-  if (drawDirect(img, partial, badge, syncBadge)) return;
+  if (drawDirect(img, partial, badge, syncBadge, info)) return;
 
   if (partial) display.setPartialWindow(0, 0, img.w, img.h);
   else display.setFullWindow();
@@ -1152,6 +1185,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
     }
     if (badge > 0) drawBadge(display, badge);
     if (syncBadge) drawSyncBadge(display);
+    if (info) drawInfoBox(display, info);
     tBuild += millis() - t0;
     uint32_t t1 = millis();
     more = display.nextPage();
@@ -1323,7 +1357,7 @@ void saveSeenFlags() {
 
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
 const int NEXT_BUTTON = 25;                  // GPIO25 (labelled D2): momentary switch to GND
-const uint32_t REPLAY_HOLD_MS = 2000;        // [PLACEHOLDER] hold NEXT 2 s or more (then let go) to replay an animation
+const uint32_t REPLAY_HOLD_MS = 2000;        // [PLACEHOLDER] hold NEXT 2 s or more (then let go) to replay an animation, or toggle a still's info box
 const uint32_t SYNC_HOLD_MS = 5000;          // [PLACEHOLDER] hold NEXT this long to re-check the worker for new images/firmware
 const uint32_t RESET_HOLD_MS = 8000;         // [PLACEHOLDER] hold this long to forget the saved WiFi
 const uint32_t PORTAL_TIMEOUT_S = 180;       // [PLACEHOLDER] setup mode stays open this long, then retries the saved network
@@ -1462,6 +1496,7 @@ void connectWiFi() {
 RTC_DATA_ATTR int rtcViewIdx = 0;     // image on screen, in newest-first order
 RTC_DATA_ATTR bool rtcInTour = false; // NEXT is stepping through the unseen images (ends by wrapping to image 1)
 RTC_DATA_ATTR int rtcBadge = 0;       // the number on the image on screen (redraws and replays show it again)
+RTC_DATA_ATTR bool rtcInfoShown = false; // the info box (2 s hold on a still) is on screen; the next press clears it
 // what the last successful connect looked like, so the next wake can skip the channel scan and DHCP
 RTC_DATA_ATTR uint8_t rtcWifiChannel = 0;  // 0 = nothing cached
 RTC_DATA_ATTR uint8_t rtcBssid[6];
@@ -1642,6 +1677,7 @@ void drawIndexStill(int idx, int badge, bool full) {
   if (loadFirstFrame(storedIds[idx], img)) drawFrame(img, !full, badge);
   rtcViewIdx = idx;
   rtcBadge = badge;
+  rtcInfoShown = false;
   cycleOk = true;
 }
 
@@ -1651,6 +1687,7 @@ void drawIndex(int idx, int badge, bool full) {
   showImage(storedIds[idx], idx + 1, storedIds.size(), full, badge);
   rtcViewIdx = idx;
   rtcBadge = badge;
+  rtcInfoShown = false;
   cycleOk = true;
 }
 
@@ -1725,6 +1762,60 @@ void redrawCurrent(bool syncBadge) {
   if (storedIds.empty()) return;
   EpdImage img;
   if (loadFirstFrame(storedIds[rtcViewIdx], img)) drawFrame(img, true, rtcBadge, syncBadge);
+  rtcInfoShown = false;
+}
+
+// the info box text for the image on screen: where it was sent from, then when
+// (the sender's local time). The worker sends both ready to print (geo.place,
+// geo.localTime); images stored before it did fall back to city/country and UTC
+String infoText(int idx) {
+  JsonDocument doc;
+  loadManifest(doc);
+  JsonObject entry;
+  for (JsonObject e : doc.as<JsonArray>()) {
+    if (storedIds[idx] == (e["id"] | "")) {
+      entry = e;
+      break;
+    }
+  }
+  JsonVariantConst geo = entry["geo"];
+  String place = geo["place"] | "";
+  if (place.isEmpty()) {
+    const char* city = geo["city"] | (geo["region"] | "");
+    const char* country = geo["country"] | "";
+    place = String(city) + (*city && *country ? ", " : "") + country;
+  }
+  String asciiPlace;  // the font has no accents: drop anything that isn't plain ASCII
+  for (char c : place) if (c >= 0x20 && c < 0x7f) asciiPlace += c;
+  if (asciiPlace.isEmpty()) asciiPlace = "Somewhere";
+
+  String when = geo["localTime"] | "";
+  if (when.isEmpty() && !entry["sentAt"].isNull()) {
+    time_t secs = (time_t)(entry["sentAt"].as<long long>() / 1000);
+    struct tm tm;
+    gmtime_r(&secs, &tm);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%a %b %e, %H:%M UTC", &tm);
+    when = buf;
+  }
+  return when.isEmpty() ? asciiPlace : asciiPlace + "\n" + when;
+}
+
+// 2 s hold on a still: shows the info box over it, as a fast partial refresh.
+// The next press or hold takes it away again (without stepping on)
+void toggleInfo() {
+  EpdImage img;
+  if (!loadFirstFrame(storedIds[rtcViewIdx], img)) return;
+  bool show = !rtcInfoShown;
+  if (show) {
+    String info = infoText(rtcViewIdx);
+    Serial.printf("Info box: %s\n", info.c_str());
+    drawFrame(img, true, rtcBadge, false, info.c_str());
+  } else {
+    drawFrame(img, true, rtcBadge);
+  }
+  rtcInfoShown = show;
+  cycleOk = true;
 }
 
 // pressing NEXT means the user is here: what's on screen counts as viewed, and
@@ -1805,7 +1896,8 @@ void manualSync() {
 }
 
 // stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
-// can step through the images; a 2 s hold replays an animation, a 5 s hold syncs
+// can step through the images; a 2 s hold replays an animation (on a still it
+// toggles the info box), a 5 s hold syncs
 void idleWindow() {
   uint32_t last = millis();
   while (millis() - last < AWAKE_IDLE_MS) {
@@ -1821,12 +1913,13 @@ void idleWindow() {
           markSeen(rtcViewIdx);
           replayCurrent();
         } else {
-          stepNext();  // nothing to replay on a still: it's just a step
+          toggleInfo();  // nothing to replay on a still: the hold shows where/when it was sent
         }
       }
       last = millis();
     } else if (pressed) {
-      if (!storedIds.empty()) stepNext();
+      if (rtcInfoShown) toggleInfo();  // the press after the info box only takes it away
+      else if (!storedIds.empty()) stepNext();
       last = millis();
     }
   }

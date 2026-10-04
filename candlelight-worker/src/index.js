@@ -58,6 +58,35 @@ function geoFromRequest(request) {
   };
 }
 
+// The lamp's info box (2 s hold on a still) prints where and when an image was
+// sent. The lamp's font is plain ASCII and it can't turn an IANA timezone into
+// a local time, so the worker does both and hands over ready-to-print strings:
+//   place:     "Brooklyn, US"
+//   localTime: "Sat Oct 4, 3:12 PM" in the sender's own timezone (UTC, labelled, if unknown)
+function toAscii(str) {
+  return String(str)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // é -> e
+    .replace(/[\u00a0\u2000-\u200b\u202f]/g, ' ')     // the odd spaces Intl puts before AM/PM
+    .replace(/[^\x20-\x7e]/g, '');
+}
+
+function lampGeo(sentAt, geo) {
+  if (!geo) return geo;
+  const place = [geo.city || geo.region, geo.country].filter(Boolean).join(', ');
+  let localTime = null;
+  if (sentAt) {
+    const opts = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+    try {
+      localTime = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: geo.timezone || 'UTC' }).format(new Date(sentAt));
+    } catch { // a timezone Intl doesn't know
+      localTime = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: 'UTC' }).format(new Date(sentAt));
+      geo = { ...geo, timezone: null };
+    }
+    localTime = toAscii(localTime).replace(',', '') + (geo.timezone ? '' : ' UTC'); // "Sat Oct 4, 3:12 PM"
+  }
+  return { ...geo, place: place ? toAscii(place) : null, localTime };
+}
+
 // ============================================================
 // EVENT LOG: one permanent record per delivered item, independent of the
 // queue image itself (which gets deleted on ack — this doesn't). Built for
@@ -542,7 +571,7 @@ export default {
           itemId: it.key.slice(prefix.length),
           size,
           sentAt: md.sentAt ? parseInt(md.sentAt, 10) : null,
-          sentGeo: md.sentGeo ? JSON.parse(md.sentGeo) : null,
+          sentGeo: md.sentGeo ? lampGeo(parseInt(md.sentAt, 10), JSON.parse(md.sentGeo)) : null,
         }) + '\n');
       };
       const headLine = count => enc.encode(JSON.stringify({
@@ -639,7 +668,7 @@ export default {
             itemId: obj.key.slice(`queue/${lampId}/`.length),
             size: obj.size,
             sentAt: md.sentAt ? parseInt(md.sentAt, 10) : null,
-            sentGeo: md.sentGeo ? JSON.parse(md.sentGeo) : null,
+            sentGeo: md.sentGeo ? lampGeo(parseInt(md.sentAt, 10), JSON.parse(md.sentGeo)) : null,
           };
         }),
       });

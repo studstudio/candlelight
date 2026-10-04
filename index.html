@@ -1307,8 +1307,9 @@ tapTarget.onclick = () => openFilePicker(0, { multiple: mode === 'cycle' }); // 
 const replacePhotoBtn = document.getElementById('replacePhotoBtn');
 // replaces whichever layer is currently active (base or an overlay) — the
 // icon acts on "the photo you're looking at right now"
-// an empty first cycle frame takes several photos at once (one per frame), same as the filmstrip "+"
-replacePhotoBtn.onclick = () => openFilePicker(activeLayerIdx, { multiple: mode === 'cycle' && activeLayerIdx === 0 && !frameIsFilled(currentStack()) });
+// in Cycle the base "+" takes several photos at once: into an empty frame 1 each becomes a frame; on a filled
+// base the first replaces it and the rest follow as new frames
+replacePhotoBtn.onclick = () => openFilePicker(activeLayerIdx, { multiple: mode === 'cycle' && activeLayerIdx === 0 });
 
 // ---------- message panel toggle: folds/unfolds between photo and preview ----------
 const postcardCollapse = document.getElementById('postcardCollapse');
@@ -2193,6 +2194,45 @@ async function importFramesFromFiles(files) {
   if (truncated) flashStatus('added the first ' + imgs.length + ' — frames max out at ' + MAX_FRAMES, 'fail');
 }
 
+// main "+" on a frame that already has a base photo, with several photos chosen:
+// the first one replaces this frame's photo (keeping its crop and settings), the rest
+// become new frames right after it, inheriting the same crop/settings. Replacing
+// doesn't use up a frame, so the limit is MAX_FRAMES minus the frames already filled, plus one.
+async function replaceBaseAndExtend(files) {
+  if (animPlaying) stopAnimPreview();
+  const filledCount = frames.filter(frameIsFilled).length;
+  const capacity = MAX_FRAMES - filledCount + 1;
+  const truncated = files.length > capacity;
+  const imgs = (await Promise.all(files.slice(0, capacity).map(loadImageFile))).filter(Boolean);
+  if (!imgs.length) return;
+  if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false);
+  const { cw, ch } = measureContainer();
+  const stack = frames[activeFrameIdx];
+  const layer = stack[0];
+  const old = { ...layer, box: { ...layer.box } };   // template: how the current photo is cropped and set
+  delete layer.shader;                                // a photo replacing a shader layer is just a photo
+  layer.img = imgs[0]; layer.naturalW = imgs[0].naturalWidth; layer.naturalH = imgs[0].naturalHeight;
+  placeLayerImage(layer, cw, ch);
+  layer.box = mapCropBox(old, layer);
+  const extra = imgs.slice(1).map(im => {
+    const l = makeDefaultLayerParams();
+    l.img = im; l.naturalW = im.naturalWidth; l.naturalH = im.naturalHeight;
+    placeLayerImage(l, cw, ch);
+    copyLayerSettings(old, l);
+    l.box = mapCropBox(old, l);
+    return [l, null, null];
+  });
+  frames.splice(activeFrameIdx + 1, 0, ...extra);
+  activeLayerIdx = 0;
+  loadLayerStateToGlobals(0);
+  updateLayerTabs();
+  updateFrameFilmstrip();
+  render();
+  lastWrapW = photoWrap.clientWidth;
+  updateSendState();
+  if (truncated) flashStatus('used the first ' + imgs.length + ' — frames max out at ' + MAX_FRAMES, 'fail');
+}
+
 // copies the active frame's crop + settings onto every other frame, layer by
 // layer (base→base, overlay 1→overlay 1, …) wherever both frames have that layer
 function applyActiveFrameToAll() {
@@ -2247,8 +2287,12 @@ fileInput.onchange = (e) => {
   pendingNewFrameIdx = null;
   snapshotActiveLayerState(); // template for inheritance must reflect the latest edits
   // base photo into an empty cycle frame, or the filmstrip "+": each photo becomes a frame
-  if (mode === 'cycle' && targetIdx === 0 && (newFrameFlag || !frameIsFilled(currentStack()[0]))) {
+  if (mode === 'cycle' && targetIdx === 0 && (newFrameFlag || !frameIsFilled(currentStack()))) {
     importFramesFromFiles(files);
+    return;
+  }
+  if (mode === 'cycle' && targetIdx === 0 && !newFrameFlag && files.length > 1 && frameIsFilled(currentStack())) {
+    replaceBaseAndExtend(files);
     return;
   }
   const file = files[0];
@@ -2259,6 +2303,7 @@ fileInput.onchange = (e) => {
     if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false);
     const list = currentStack();
     const layer = list[targetIdx] || makeDefaultLayerParams();
+    delete layer.shader; // a photo replacing a shader layer is just a photo
     layer.img = img;
     layer.naturalW = img.naturalWidth;
     layer.naturalH = img.naturalHeight;

@@ -87,44 +87,56 @@ function lampGeo(sentAt, geo) {
 // ============================================================
 // EVENT LOG: one permanent record per delivered item, independent of the
 // queue image itself (which gets deleted on ack — this doesn't). Built for
-// the eventual Gallery/interaction-map page.
+// the Gallery/interaction-map page.
 //
-// Two KV keys per event, written at upload time:
-//   event-index:{lampId}:{itemId}  -> the real event key (cheap O(1) lookup
-//                                     at download time, since itemId is all
-//                                     the download-side code has on hand)
-//   event:{reverseTs}:{lampId}:{itemId} -> the actual JSON record
-// reverseTs = MAX_TS - sentAt, zero-padded, so a plain ascending KV list on
-// the "event:" prefix naturally comes back MOST RECENT FIRST — no need to
-// fetch everything and sort client-side for a live feed.
+// Lives in R2, not KV: KV's free tier allows only 1,000 writes a day, which
+// the old KV version (4 writes per send) used up at ~250 sends. R2 allows
+// ~1M writes a month. One object per event:
+//   events/{reverseTs}:{lampId}:{itemId}
+// with the JSON record as its body AND as customMetadata.record, so the feed
+// is a single list call (include customMetadata) with no per-event reads.
+// reverseTs = MAX_TS - sentAt, zero-padded, so a plain ascending list comes
+// back MOST RECENT FIRST. itemId starts with sentAt, so the download side can
+// rebuild the key from the itemId alone (no index needed).
 // ============================================================
-function eventIndexKey(lampId, itemId) { return `event-index:${lampId}:${itemId}`; }
+function eventKeyFor(lampId, itemId, sentAt) {
+  const reverseTs = String(MAX_TS - sentAt).padStart(14, '0');
+  return `events/${reverseTs}:${lampId}:${itemId}`;
+}
+
+function putEvent(env, key, record) {
+  const body = JSON.stringify(record);
+  return env.LAMP_IMAGES.put(key, body, {
+    httpMetadata: { contentType: 'application/json' },
+    customMetadata: { record: body },
+  });
+}
 
 async function recordSentEvent(env, lampId, itemId, request, sentAt) {
-  const reverseTs = String(MAX_TS - sentAt).padStart(14, '0');
-  const eventKey = `event:${reverseTs}:${lampId}:${itemId}`;
-  const record = {
+  await putEvent(env, eventKeyFor(lampId, itemId, sentAt), {
     lampId, itemId,
     sentAt, sentGeo: geoFromRequest(request),
     downloadedAt: null, downloadGeo: null,
     deliveryMs: null,
-  };
-  await env.LAMP_KV.put(eventKey, JSON.stringify(record));
-  await env.LAMP_KV.put(eventIndexKey(lampId, itemId), eventKey);
+  });
 }
 
 async function recordDownloadEvent(env, lampId, itemId, request) {
-  const eventKey = await env.LAMP_KV.get(eventIndexKey(lampId, itemId));
-  if (!eventKey) return; // sent-event missing (shouldn't happen) — skip rather than throw
-  const raw = await env.LAMP_KV.get(eventKey);
-  if (!raw) return;
-  const record = JSON.parse(raw);
+  const sentAt = parseInt(itemId, 10);
+  if (!sentAt) return;
+  const key = eventKeyFor(lampId, itemId, sentAt);
+  const head = await env.LAMP_IMAGES.head(key);
+  if (!head || !head.customMetadata?.record) return; // sent-event missing (shouldn't happen) — skip rather than throw
+  const record = JSON.parse(head.customMetadata.record);
   if (record.downloadedAt) return; // keep the FIRST download, in case of a retry/re-pull before ack
   record.downloadedAt = Date.now();
   record.downloadGeo = geoFromRequest(request);
   record.deliveryMs = record.downloadedAt - record.sentAt;
-  await env.LAMP_KV.put(eventKey, JSON.stringify(record));
+  await putEvent(env, key, record);
 }
+
+// when each lamp last had something sent to it (the frontend's "last seen")
+const lampMetaKey = lampId => `lamp-meta/${lampId}`;
 
 // ============================================================
 // DEV/TESTING ONLY: real request.cf geo can't be spoofed on a genuine
@@ -315,11 +327,18 @@ export default {
     // Shape of this may evolve once that page actually gets designed. ----
     if (parts[0] === 'gallery' && parts[1] === 'events' && request.method === 'GET') {
       const limit = Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10) || 50);
-      const listing = await env.LAMP_KV.list({ prefix: 'event:', limit });
-      const events = await Promise.all(listing.keys.map(async k => {
-        const raw = await env.LAMP_KV.get(k.name);
-        return raw ? JSON.parse(raw) : null;
-      }));
+      // with metadata included, R2 may return fewer than `limit` per call (and
+      // a cursor for the rest), so keep paging until there are enough
+      const objects = [];
+      let cursor;
+      do {
+        const page = await env.LAMP_IMAGES.list({ prefix: 'events/', limit: limit - objects.length, cursor, include: ['customMetadata'] });
+        objects.push(...page.objects);
+        cursor = page.truncated ? page.cursor : null;
+      } while (cursor && objects.length < limit);
+      const events = objects.map(o => {
+        try { return JSON.parse(o.customMetadata?.record); } catch { return null; }
+      });
       return json({ events: events.filter(Boolean) });
     }
 
@@ -357,10 +376,8 @@ export default {
       const downloadedAt = Date.now();
       const sentAt = downloadedAt - deliveryMs;
       const itemId = `${sentAt}-${crypto.randomUUID().slice(0, 8)}.png`;
-      const reverseTs = String(MAX_TS - sentAt).padStart(14, '0');
-      const eventKey = `event:${reverseTs}:${lampId}:${itemId}`;
       const record = { lampId, itemId, sentAt, sentGeo, downloadedAt, downloadGeo, deliveryMs };
-      await env.LAMP_KV.put(eventKey, JSON.stringify(record));
+      await putEvent(env, eventKeyFor(lampId, itemId, sentAt), record);
       return json({ ok: true, event: record });
     }
 
@@ -522,19 +539,22 @@ export default {
           lampSize: String(stripForLamp(new Uint8Array(bytes)).length),
         },
       });
-      await env.LAMP_KV.put(`meta:${lampId}`, JSON.stringify({ lastUpload: sentAt }));
-      await recordSentEvent(env, lampId, itemId, request, sentAt);
+      await Promise.all([
+        env.LAMP_IMAGES.put(lampMetaKey(lampId), '', { customMetadata: { lastUpload: String(sentAt) } }),
+        recordSentEvent(env, lampId, itemId, request, sentAt),
+      ]);
       return json({ ok: true, itemId, queueDepth: items.length + 1 });
     }
 
     // ---- status: last-sent timestamp + live queue depth, so the frontend
     // can show "queue full" before someone even tries to send ----
     if (action === 'status' && request.method === 'GET') {
-      const metaRaw = await env.LAMP_KV.get(`meta:${lampId}`);
-      const meta = metaRaw ? JSON.parse(metaRaw) : {};
-      const items = await getQueueItems(env, lampId);
+      const [meta, items] = await Promise.all([
+        env.LAMP_IMAGES.head(lampMetaKey(lampId)),
+        getQueueItems(env, lampId),
+      ]);
       return json({
-        lastUpload: meta.lastUpload || null,
+        lastUpload: meta?.customMetadata?.lastUpload ? parseInt(meta.customMetadata.lastUpload, 10) : null,
         queueDepth: items.length,
         queueFull: items.length >= MAX_QUEUE_DEPTH,
       });

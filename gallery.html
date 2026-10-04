@@ -323,7 +323,8 @@ const DEBUG_DISABLE_BATHYMETRY = false;
 const DEBUG_DISABLE_ANTARCTIC = false;
 
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
-const POLL_MS = 8000;
+const POLL_MS = 30000;             // how often the event feed is re-fetched while someone is watching
+const IDLE_STOP_MS = 10 * 60 * 1000; // no pointer/key/touch activity for this long: polling stops until there is
 // Stadia Maps tiles (used for the Stamen Toner labels overlay below) require
 // auth for anything not served from localhost/127.0.0.1 — this site is
 // served from a workers.dev domain, so unauthenticated requests 401 and the
@@ -3065,6 +3066,30 @@ async function poll() {
   }
 }
 
+// polling only runs while the page is actually being watched: never in a
+// hidden tab, and not after IDLE_STOP_MS without any activity, so a tab left
+// open somewhere doesn't keep hitting the worker. Activity (or coming back to
+// the tab) refreshes at once and starts it again
+let pollTimer = null;
+let lastActivity = Date.now();
+function pollingAllowed() {
+  return !document.hidden && Date.now() - lastActivity < IDLE_STOP_MS;
+}
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    if (!pollingAllowed()) { pollTimer = null; return; } // stopped; noteActivity() restarts it
+    await poll();
+    schedulePoll();
+  }, POLL_MS);
+}
+function noteActivity() {
+  lastActivity = Date.now();
+  if (pollTimer || document.hidden) return;
+  poll();
+  schedulePoll();
+}
+
 function tick() {
   if (!twist && Math.abs(spinVelocity) > 0.01) {
     rotationGamma += spinVelocity;
@@ -3084,7 +3109,11 @@ function tick() {
   land = landData; lakes = lakeData; rivers = riverData;
   resize();
   await poll();
-  setInterval(poll, POLL_MS);
+  schedulePoll();
+  for (const type of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart']) {
+    window.addEventListener(type, noteActivity, { passive: true });
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) noteActivity(); });
   tick();
 })();
 </script>

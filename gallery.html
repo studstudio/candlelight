@@ -18,6 +18,8 @@
        the transition fade — halfway between the old pastel inlay tone and
        the 3D map's vivid ocean blue (#18BFFF), so nothing needs to blend
        or branch on docked state anymore */
+    --lightgreen2: #b6c59b; /* sage olive used for received squares */
+    --lightgreen: #b5fb00; /* yellow-lime (sampled from the reference slice): sent / received markers + route */
     --ocean: #69cef1;
     --land: #ecd191;
     --land-line: #b08a4a;
@@ -38,6 +40,7 @@
   #status { display: none; } /* kept in the DOM only so existing status-update code has somewhere to write to */
   main {
     position: relative; flex: 1 1 auto; min-height: 0;
+    overflow: hidden; /* popups that slide off the top / bottom are clipped here, never drawn over the dashboard */
     background: var(--land);
     /* Second independent guarantee, alongside #dashboard's fixed height:
        nothing inside main (terrainMap, canvas, any future overlay) can
@@ -196,6 +199,47 @@
       radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
+  /* detail card for a tapped light: sits at the bottom of the map area so it
+     never covers the docked inlay, and works the same docked or undocked */
+  #eventCard {
+    position: absolute; left: 0; top: 0; width: max-content; max-width: min(calc(100% - 16px), 340px);
+    z-index: 6; display: flex; opacity: 0; visibility: hidden; flex-direction: column; gap: 4px; padding: 0; align-items: flex-end; /* right-aligned: the photo is the stem of a J, the wider text boxes hook out to its left */
+    background: none; border: 0; box-shadow: none; color: var(--cream);
+    pointer-events: none; /* taps fall through to the map, which closes the card */
+    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; font-weight: 300; letter-spacing: 0.02em;
+  }
+  #eventCard.open { opacity: 1; visibility: visible; } /* text appears instantly, no fade either way */
+  #ecImgWrap {
+    position: relative; display: flex; pointer-events: none;
+    flex: 0 0 auto; width: 128px; height: 96px; box-sizing: border-box; border-radius: 0; overflow: hidden;
+    background: var(--panel); align-items: center; justify-content: center;
+    color: var(--cream-dim); font-size: 10px; text-align: center;
+  }
+  /* while revealing, a canvas shows the photo pixel by pixel; the real <img> takes over once it's done */
+  #ecShow { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; display: none; }
+  #ecImgWrap.revealing { background: transparent; }
+  #ecImgWrap.revealing #ecShow { display: block; }
+  #ecImgWrap.revealing #ecImg { visibility: hidden; }
+  #ecImg { width: 100%; height: 100%; object-fit: cover; display: none; image-rendering: pixelated; }
+  /* no panel: each line is its own small dark chip, hugging just its letters */
+  #ecBody { flex: 0 1 auto; min-width: 0; max-width: 100%; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+  .ecGroup { background: var(--panel); border-radius: 3px; padding: 2px 6px; max-width: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 1px; }
+  .ecRoute { display: flex; align-items: flex-start; gap: 5px; font-size: 9.5px; line-height: 1.25; }
+  .ecRoute span.txt { overflow-wrap: anywhere; }
+  .ecRoute .ecMark { margin-top: 2px; }
+  .ecMark { flex: 0 0 auto; box-sizing: border-box; width: 7px; height: 7px; background: var(--lightgreen); }
+  .ecMark.circle { border-radius: 50%; }
+  .ecMark.square { border-radius: 1px; background: var(--lightgreen2); border: 1px solid var(--lightgreen); }
+  .ecMark.pending { background: transparent; border: 1px dashed var(--lightgreen); opacity: 0.75; }
+  #ecMid, #ecMeta > div { font-size: 8.5px; color: var(--cream-dim); line-height: 1.4; }
+  #ecMid:empty { display: none; }
+  #routeStyleBtn {
+    position: absolute; left: 12px; bottom: 12px; z-index: 5; padding: 6px 10px;
+    background: rgba(29,22,16,0.55); color: var(--cream); border: 0; border-radius: 999px;
+    font-size: 10px; letter-spacing: 0.05em; font-family: 'SF Mono','Menlo','Courier New',monospace;
+    touch-action: manipulation; cursor: pointer;
+  }
+  #solarOverlay { position: absolute; inset: 0; z-index: 3; pointer-events: none; cursor: default; }
   #map { transition: opacity 0.6s ease; }
   #map.faded { opacity: 0; pointer-events: none; }
   #backBtn {
@@ -225,6 +269,7 @@
     <div id="transitionFade"><span id="transitionCoords"></span></div>
     <div id="poleFade"></div>
     <canvas id="map"></canvas>
+    <canvas id="solarOverlay"></canvas>
     <div id="terrainMap"></div>
     <div id="layerToggles">
       <button id="toggleLabelsBtn" class="layerToggle">labels</button>
@@ -241,6 +286,19 @@
         <path d="M10,12 Q14,8 20,10 Q24,12 22,16 Q24,20 18,22 Q12,23 9,18 Q7,14 10,12 Z" fill="#ecd191"/>
       </svg>
     </button>
+    <div id="eventCard" role="dialog" aria-label="light details">
+      <div id="ecImgWrap"><img id="ecImg" alt=""><span id="ecNoImg">no image</span><canvas id="ecShow" width="128" height="96"></canvas></div>
+      <div id="ecBody">
+        <div class="ecGroup" id="ecSentGroup">
+          <div class="ecRoute"><span class="ecMark circle"></span><span class="txt" id="ecFrom"></span></div>
+          <div id="ecMid"></div>
+        </div>
+        <div class="ecGroup" id="ecRecvGroup">
+          <div class="ecRoute"><span class="ecMark square" id="ecToMark"></span><span class="txt" id="ecTo"></span></div>
+          <div id="ecMeta"></div>
+        </div>
+      </div>
+    </div>
     <div id="tooltip"></div>
     <div id="empty">
       <div>no lights shared yet</div>
@@ -249,9 +307,9 @@
   </main>
   <div id="dashboard">
     <div id="legend">
-      <div class="row"><span class="dot" style="background:var(--ember)"></span> sent</div>
-      <div class="row"><span class="dot" style="background:#1d1610"></span> received</div>
-      <div class="row"><span class="dot" style="background:var(--ember-dim);opacity:0.6"></span> in flight</div>
+      <div class="row"><span class="dot" style="background:var(--lightgreen)"></span> sent</div>
+      <div class="row"><span class="dot" style="background:var(--lightgreen2);border-radius:2px"></span> received</div>
+      <div class="row"><span class="dot" style="background:transparent;border:1.5px solid var(--lightgreen);opacity:0.7"></span> in flight</div>
     </div>
     <div id="location">
       <div id="locationCity"></div>
@@ -323,8 +381,7 @@ const DEBUG_DISABLE_BATHYMETRY = false;
 const DEBUG_DISABLE_ANTARCTIC = false;
 
 const WORKER_BASE_URL = "https://candlelight.daniloinfinite.workers.dev"; // keep in sync with index.html
-const POLL_MS = 30000;             // how often the event feed is re-fetched while someone is watching
-const IDLE_STOP_MS = 10 * 60 * 1000; // no pointer/key/touch activity for this long: polling stops until there is
+const POLL_MS = 8000;
 // Stadia Maps tiles (used for the Stamen Toner labels overlay below) require
 // auth for anything not served from localhost/127.0.0.1 — this site is
 // served from a workers.dev domain, so unauthenticated requests 401 and the
@@ -656,6 +713,7 @@ let dpr = window.devicePixelRatio || 1;
 let transform = d3.zoomIdentity;
 
 function resize() {
+  wake();
   const rect = canvas.parentElement.getBoundingClientRect();
   dpr = window.devicePixelRatio || 1;
   canvas.width = rect.width * dpr;
@@ -720,6 +778,168 @@ function hexToRgb(hex) {
 
 function project(geo) { return geo && geo.lat != null && geo.lon != null ? [geo.lon, geo.lat] : null; }
 
+// ============================================================
+// SUN + MOON (docked azimuthal only)
+// Both are placed at their real sub-body points (the spot on Earth where
+// each one is directly overhead right now), pushed through the SAME
+// projection as the land, so they sit exactly where they should on the map
+// and ride along with the two-finger spin (they're drawn inside the same
+// canvas transform).
+// The moon also shows its current phase: a soft white lit shape on a faint
+// blue-grey unlit disc, with the lit side turned toward the sun's position.
+// Why the sun "moves over" the map rather than orbiting its rim: the center
+// of this map is at 39.83°N, and the sun never gets closer to the opposite
+// point than ~16°, so it never touches the disc's outer edge.
+// ============================================================
+const SUN_ON_DOCKED = true;
+// false = real moon position (and real phase). true = park a full moon at the
+// antipode of the sun, i.e. dead center of the night hemisphere.
+const MOON_AT_ANTISOLAR = false;
+// debug: add ?sunTime=2026-12-21T12:00:00Z to the URL to start the clock at a given
+// instant (it keeps advancing in real time from there)
+const SUN_TIME_START = (() => {
+  const v = new URLSearchParams(location.search).get('sunTime');
+  const t = v ? Date.parse(v) : NaN;
+  return isNaN(t) ? null : { t, wall: Date.now() };
+})();
+let solarCache = { stamp: 0, sun: [0, 0], moon: [0, 0], k: 1, waxing: true };
+
+// low-precision sun + moon positions (Astronomical Almanac), good to ~0.01° (sun)
+// and ~0.3° (moon)
+function solarState(ms) {
+  const R = Math.PI / 180;
+  const sn = (a) => Math.sin(a * R);
+  const wrap = (x) => ((((x % 360) + 360) % 360) + 540) % 360 - 180;
+  const d = ms / 86400000 + 2440587.5 - 2451545.0; // days since J2000
+  const T = d / 36525;
+  const gmst = 280.46061837 + 360.98564736629 * d; // Greenwich sidereal angle
+  // sun
+  const g = 357.528 + 0.9856003 * d;
+  const lamS = 280.460 + 0.9856474 * d + 1.915 * sn(g) + 0.020 * sn(2 * g); // ecliptic longitude, deg
+  const eps = (23.439 - 0.0000004 * d) * R;
+  const raS = Math.atan2(Math.cos(eps) * sn(lamS), Math.cos(lamS * R)) / R;
+  const decS = Math.asin(Math.sin(eps) * sn(lamS)) / R;
+  // moon
+  const lamM = 218.32 + 481267.881 * T + 6.29 * sn(135.0 + 477198.87 * T) - 1.27 * sn(259.3 - 413335.36 * T)
+    + 0.66 * sn(235.7 + 890534.22 * T) + 0.21 * sn(269.9 + 954397.74 * T) - 0.19 * sn(357.5 + 35999.05 * T)
+    - 0.11 * sn(186.5 + 966404.03 * T);
+  const betM = 5.13 * sn(93.3 + 483202.02 * T) + 0.28 * sn(228.2 + 960400.89 * T)
+    - 0.28 * sn(318.3 + 6003.15 * T) - 0.17 * sn(217.6 - 407332.21 * T);
+  const cb = Math.cos(betM * R), sb = Math.sin(betM * R);
+  const l = cb * Math.cos(lamM * R);
+  const m = 0.9175 * cb * sn(lamM) - 0.3978 * sb;
+  const n = 0.3978 * cb * sn(lamM) + 0.9175 * sb;
+  const raM = Math.atan2(m, l) / R, decM = Math.asin(n) / R;
+  // phase: elongation of the moon from the sun
+  const dl = (lamM - lamS) * R;
+  const k = (1 - cb * Math.cos(dl)) / 2; // illuminated fraction 0..1
+  const sun = [wrap(raS - gmst), decS];
+  return { sun, moon: [wrap(raM - gmst), decM], k, waxing: Math.sin(dl) > 0 };
+}
+
+function refreshSolar() {
+  const wall = Date.now();
+  if (wall - solarCache.stamp < 1000) return; // they move slowly — once a second is plenty
+  const ms = SUN_TIME_START ? SUN_TIME_START.t + (wall - SUN_TIME_START.wall) : wall;
+  const st = solarState(ms);
+  if (MOON_AT_ANTISOLAR) { st.moon = [wrap180(st.sun[0] + 180), -st.sun[1]]; st.k = 1; }
+  solarCache = { stamp: wall, ...st };
+}
+function wrap180(x) { return ((((x % 360) + 360) % 360) + 540) % 360 - 180; }
+
+function drawSun(c, p, r) {
+  // faint wide glow
+  const glow = c.createRadialGradient(p[0], p[1], r * 0.5, p[0], p[1], r * 3.4);
+  glow.addColorStop(0,    'rgba(255, 226, 160, 0.30)');
+  glow.addColorStop(0.4,  'rgba(255, 214, 150, 0.10)');
+  glow.addColorStop(1,    'rgba(255, 205, 140, 0)');
+  c.beginPath(); c.arc(p[0], p[1], r * 3.4, 0, Math.PI * 2);
+  c.fillStyle = glow; c.fill();
+  // body: cream core → calm yellow → pale orange, fading to fully transparent (no edge)
+  const R2 = r * 1.7;
+  const body = c.createRadialGradient(p[0], p[1], 0, p[0], p[1], R2);
+  body.addColorStop(0,    'rgba(255, 249, 222, 0.95)');
+  body.addColorStop(0.28, 'rgba(255, 238, 172, 0.85)');
+  body.addColorStop(0.55, 'rgba(255, 222, 146, 0.50)');
+  body.addColorStop(0.8,  'rgba(255, 204, 130, 0.17)');
+  body.addColorStop(1,    'rgba(255, 196, 125, 0)');
+  c.beginPath(); c.arc(p[0], p[1], R2, 0, Math.PI * 2);
+  c.fillStyle = body; c.fill();
+}
+
+function drawMoon(c, p, r, towardAngle) {
+  const { k } = solarCache;
+  // luminous white glow
+  const glow = c.createRadialGradient(p[0], p[1], r * 0.6, p[0], p[1], r * 3.2);
+  glow.addColorStop(0,   'rgba(255, 255, 255, 0.50)');
+  glow.addColorStop(0.4, 'rgba(240, 246, 255, 0.16)');
+  glow.addColorStop(1,   'rgba(235, 243, 255, 0)');
+  c.beginPath(); c.arc(p[0], p[1], r * 3.2, 0, Math.PI * 2);
+  c.fillStyle = glow; c.fill();
+
+  c.save();
+  c.translate(p[0], p[1]);
+  c.rotate(towardAngle); // local +x now points toward the sun, i.e. the lit side
+  // unlit part of the disc: a faint blue-grey white
+  const base = c.createRadialGradient(0, 0, 0, 0, 0, r);
+  base.addColorStop(0,    'rgba(214, 224, 242, 0.80)');
+  base.addColorStop(0.8,  'rgba(206, 217, 238, 0.74)');
+  base.addColorStop(1,    'rgba(204, 215, 238, 0.45)');
+  c.beginPath(); c.arc(0, 0, r, 0, Math.PI * 2);
+  c.fillStyle = base; c.fill();
+  // lit part: right half-disc, then the terminator ellipse (bulging right for a
+  // crescent, left for gibbous). Three slightly different terminator widths at
+  // low alpha soften that edge.
+  const lit = c.createRadialGradient(r * 0.25, 0, 0, 0, 0, r);
+  lit.addColorStop(0, 'rgba(255, 255, 255, 1)');
+  lit.addColorStop(1, 'rgba(248, 251, 255, 0.92)');
+  for (const [wMul, alpha] of [[1.14, 0.34], [1.0, 0.40], [0.86, 0.34]]) {
+    const rx = Math.min(1, Math.abs(1 - 2 * k) * wMul) * r;
+    c.beginPath();
+    c.arc(0, 0, r, -Math.PI / 2, Math.PI / 2, false);
+    c.ellipse(0, 0, Math.max(rx, 0.001), r, 0, Math.PI / 2, k < 0.5 ? -Math.PI / 2 : Math.PI * 1.5, k < 0.5);
+    c.closePath();
+    c.globalAlpha = alpha;
+    c.fillStyle = lit; c.fill();
+  }
+  c.globalAlpha = 1;
+  c.restore();
+}
+
+function drawSolar(c) {
+  refreshSolar();
+  const ps = projection(solarCache.sun);
+  const pm = projection(solarCache.moon);
+  if (pm) {
+    const toward = ps ? Math.atan2(ps[1] - pm[1], ps[0] - pm[0]) : 0;
+    drawMoon(c, pm, discRadius * 0.05, toward);
+  }
+  if (ps) drawSun(c, ps, discRadius * 0.085);
+}
+
+// The sun and moon live on their own transparent canvas stacked ABOVE the
+// map (#solarOverlay). The map canvas is clipped to the round inlay while
+// docked; this one isn't, so they can drift past the rim without being cut.
+// It uses exactly the same pan/zoom/spin transform as the map, and clicks
+// pass straight through it (pointer-events: none).
+const solarCanvas = document.getElementById('solarOverlay');
+const sctx = solarCanvas.getContext('2d');
+function drawSolarOverlay() {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  if (solarCanvas.width !== Math.round(rect.width * dpr) || solarCanvas.height !== Math.round(rect.height * dpr)) {
+    solarCanvas.width = rect.width * dpr; solarCanvas.height = rect.height * dpr;
+    solarCanvas.style.width = rect.width + 'px'; solarCanvas.style.height = rect.height + 'px';
+  }
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.clearRect(0, 0, solarCanvas.width, solarCanvas.height);
+  if (!(docked && SUN_ON_DOCKED)) return;
+  sctx.setTransform(transform.k * dpr, 0, 0, transform.k * dpr, transform.x * dpr, transform.y * dpr);
+  sctx.translate(discCenter.x, discCenter.y);
+  sctx.rotate(rotationGamma * Math.PI / 180);
+  sctx.translate(-discCenter.x, -discCenter.y);
+  drawSolar(sctx);
+}
+
 function draw() {
   const rect = canvas.parentElement.getBoundingClientRect();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -771,41 +991,270 @@ function draw() {
     ctx.fill();
   }
 
+  drawSolarOverlay();
+
   drawEvents(lw, pr);
   updateLocationReadout();
 }
 
+// ============================================================
+// LIGHTS: sent = green circle, received = green square, route = thin green
+// great-circle line between them. A light still in flight has no known
+// destination yet, so it's just the circle with a slow pulsing ring.
+//
+// Event shape this expects from the worker (anything marked ? is an ASSUMED
+// field name — see the helpers right below, they're the only place to fix):
+//   id?, sentGeo {lat, lon, city?, region?, country?}, sentAt?,
+//   downloadGeo {…same…} | null, downloadedAt | null, deliveryMs?,
+//   imageUrl? (https or data:image)
+// ============================================================
+const LIGHT_GREEN = '#b5fb00', LIGHT_GREEN_RGB = '181,251,0';
+const toMs = (v) => (v == null ? null : (typeof v === 'number' ? v : (Date.parse(v) || null)));
+const evKey = (ev) => ev.id != null ? String(ev.id) : `${ev.sentAt || ev.createdAt || ''}|${ev.sentGeo && ev.sentGeo.lat}|${ev.sentGeo && ev.sentGeo.lon}`;
+const evSentMs = (ev) => toMs(ev.sentAt ?? ev.createdAt ?? ev.timestamp);
+const evImageUrl = (ev) => {
+  const u = ev.imageUrl || ev.thumbUrl || ev.image;
+  return (typeof u === 'string' && (u.startsWith('https://') || u.startsWith('data:image/'))) ? u : null;
+};
+let selectedKey = null;
+
+// ============================================================
+// ROUTE ANIMATION STYLES — tap the little "route:" button (bottom-left) to
+// cycle, or use ?route=name. EVERY style encodes that light's delivery time:
+//   x     = delivery time on a log scale, 0 (≤5 s) … 1 (≥2 days)
+//   tempo = 1.9 (instant) … 0.4 (very slow): quick deliveries move quick,
+//           slow ones drift languidly — shared by all the styles below
+// and then each style has its own, more specific, secret code:
+//   ── laser-dash family: the route becomes a beam of dashes whose lengths and gaps come from a
+//      math sequence. MOTION is a second code: every beam flows sent → received at `tempo`, and
+//      the slower the delivery the more the flow turns from a smooth glide into a ticking ratchet
+//      (it waits, then jumps — like a clock hand). ──
+//   fibonacci : dash k is F(k) long followed by a gap of F(n-1-k): the beam swells from fine dust
+//               to long strokes and back. Number of terms n = 4 (fast) … 10 (slow).
+//               Motion: unhurried drift + the whole beam slowly breathing + a faint shimmer.
+//   fib-slide : the same beam, but its terms very slowly slide one step along the sequence
+//               (F(k) → F(k+1)) and back — the dashes grow along the golden ratio, ~90 s a cycle
+//   fib-swell : a soft pulse of brightness travels sent → received every ~24 s, as if the beam breathes
+//   fib-golden: every route breathes at its own phase, offset from the next by the golden angle (137.5°),
+//               so the whole map ripples without anything ever syncing
+//   fib-settle: a delivery lands with a brief swell (brighter, bolder, glowing) that eases away over ~25 s
+//               into the resting beam
+//   fib-mirror: no one-way flow; the dashes drift out toward the receiver, then ease back — an exhale and
+//               an inhale (slower deliveries breathe more slowly)
+//   cantor    : the Cantor middle-thirds set, a self-similar beam of dashes within dashes,
+//               very slowly breathing. Depth = 2 (fast) … 5 (slow)
+//   plain     : just the steady line
+// ============================================================
+const ROUTE_STYLE_NAMES = ['fibonacci', 'fib-slide', 'fib-swell', 'fib-golden', 'fib-settle', 'fib-mirror', 'cantor', 'plain'];
+// every route motion runs on this slowed clock (1 = the old speed). Lower = slower.
+const ROUTE_TIME = 0.22;
+let routeStyle = (() => {
+  let v = new URLSearchParams(location.search).get('route');
+  if (!v) { try { v = localStorage.getItem('routeStyle'); } catch (e) {} }
+  return ROUTE_STYLE_NAMES.includes(v) ? v : 'fibonacci';
+})();
+let mapPxG = (px) => px; // screen px → map units, refreshed every frame in drawEvents
+const TAU_ = Math.PI * 2;
+
+// delivery time in seconds for a light (null if unknown)
+function deliverySecs(ev) {
+  if (ev.deliveryMs != null) return ev.deliveryMs / 1000;
+  const a = evSentMs(ev), b = toMs(ev.downloadedAt);
+  return a && b ? (b - a) / 1000 : null;
+}
+const deliveryX = (secs) => secs == null ? 0.3 : Math.max(0, Math.min(1, (Math.log10(Math.max(secs, 1)) - Math.log10(5)) / (Math.log10(172800) - Math.log10(5))));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---- laser-dash helpers -------------------------------------------------
+const smooth01 = (t) => t * t * (3 - 2 * t);
+// Flow position (in dash units) of a beam: glides when the delivery was quick,
+// ticks like a ratchet (waits, then jumps) when it was slow.
+function flowUnits(T, tempo, x, seed, unitsPerSec, tickUnits) {
+  const glide = T * tempo * unitsPerSec + seed * 97;
+  const k = glide / tickUnits, f = k - Math.floor(k);
+  const ratchet = (Math.floor(k) + (f < 0.65 ? 0 : smooth01((f - 0.65) / 0.35))) * tickUnits;
+  return lerp(glide, ratchet, Math.pow(x, 0.8));
+}
+// strokes the great-circle path as a dashed laser; pattern = alternating on/off lengths in units
+function drawBeam({ from, to, pattern, unit, offsetUnit, offsetUnits, wpx, alpha, rgba, lw, dk, GLOW, alphaAt, glowMul }) {
+  const total = pattern.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) return;
+  ctx.save();
+  ctx.setLineDash(pattern.map(v => Math.max(v * unit, 1e-6)));
+  ctx.lineDashOffset = -offsetUnits * (offsetUnit || unit); // negative → flows sent → received
+  ctx.lineCap = 'butt';
+  ctx.beginPath(); path({ type: 'LineString', coordinates: [from, to] });
+  ctx.shadowColor = rgba(0.7); ctx.shadowBlur = GLOW * 0.55 * (glowMul || 1);
+  if (alphaAt) { // brightness varying along the beam (u = 0 at sent … 1 at received)
+    const a = projection(from), b = projection(to), g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+    for (let i = 0; i <= 16; i++) g.addColorStop(i / 16, rgba(alpha * alphaAt(i / 16)));
+    ctx.strokeStyle = g;
+  } else ctx.strokeStyle = rgba(alpha);
+  ctx.lineWidth = lw(wpx); ctx.stroke();
+  ctx.restore();
+}
+const FIB = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
+function cantorPattern(depth) { // on/off lengths of the Cantor set at `depth`, in units of the smallest piece
+  let iv = [[0, 1]];
+  for (let d = 0; d < depth; d++) iv = iv.flatMap(([a, b]) => { const t = (b - a) / 3; return [[a, a + t], [b - t, b]]; });
+  const sz = Math.pow(3, depth), pat = []; let cur = 0;
+  for (const [a, b] of iv) { const A = Math.round(a * sz), B = Math.round(b * sz); if (pat.length) pat[pat.length - 1] += A - cur; pat.push(B - A, 0); cur = B; }
+  pat[pat.length - 1] = Math.pow(3, Math.max(0, depth - 1)); // closing gap before the pattern repeats
+  return pat;
+}
+const ROUTE_STYLES = {
+  plain: null,
+
+  // understated motion: a very slow drift, the whole beam gently breathing (±6 %), and a faint shimmer
+  // in brightness. All on the slowed route clock — nothing ever moves fast.
+  fibonacci({ from, to, T, dk, rgba, A_MAIN, lw, x, tempo, seed, GLOW }) {
+    const n = 4 + Math.round(x * 6), pat = [], s = seed * TAU_;
+    for (let i = 0; i < n; i++) pat.push(FIB[i], FIB[n - 1 - i]);
+    const base = mapPxG(dk ? 0.85 : 1.35), breath = 1 + 0.06 * Math.sin(T * TAU_ / 16 + s);
+    const shimmer = 0.9 + 0.1 * Math.sin(T * TAU_ / 9 + s * 1.618);
+    drawBeam({ from, to, pattern: pat, unit: base * breath, offsetUnit: base, offsetUnits: flowUnits(T, tempo, x, seed, 3, 21), wpx: dk ? 0.85 : 1.3, alpha: A_MAIN * shimmer, rgba, lw, dk, GLOW });
+  },
+
+  // the terms slowly slide one step along the sequence and back: dash i grows F(i) → F(i+1) while its gap shrinks
+  'fib-slide'({ from, to, Tr, dk, rgba, A_MAIN, lw, x, tempo, seed, GLOW }) {
+    const n = 4 + Math.round(x * 6), pat = [], s = 0.5 - 0.5 * Math.cos(Tr * TAU_ / 90 + seed * TAU_);
+    for (let i = 0; i < n; i++) pat.push(lerp(FIB[i], FIB[i + 1], s), lerp(FIB[n - 1 - i], FIB[Math.max(0, n - 2 - i)], s));
+    const base = mapPxG(dk ? 0.85 : 1.35);
+    drawBeam({ from, to, pattern: pat, unit: base, offsetUnits: flowUnits(Tr * ROUTE_TIME, tempo, x, seed, 1.2, 21), wpx: dk ? 0.85 : 1.3, alpha: A_MAIN, rgba, lw, dk, GLOW });
+  },
+
+  // a soft bump of brightness travels sent → received (~24 s per pass, each route on its own phase)
+  'fib-swell'({ from, to, Tr, dk, rgba, A_MAIN, lw, x, tempo, seed, GLOW }) {
+    const n = 4 + Math.round(x * 6), pat = [];
+    for (let i = 0; i < n; i++) pat.push(FIB[i], FIB[n - 1 - i]);
+    const c = -0.25 + 1.5 * (((Tr / 24 + seed) % 1 + 1) % 1);
+    const alphaAt = (u) => 0.42 + 0.58 * Math.exp(-Math.pow((u - c) / 0.17, 2));
+    drawBeam({ from, to, pattern: pat, unit: mapPxG(dk ? 0.85 : 1.35), offsetUnits: flowUnits(Tr * ROUTE_TIME, tempo, x, seed, 1.2, 21), wpx: dk ? 0.85 : 1.3, alpha: A_MAIN, rgba, lw, dk, GLOW, alphaAt });
+  },
+
+  // each route breathes (size + brightness) at a phase one golden angle past the previous light's
+  'fib-golden'({ from, to, Tr, dk, rgba, A_MAIN, lw, x, tempo, seed, gidx, GLOW }) {
+    const n = 4 + Math.round(x * 6), pat = [], ph = gidx * 2.399963229728653; // 137.5° in radians
+    for (let i = 0; i < n; i++) pat.push(FIB[i], FIB[n - 1 - i]);
+    const base = mapPxG(dk ? 0.85 : 1.35), w = Math.sin(Tr * TAU_ / 40 + ph);
+    drawBeam({ from, to, pattern: pat, unit: base * (1 + 0.09 * w), offsetUnit: base, offsetUnits: flowUnits(Tr * ROUTE_TIME, tempo, x, seed, 1.2, 21), wpx: dk ? 0.85 : 1.3, alpha: A_MAIN * (0.82 + 0.18 * w), rgba, lw, dk, GLOW });
+  },
+
+  // landing: brighter, bolder and glowing for a moment, easing (over ~25 s) down to the resting beam
+  'fib-settle'({ from, to, Tr, dk, rgba, A_MAIN, lw, x, tempo, seed, ageMs, GLOW }) {
+    const n = 4 + Math.round(x * 6), pat = [], e = ageMs == null ? 0 : Math.exp(-ageMs / 9000);
+    for (let i = 0; i < n; i++) pat.push(FIB[i], FIB[n - 1 - i]);
+    const base = mapPxG(dk ? 0.85 : 1.35);
+    drawBeam({ from, to, pattern: pat, unit: base * (1 + 0.22 * e), offsetUnit: base, offsetUnits: flowUnits(Tr * ROUTE_TIME, tempo, x, seed, 1.2, 21), wpx: (dk ? 0.85 : 1.3) * (1 + 0.7 * e), alpha: Math.min(1, A_MAIN * (0.9 + 0.4 * e)), rgba, lw, dk, GLOW, glowMul: 1 + 2.2 * e });
+  },
+
+  // exhale / inhale: the dashes drift out toward the receiver, then ease back (slower deliveries breathe slower)
+  'fib-mirror'({ from, to, Tr, dk, rgba, A_MAIN, lw, x, seed, GLOW }) {
+    const n = 4 + Math.round(x * 6), pat = [];
+    for (let i = 0; i < n; i++) pat.push(FIB[i], FIB[n - 1 - i]);
+    const period = lerp(30, 70, x), off = 14 * Math.sin(Tr * TAU_ / period + seed * TAU_) + seed * 97;
+    drawBeam({ from, to, pattern: pat, unit: mapPxG(dk ? 0.85 : 1.35), offsetUnits: off, wpx: dk ? 0.85 : 1.3, alpha: A_MAIN, rgba, lw, dk, GLOW });
+  },
+
+  // very slow: the flow is crawling and the breathing takes minutes
+  cantor({ from, to, T, dk, rgba, A_MAIN, lw, x, tempo, seed, GLOW }) {
+    const depth = 2 + Math.round(x * 3), pat = cantorPattern(depth), breathe = 1 + 0.12 * Math.sin(T * tempo * 0.17 + seed * TAU_);
+    const base = mapPxG((dk ? 1.0 : 1.5) * (5 / depth) ** 0.5); // keep the whole motif a sensible size at every depth
+    drawBeam({ from, to, pattern: pat, unit: base * breathe, offsetUnit: base, offsetUnits: flowUnits(T, tempo, x, seed, 1.2, Math.pow(3, depth - 1)), wpx: dk ? 0.85 : 1.3, alpha: A_MAIN, rgba, lw, dk, GLOW });
+  },
+};
+
+// TEMPORARY dev aid (like eruda): tap to cycle route animation styles
+(function () {
+  const btn = document.createElement('button');
+  btn.id = 'routeStyleBtn';
+  const label = () => { btn.textContent = 'route: ' + routeStyle + ' ▸'; };
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    routeStyle = ROUTE_STYLE_NAMES[(ROUTE_STYLE_NAMES.indexOf(routeStyle) + 1) % ROUTE_STYLE_NAMES.length];
+    try { localStorage.setItem('routeStyle', routeStyle); } catch (err) {}
+    label(); wake();
+  });
+  label(); document.querySelector('main').appendChild(btn);
+})();
+
+
+
+const routeSeed = (k) => { let h = 7; for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) | 0; return (h >>> 0) / 4294967296; }; // 0..1, stable per light
+
 function drawEvents(lw, pr) {
   const now = Date.now();
-  for (const ev of events) {
-    const from = project(ev.sentGeo);
-    const to = project(ev.downloadGeo);
+  // the docked inlay is meant to be dainty: tiny icons, hairline routes, a
+  // whisper of glow, and nothing selectable. Undocked gets the full-size look.
+  const dk = docked;
+  if ((dk || in3D) && selectedKey) closeCard();
+  positionCard();
+  const R_DOT = dk ? 1.9 : 3.4, SQ = 2 * R_DOT + (dk ? 1.6 : 2.6), LINE_W = dk ? 0.6 : 0.9, HALO_W = dk ? 0 : 3;
+  const GLOW = (dk ? 2.5 : 6) * dpr;
+  // marker fill: soft radial glow, pale yellow in the middle easing out to lime
+  // (colors sampled from the reference lime slice), translucent so the map shows through
+  const lightFill = (x, y, rad) => {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
+    g.addColorStop(0, 'rgba(250,255,90,0.88)'); g.addColorStop(0.45, 'rgba(203,255,0,0.80)'); g.addColorStop(1, 'rgba(150,249,0,0.72)');
+    return g;
+  };
+  const pts = events.map(ev => ({ ev, from: project(ev.sentGeo), to: project(ev.downloadGeo), key: evKey(ev) }));
 
-    if (from && to) {
-      ctx.beginPath();
-      path({ type: 'LineString', coordinates: [from, to] });
-      ctx.strokeStyle = 'rgba(232,130,60,0.55)';
-      ctx.lineWidth = lw(1.3);
-      ctx.stroke();
-    }
-    if (from) {
-      const inFlight = !ev.downloadedAt;
-      const pulse = inFlight ? (0.5 + 0.5 * Math.sin(now / 400)) : 1;
-      ctx.beginPath();
-      path.pointRadius(pr(inFlight ? 4 : 3))({ type: 'Point', coordinates: from });
-      ctx.fillStyle = inFlight ? `rgba(232,130,60,${0.4 + 0.4 * pulse})` : '#e8823c';
-      ctx.fill();
-      ctx.lineWidth = lw(0.8); ctx.strokeStyle = '#1d1610'; ctx.stroke();
-    }
-    if (to) {
-      ctx.beginPath();
-      path.pointRadius(pr(3))({ type: 'Point', coordinates: to });
-      ctx.fillStyle = '#1d1610';
-      ctx.fill();
-      ctx.lineWidth = lw(0.8); ctx.strokeStyle = '#f2e9d8'; ctx.stroke();
+  // routes first, so markers always sit on top of every line.
+  // Every route is a faint hairline along its true great-circle path plus ONE
+  // animated layer on top, chosen by routeStyle (see ROUTE_STYLES below). All
+  // styles draw in screen-constant sizes (px / transform.k) so they look the
+  // same docked, undocked and at any zoom.
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const T = now / 1000, kz = transform.k;
+  const mapPx = (px) => px / kz;
+  mapPxG = mapPx;
+  const rgba = (a) => `rgba(${LIGHT_GREEN_RGB},${a})`;
+  const A_MAIN = dk ? 0.62 : 0.8;
+  for (const { ev, from, to, key } of pts) {
+    if (!(from && to)) continue;
+    const sel = !dk && key === selectedKey;
+    ctx.beginPath(); path({ type: 'LineString', coordinates: [from, to] });
+    ctx.strokeStyle = sel ? 'rgba(143,212,0,0.9)' : rgba(routeStyle === 'plain' ? (dk ? 0.5 : 0.6) : (dk ? 0.20 : 0.26));
+    ctx.lineWidth = lw(sel ? 1.7 : (routeStyle === 'plain' ? (dk ? 0.6 : 0.9) : (dk ? 0.5 : 0.7))); ctx.stroke();
+    const fn = ROUTE_STYLES[routeStyle];
+    if (!fn) continue;
+    {
+      const secs = deliverySecs(ev), x = deliveryX(secs);
+      fn({ seed: routeSeed(key), T: T * ROUTE_TIME, Tr: T, gidx: Number.isFinite(+ev.id) ? +ev.id : routeSeed(key) * 1000, ageMs: ev.downloadedAt ? now - toMs(ev.downloadedAt) : null, dk, kz, mapPx, rgba, A_MAIN, lw, pr, lightFill, from, to, secs, x, GLOW, tempo: 1.9 - 1.5 * x });
     }
   }
-  path.pointRadius(2.5); // reset default used elsewhere
+
+  for (const { ev, from, to, key } of pts) {
+    const sel = !dk && key === selectedKey;
+    if (from) {
+      const p = projection(from);
+      if (p) {
+        if (!ev.downloadedAt) { // in flight: slow expanding ring
+          const ph = (now / 1800 + (p[0] * 0.013)) % 1;
+          ctx.beginPath(); ctx.arc(p[0], p[1], pr(R_DOT + (dk ? 5 : 10) * ph), 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${LIGHT_GREEN_RGB},${0.5 * (1 - ph)})`; ctx.lineWidth = lw(dk ? 0.9 : 1.4); ctx.stroke();
+        }
+        if (sel) { ctx.beginPath(); ctx.arc(p[0], p[1], pr(8.5), 0, Math.PI * 2); ctx.strokeStyle = LIGHT_GREEN; ctx.lineWidth = lw(1.5); ctx.stroke(); }
+        ctx.beginPath(); ctx.arc(p[0], p[1], pr(R_DOT), 0, Math.PI * 2);
+        ctx.shadowColor = `rgba(${LIGHT_GREEN_RGB},0.6)`; ctx.shadowBlur = GLOW;
+        ctx.fillStyle = lightFill(p[0], p[1], pr(R_DOT)); ctx.fill(); ctx.shadowBlur = 0;
+      }
+    }
+    if (to) {
+      const p = projection(to);
+      if (p) {
+        const side = pr(SQ);
+        if (sel) { const o = pr(12.5); ctx.lineWidth = lw(1.5); ctx.strokeStyle = LIGHT_GREEN; ctx.strokeRect(p[0] - o / 2, p[1] - o / 2, o, o); }
+        // matte sage-olive square (color sampled from the reference swatch) with a lime outline
+        ctx.fillStyle = 'rgba(182,197,155,0.95)'; ctx.fillRect(p[0] - side / 2, p[1] - side / 2, side, side);
+        const ow = lw(dk ? 0.9 : 1.3); // outline drawn inset so the square keeps its overall size
+        ctx.shadowColor = `rgba(${LIGHT_GREEN_RGB},0.6)`; ctx.shadowBlur = GLOW * 0.7;
+        ctx.strokeStyle = `rgba(${LIGHT_GREEN_RGB},0.95)`; ctx.lineWidth = ow;
+        ctx.strokeRect(p[0] - side / 2 + ow / 2, p[1] - side / 2 + ow / 2, side - ow, side - ow); ctx.shadowBlur = 0;
+      }
+    }
+  }
 }
 
 // ---- pan / pinch-zoom, plus two-finger twist-to-spin read from the same
@@ -840,6 +1289,7 @@ const zoomBehavior = d3.zoom()
   .scaleExtent([0.25, 10])
   .on('zoom', (event) => {
     const se = event.sourceEvent;
+    wake();
 
     if (docked) {
       // spin still works while docked; pan/zoom stay fully locked below.
@@ -900,6 +1350,14 @@ d3.select(canvas).call(zoomBehavior);
 canvas.addEventListener('click', (e) => {
   if (transitioning) return;
   const rect = canvas.getBoundingClientRect();
+  // undocked: a tap on a light (circle / square / route) opens its card; with a
+  // card open, a tap on empty map just closes it instead of zooming
+  // (docked view is look-only: a tap there just pops the map out, as before)
+  if (!docked) {
+    const hit = hitTestEvents(e.clientX - rect.left, e.clientY - rect.top);
+    if (hit) { openCard(hit.ev, hit.part, e.clientX - rect.left, e.clientY - rect.top); return; }
+    if (cardEl.classList.contains('open')) { closeCard(); return; }
+  }
   const lonlat = lonLatAtScreenPoint(e.clientX - rect.left, e.clientY - rect.top);
   if (!lonlat) return;
   if (docked) {
@@ -3010,34 +3468,209 @@ function screenPointFor(geo) {
   const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
   return [transform.x + transform.k * rx, transform.y + transform.k * ry];
 }
-function handlePointer(mx, my) {
-  let best = null, bestDist = 16;
+// Nearest light part under a screen point: markers (generous touch radius)
+// win over route lines.
+function distToSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+function hitTestEvents(mx, my) {
+  const MARK_R = 18, LINE_R = 10, LINE_PENALTY = 8;
+  let best = null, bestScore = Infinity;
   for (const ev of events) {
-    for (const [geo, kind] of [[ev.sentGeo, 'sent'], [ev.downloadGeo, 'received']]) {
-      const s = screenPointFor(geo);
-      if (!s) continue;
-      const d = Math.hypot(s[0] - mx, s[1] - my);
-      if (d < bestDist) { bestDist = d; best = { ev, kind, geo }; }
+    const sp = screenPointFor(ev.sentGeo), rp = screenPointFor(ev.downloadGeo);
+    for (const [pt, part] of [[sp, 'sent'], [rp, 'received']]) {
+      if (!pt) continue;
+      const d = Math.hypot(pt[0] - mx, pt[1] - my);
+      if (d < MARK_R && d < bestScore) { bestScore = d; best = { ev, part }; }
+    }
+    if (sp && rp) {
+      const a = project(ev.sentGeo), b = project(ev.downloadGeo), interp = d3.geoInterpolate(a, b);
+      let prev = sp;
+      for (let i = 1; i <= 24; i++) {
+        const q = interp(i / 24), cur = screenPointFor({ lat: q[1], lon: q[0] });
+        if (cur) {
+          const d = distToSeg(mx, my, prev[0], prev[1], cur[0], cur[1]);
+          if (d < LINE_R && d + LINE_PENALTY < bestScore) { bestScore = d + LINE_PENALTY; best = { ev, part: 'route' }; }
+          prev = cur;
+        }
+      }
     }
   }
-  if (best) {
-    const { ev, kind, geo } = best;
-    const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || 'unknown location';
-    let html = `<b>${kind === 'sent' ? 'sent from' : 'received in'}</b> ${place}`;
-    if (ev.deliveryMs != null) {
-      const secs = Math.round(ev.deliveryMs / 1000);
-      html += `<br>delivered in ${secs < 60 ? secs + 's' : Math.round(secs/60) + 'm'}`;
-    } else {
-      html += `<br><span style="color:var(--ember)">in flight…</span>`;
-    }
-    tooltipEl.innerHTML = html;
-    tooltipEl.style.display = 'block';
-    const rect = canvas.getBoundingClientRect();
-    tooltipEl.style.left = Math.min(mx + 14, rect.width - 230) + 'px';
-    tooltipEl.style.top = Math.max(my - 10, 4) + 'px';
-  } else {
-    tooltipEl.style.display = 'none';
+  return best;
+}
+
+// short, friendly place names: "São Paulo, Brazil" (no region / state / country code)
+const COUNTRY_SHORT = { KR: 'Korea', KP: 'North Korea', US: 'USA', GB: 'UK', AE: 'UAE', HK: 'Hong Kong', TR: 'Turkey', TW: 'Taiwan', MO: 'Macao', CZ: 'Czechia' };
+const COUNTRY_ALIAS = { 'south korea': 'Korea', 'republic of korea': 'Korea', 'united states': 'USA', 'united states of america': 'USA', 'united kingdom': 'UK', 'united arab emirates': 'UAE', 'türkiye': 'Turkey' };
+let regionNames = null;
+function countryName(c) {
+  if (!c) return '';
+  c = String(c).trim();
+  if (/^[A-Za-z]{2}$/.test(c)) {
+    const u = c.toUpperCase();
+    if (COUNTRY_SHORT[u]) return COUNTRY_SHORT[u];
+    try { regionNames = regionNames || new Intl.DisplayNames(['en'], { type: 'region' }); return regionNames.of(u) || c; } catch (e) { return c; }
   }
+  return COUNTRY_ALIAS[c.toLowerCase()] || c;
+}
+function placeName(g) {
+  if (!g) return '';
+  const city = (g.city || '').trim(), country = countryName(g.country);
+  if (city && country && city.toLowerCase() !== country.toLowerCase()) return city + ', ' + country;
+  return city || country || 'unknown location';
+}
+// "+5m" / "+40s" / "+3h" / "+2d"
+function fmtDelta(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return '+' + s + 's';
+  if (s < 3600) return '+' + Math.round(s / 60) + 'm';
+  if (s < 86400) return '+' + (s / 3600).toFixed(s < 36000 ? 1 : 0).replace(/\.0$/, '') + 'h';
+  return '+' + Math.round(s / 86400) + 'd';
+}
+const fmtClockDay = (ms) => { const d = new Date(ms); return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + ' ' + d.toLocaleDateString(undefined, { weekday: 'long' }); };
+
+const cardEl = document.getElementById('eventCard');
+let cardAnchor = null; // {part, x, y}: which dot the card hangs off (x,y only used for taps on a route line)
+function renderCard() {
+  const ev = events.find(e => evKey(e) === selectedKey);
+  if (!ev) { closeCard(); return; }
+  const img = document.getElementById('ecImg'), noImg = document.getElementById('ecNoImg');
+  const url = evImageUrl(ev);
+  if (url) {
+    if (img.dataset.src !== url) { img.dataset.src = url; img.src = url; }
+    img.style.display = 'block'; noImg.style.display = 'none';
+    img.onerror = () => { img.style.display = 'none'; noImg.style.display = ''; noImg.textContent = 'image unavailable'; };
+  } else { img.style.display = 'none'; noImg.style.display = ''; noImg.textContent = 'no image'; img.dataset.src = ''; }
+  document.getElementById('ecFrom').textContent = placeName(ev.sentGeo);
+  const toEl = document.getElementById('ecTo'), toMark = document.getElementById('ecToMark');
+  const sentMs = evSentMs(ev), gotMs = toMs(ev.downloadedAt);
+  const dur = ev.deliveryMs != null ? ev.deliveryMs : (sentMs && gotMs ? gotMs - sentMs : null);
+  const mid = [];
+  if (ev.downloadGeo) { toEl.textContent = placeName(ev.downloadGeo); toMark.classList.remove('pending'); }
+  else { toEl.textContent = 'in flight…'; toMark.classList.add('pending'); }
+  if (gotMs && dur != null) mid.push(fmtDelta(dur));
+  if (ev.sentGeo && ev.downloadGeo && project(ev.sentGeo) && project(ev.downloadGeo)) { // sits between the two places: "+2m • 8,000mi"
+    const km = d3.geoDistance(project(ev.sentGeo), project(ev.downloadGeo)) * 6371;
+    mid.push(Math.round(km * 0.621371).toLocaleString() + 'mi');
+  }
+  document.getElementById('ecMid').textContent = mid.join(' • ');
+  const bits = [];
+  if (gotMs) bits.push(fmtClockDay(gotMs));
+  else if (sentMs) bits.push('sent ' + fmtClockDay(sentMs));
+  const meta = document.getElementById('ecMeta');
+  meta.textContent = ''; bits.forEach(t => { const d = document.createElement('div'); d.textContent = t; meta.appendChild(d); });
+}
+// hang the card off the tapped dot (re-run every frame so it follows pan / zoom / spin)
+let lastCardPos = '';
+function positionCard() {
+  if (!selectedKey || !cardEl.classList.contains('open') || !cardAnchor) return;
+  const ev = events.find(e => evKey(e) === selectedKey); if (!ev) return;
+  const cr = canvas.getBoundingClientRect(), pr_ = cardEl.offsetParent.getBoundingClientRect();
+  let pt = cardAnchor.part === 'sent' ? screenPointFor(ev.sentGeo) : cardAnchor.part === 'received' ? screenPointFor(ev.downloadGeo) : null;
+  if (!pt) pt = [cardAnchor.x, cardAnchor.y];
+  const ax = pt[0] + (cr.left - pr_.left), ay = pt[1] + (cr.top - pr_.top);
+  const w = cardEl.offsetWidth, h = cardEl.offsetHeight, GAP = 16, M = 8;
+  // beside the dot that was tapped. Side (right, else left if it'd be cut off) and photo placement (above the
+  // text if the dot is in the lower half of the map, below it if in the upper half) are chosen once when the
+  // card opens and then kept, so nothing jumps around while panning. The TEXT block is what sits level with the dot.
+  if (!cardAnchor.side) {
+    cardAnchor.side = (ax + GAP + w <= pr_.width - M || ax - GAP - w < M) ? 'right' : 'left';
+    cardAnchor.imgAbove = ay > pr_.height / 2;
+    cardEl.style.flexDirection = cardAnchor.imgAbove ? 'column' : 'column-reverse';
+    document.getElementById('ecBody').style.flexDirection = cardAnchor.imgAbove ? 'column-reverse' : 'column'; // the received box always sits next to the photo
+    // photo below the text → left-aligned (an L); photo above the text → right-aligned (a J)
+    cardEl.style.alignItems = document.getElementById('ecBody').style.alignItems = cardAnchor.imgAbove ? 'flex-end' : 'flex-start';
+  }
+  // the box belonging to the tapped dot (sent circle → sent box, received square → received box) sits level with
+  // it and anchors the whole bundle; a tap on a route line just centres the text block on the tap
+  const bodyEl = document.getElementById('ecBody'), tg = cardAnchor.part === 'sent' ? document.getElementById('ecSentGroup') : cardAnchor.part === 'received' ? recvGroup : bodyEl;
+  const textMid = tg.offsetTop + tg.offsetHeight / 2;
+  const left = cardAnchor.side === 'right' ? ax + GAP : ax - GAP - w;
+  const top = ay - textMid; // no vertical clamping: like the sides, the card travels with its dot and slides off the top / bottom edge
+  const k = Math.round(left) + ',' + Math.round(top);
+  if (k !== lastCardPos) { lastCardPos = k; cardEl.style.left = Math.round(left) + 'px'; cardEl.style.top = Math.round(top) + 'px'; }
+}
+// THE REVEAL (deliberately quiet): the photo materializes as a soft grey tone-picture, then the dither
+// resolves out of it. (Blurring a 1-bit dither directly makes a moiré grid and then snaps when it goes
+// crisp, so instead we cross-fade between two clean layers: a smooth, area-averaged grey version of the
+// photo — dark tones transparent, so no dark vignette — and the crisp photo itself.) Everything eases to rest with zero slope, so there is no snap.
+// Drawn on a canvas (repaints reliably on iOS). Tune the two numbers to taste.
+const REVEAL_DELAY = 0, REVEAL_MS = 1250;
+const recvGroup = document.getElementById('ecRecvGroup'), imgWrap = document.getElementById('ecImgWrap'), imgEl = document.getElementById('ecImg'), showCv = document.getElementById('ecShow'), showCtx = showCv.getContext('2d');
+// photos are 4:3 landscape (400x300) or 3:4 portrait (300x400); the box is 128x96 or 96x128 CSS px and resizes
+// itself to match each photo once it has loaded
+let VW = 128, VH = 96;
+const mk = () => document.createElement('canvas');
+const grayCv = mk(), halfCv = mk(), qCv = mk(), midCv = mk();
+let grayFor = '', revealRaf = 0;
+function sizeReveal(w, h) {
+  VW = w; VH = h; imgWrap.style.width = w + 'px'; imgWrap.style.height = h + 'px';
+  showCv.width = w; showCv.height = h; grayCv.width = w; grayCv.height = h;
+  halfCv.width = midCv.width = w / 2; halfCv.height = midCv.height = h / 2; qCv.width = w / 4; qCv.height = h / 4; grayFor = '';
+}
+function fitImgBox() {
+  if (!(imgEl.complete && imgEl.naturalWidth)) return;
+  const w = imgEl.naturalWidth >= imgEl.naturalHeight ? 128 : 96, h = w === 128 ? 96 : 128;
+  if (w !== VW || h !== VH) sizeReveal(w, h);
+}
+imgEl.addEventListener('load', fitImgBox); sizeReveal(128, 96);
+const coverRect = () => { const iw = imgEl.naturalWidth, ih = imgEl.naturalHeight, sc = Math.max(VW / iw, VH / ih), sw = VW / sc, sh = VH / sc; return [(iw - sw) / 2, (ih - sh) / 2, sw, sh]; };
+function buildGray() { // area-average the photo down 4x (two exact 2:1 halvings), then smooth it back up
+  const [sx, sy, sw, sh] = coverRect(), h = halfCv.getContext('2d'), q = qCv.getContext('2d'), m = midCv.getContext('2d'), g = grayCv.getContext('2d');
+  for (const c of [h, q, m, g]) c.imageSmoothingEnabled = true;
+  h.clearRect(0, 0, VW, VH); h.drawImage(imgEl, sx, sy, sw, sh, 0, 0, VW / 2, VH / 2);
+  q.clearRect(0, 0, VW, VH); q.drawImage(halfCv, 0, 0, VW / 2, VH / 2, 0, 0, VW / 4, VH / 4);
+  m.clearRect(0, 0, VW, VH); m.drawImage(qCv, 0, 0, VW / 4, VH / 4, 0, 0, VW / 2, VH / 2);
+  g.clearRect(0, 0, VW, VH); g.drawImage(midCv, 0, 0, VW / 2, VH / 2, 0, 0, VW, VH);
+  try { // dark → transparent: keep only the light tones, as a pale haze (no dark vignette while it forms)
+    const im = g.getImageData(0, 0, VW, VH), d = im.data;
+    for (let i = 0; i < d.length; i += 4) { const lum = (d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11) / 255; d[i] = 246; d[i + 1] = 246; d[i + 2] = 240; d[i + 3] = Math.round(255 * 0.92 * lum * lum); }
+    g.putImageData(im, 0, 0);
+  } catch (e) { /* cross-origin photo: pixels unreadable, so keep the plain grey layer */ }
+  grayFor = imgEl.src;
+}
+const ease01 = (x) => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+function drawReveal(t) { // t: 0 → 1
+  showCtx.globalAlpha = 1; showCtx.clearRect(0, 0, VW, VH);
+  if (!(imgEl.complete && imgEl.naturalWidth)) return;
+  fitImgBox();
+  if (grayFor !== imgEl.src) buildGray();
+  const a = ease01(t / 0.55); recvGroup.style.opacity = a; // the received box arrives with the photo, as one package
+  const sharp = ease01((t - 0.3) / 0.7); // grey tone fades up first; the real photo resolves out of it
+  const [sx, sy, sw, sh] = coverRect();
+  showCtx.imageSmoothingEnabled = true; showCtx.globalAlpha = a; showCtx.drawImage(grayCv, 0, 0);
+  showCtx.imageSmoothingEnabled = false; showCtx.globalAlpha = a * sharp; showCtx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, VW, VH);
+  // the picture comes in as a soft wavefront travelling away from the text: downward if the photo sits below
+  // the text, upward if it sits above (the front is wide and feathered, and has passed everything by ~90 %)
+  const up = !!(cardAnchor && cardAnchor.imgAbove), FW = 0.6, c = ease01(t / 0.9) * (1 + FW), wave = showCtx.createLinearGradient(0, 0, 0, VH);
+  for (let k = 0; k <= 12; k++) { const y = k / 12, dist = up ? 1 - y : y; wave.addColorStop(y, `rgba(0,0,0,${ease01((c - dist) / FW).toFixed(3)})`); }
+  showCtx.globalAlpha = 1; showCtx.globalCompositeOperation = 'destination-in'; showCtx.fillStyle = wave; showCtx.fillRect(0, 0, VW, VH); showCtx.globalCompositeOperation = 'source-over';
+  showCtx.globalAlpha = 1;
+}
+function endReveal() { imgWrap.classList.remove('revealing'); recvGroup.style.opacity = ''; } // only on close — the canvas stays up as the final picture, so there is no hand-off to the <img> (that was the snap)
+function startReveal() {
+  cancelAnimationFrame(revealRaf);
+  if (!evImageUrl(events.find(e => evKey(e) === selectedKey) || {})) { endReveal(); return; }
+  fitImgBox(); imgWrap.classList.add('revealing'); showCtx.clearRect(0, 0, VW, VH); recvGroup.style.opacity = 0;
+  const t0 = performance.now();
+  const step = (now) => {
+    if (!selectedKey) return;
+    const t = (now - t0 - REVEAL_DELAY) / REVEAL_MS;
+    if (t >= 1) { drawReveal(1); recvGroup.style.opacity = ''; if (imgEl.complete && imgEl.naturalWidth) return; } // (keeps trying if a slow photo hasn't arrived yet)
+    if (t >= 0) drawReveal(0.1 + 0.9 * t); // starts 10 % in, skipping the invisible first moments, so something shows on the very next frame
+    revealRaf = requestAnimationFrame(step);
+  };
+  revealRaf = requestAnimationFrame(step);
+}
+function openCard(ev, part, x, y) { const wasSame = selectedKey === evKey(ev) && cardEl.classList.contains('open'); selectedKey = evKey(ev); cardAnchor = { part: part === 'route' ? 'route' : part, x, y }; renderCard(); cardEl.classList.add('open'); lastCardPos = ''; positionCard(); if (!wasSame) startReveal(); }
+function closeCard() { selectedKey = null; cardAnchor = null; cancelAnimationFrame(revealRaf); endReveal(); cardEl.classList.remove('open'); }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCard(); });
+
+function handlePointer(mx, my) {
+  const hit = (docked || in3D) ? null : hitTestEvents(mx, my); // docked view is look-only; tap in first
+  canvas.style.cursor = hit ? 'pointer' : '';
 }
 canvas.addEventListener('mousemove', (e) => {
   const rect = canvas.getBoundingClientRect();
@@ -3046,7 +3679,138 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseleave', () => { tooltipEl.style.display = 'none'; });
 
 // ---- polling, with a real reason shown on failure instead of a vague message ----
+// ============================================================
+// SAMPLE LIGHTS (placeholder until the worker is hooked up): a little
+// simulation that keeps the map alive — lights get "sent", pulse in flight
+// for a few seconds, then land somewhere else and draw their route; the
+// oldest drop off. Photos are procedurally generated landscapes. This is ON
+// by default; add ?live=1 to the URL to use the worker's real events instead.
+// ============================================================
+const USE_MOCK = !new URLSearchParams(location.search).has('live');
+const MOCK_CITIES = [
+  ['New York','NY','US',40.71,-74.01],['Los Angeles','CA','US',34.05,-118.24],['Chicago','IL','US',41.88,-87.63],
+  ['Mexico City','','MX',19.43,-99.13],['Vancouver','BC','CA',49.28,-123.12],['Toronto','ON','CA',43.65,-79.38],
+  ['Bogotá','','CO',4.71,-74.07],['Lima','','PE',-12.05,-77.04],['São Paulo','SP','BR',-23.55,-46.63],
+  ['Buenos Aires','','AR',-34.60,-58.38],['Reykjavik','','IS',64.15,-21.94],['London','England','GB',51.51,-0.13],
+  ['Paris','','FR',48.86,2.35],['Nice','PACA','FR',43.70,7.27],['Berlin','','DE',52.52,13.40],['Rome','','IT',41.90,12.50],
+  ['Cairo','','EG',30.04,31.24],['Lagos','','NG',6.52,3.38],['Nairobi','','KE',-1.29,36.82],['Cape Town','WC','ZA',-33.92,18.42],
+  ['Istanbul','','TR',41.01,28.98],['Dubai','','AE',25.20,55.27],['Mumbai','MH','IN',19.08,72.88],['Delhi','','IN',28.61,77.21],
+  ['Bangkok','','TH',13.76,100.50],['Singapore','','SG',1.35,103.82],['Hong Kong','','HK',22.32,114.17],['Seoul','','KR',37.57,126.98],
+  ['Tokyo','Tokyo','JP',35.68,139.69],['Sydney','NSW','AU',-33.87,151.21],['Auckland','','NZ',-36.85,174.76],['Honolulu','HI','US',21.31,-157.86],
+  ['Anchorage','AK','US',61.22,-149.90],['Moscow','','RU',55.76,37.62],['Tehran','','IR',35.69,51.39],['Jakarta','','ID',-6.21,106.85],
+];
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+// Sample photos: seeded plein-air landscapes (sky, sun, clouds, ridgelines, a lake sometimes,
+// trees and meadow) painted in grey on a tiny canvas, then Atkinson-dithered to pure
+// black & white — the old Macintosh look. Returned as a PNG data: URL (shown pixelated).
+function mockPhoto(seed) {
+  const portrait = mulberry32(seed * 31 + 5)() < 0.4, W = portrait ? 96 : 128, H = portrait ? 128 : 96 /* 4:3 landscape or 3:4 portrait, at the card's photo size in CSS px, so every dither pixel lands on whole device pixels (no grid / moiré) */, r = mulberry32(seed * 9973 + 17), rr = (a, b) => a + (b - a) * r();
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const c = cv.getContext('2d', { willReadFrequently: true });
+  const g = (v) => { v = Math.max(0, Math.min(255, Math.round(v * 255))); return `rgb(${v},${v},${v})`; };
+  const hor = H * rr(0.5, 0.64), sunX = rr(0.18, 0.82) * W, sunY = rr(0.14, 0.38) * H, lake = r() < 0.5;
+  // sky: dark overhead, bright at the horizon
+  let L = c.createLinearGradient(0, 0, 0, hor); L.addColorStop(0, g(rr(0.26, 0.42))); L.addColorStop(1, g(0.95));
+  c.fillStyle = L; c.fillRect(0, 0, W, H);
+  // sun with a wide halo
+  L = c.createRadialGradient(sunX, sunY, 0, sunX, sunY, W * 0.5); L.addColorStop(0, 'rgba(255,255,255,1)'); L.addColorStop(0.12, 'rgba(255,255,255,0.95)'); L.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = L; c.fillRect(0, 0, W, hor);
+  // clouds: stacks of flat overlapping ellipses, lit on top, shaded underneath
+  for (let k = 0, n = 2 + (r() * 3 | 0); k < n; k++) {
+    const cx = rr(0.05, 0.95) * W, cy = rr(0.08, 0.5) * hor, w = rr(14, 30);
+    for (let q = 0; q < 6; q++) {
+      const ex = cx + rr(-w, w), ey = cy + rr(-3, 3), rx = rr(w * 0.35, w * 0.7), ry = rr(2.5, 6);
+      c.fillStyle = g(0.55 + 0.1 * r()); c.beginPath(); c.ellipse(ex, ey + 1.5, rx, ry, 0, 0, 7); c.fill();
+      c.fillStyle = g(0.93 + 0.07 * r()); c.beginPath(); c.ellipse(ex, ey - 1, rx, ry * 0.8, 0, 0, 7); c.fill();
+    }
+  }
+  // far ridges, lighter and flatter the further away (atmospheric haze), each with a lit top edge
+  const ridge = (base, amp, tone, haze) => {
+    const f1 = rr(0.025, 0.06), f2 = rr(0.07, 0.14), p1 = rr(0, 7), p2 = rr(0, 7), ys = [];
+    for (let x = 0; x <= W; x++) ys.push(base - amp * (0.6 * Math.sin(x * f1 + p1) + 0.4 * Math.sin(x * f2 + p2) + 0.3));
+    c.beginPath(); c.moveTo(0, H); ys.forEach((y, x) => c.lineTo(x, y)); c.lineTo(W, H); c.closePath();
+    const gr = c.createLinearGradient(0, base - amp * 1.4, 0, base + amp * 1.2); gr.addColorStop(0, g(tone + haze)); gr.addColorStop(1, g(tone));
+    c.fillStyle = gr; c.fill();
+  };
+  ridge(hor - rr(2, 7), rr(8, 16), 0.58, 0.2);
+  ridge(hor + rr(0, 5), rr(5, 12), 0.42, 0.14);
+  // lake: the sky mirrored, broken by thin ripples
+  if (lake) {
+    const top = hor + rr(3, 8), bot = Math.min(H, top + rr(16, 26));
+    L = c.createLinearGradient(0, top, 0, bot); L.addColorStop(0, g(0.9)); L.addColorStop(1, g(0.6));
+    c.fillStyle = L; c.fillRect(0, top, W, bot - top);
+    for (let y = top + 2; y < bot; y += rr(2.2, 3.6)) { c.fillStyle = g(rr(0.35, 0.6)); const x0 = rr(0, W), w = rr(8, 30); c.fillRect(x0, y, w, 1); }
+  }
+  // foreground meadow, with a bright slope that falls to dark
+  const mTop = (lake ? hor + 30 : hor + rr(10, 20)), meadow = c.createLinearGradient(0, mTop, 0, H);
+  meadow.addColorStop(0, g(0.52)); meadow.addColorStop(1, g(0.14));
+  c.beginPath(); c.moveTo(0, H);
+  const mp = rr(0, 6), ma = rr(3, 7); for (let x = 0; x <= W; x += 2) c.lineTo(x, mTop - ma * Math.sin(x * 0.045 + mp));
+  c.lineTo(W, H); c.closePath(); c.fillStyle = meadow; c.fill();
+  for (let k = 0, n = Math.round(90 * W * H / 9216); k < n; k++) { const x = rr(0, W), y = rr(mTop, H); c.fillStyle = g(rr(0.08, 0.55)); c.fillRect(x, y, 1, rr(1, 3)); } // grass flecks
+  // trees: dark trunk, canopy lit on the sun's side
+  for (let k = 0, n = 1 + (r() * 3 | 0); k < n; k++) {
+    const x = rr(0.06, 0.94) * W, base = rr(mTop + 6, H - 4), h = rr(18, 36) * (H / 96) * (0.7 + (base - mTop) / H), lit = Math.sign(sunX - x) || 1;
+    c.fillStyle = g(0.07); c.fillRect(x - 1, base - h * 0.5, 2, h * 0.5);
+    if (r() < 0.5) { // round-crowned
+      for (let q = 0; q < 7; q++) {
+        const bx = x + rr(-h * 0.28, h * 0.28), by = base - h * rr(0.55, 0.95), br = rr(h * 0.12, h * 0.24);
+        const rg = c.createRadialGradient(bx + lit * br * 0.4, by - br * 0.4, 0, bx, by, br); rg.addColorStop(0, g(0.5)); rg.addColorStop(1, g(0.09));
+        c.fillStyle = rg; c.beginPath(); c.arc(bx, by, br, 0, 7); c.fill();
+      }
+    } else { // conifer: stacked triangles
+      for (let q = 0; q < 4; q++) {
+        const ty = base - h * (0.2 + q * 0.2), tw = h * (0.3 - q * 0.05);
+        const tg = c.createLinearGradient(x - tw * lit, 0, x + tw * lit, 0); tg.addColorStop(0, g(0.42)); tg.addColorStop(1, g(0.08));
+        c.fillStyle = tg; c.beginPath(); c.moveTo(x, ty - h * 0.32); c.lineTo(x - tw, ty); c.lineTo(x + tw, ty); c.closePath(); c.fill();
+      }
+    }
+  }
+  // Atkinson dither → pure black & white
+  const im = c.getImageData(0, 0, W, H), d = im.data, lum = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) lum[i] = d[i * 4] + (r() - 0.5) * 6; // a hint of noise so flat tones don't band
+  const spread = [[1, 0], [2, 0], [-1, 1], [0, 1], [1, 1], [0, 2]];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, old = lum[i], nv = old < 128 ? 0 : 255, err = (old - nv) / 8;
+    lum[i] = nv;
+    for (const [dx, dy] of spread) { const nx = x + dx, ny = y + dy; if (nx >= 0 && nx < W && ny < H) lum[ny * W + nx] += err; }
+  }
+  for (let i = 0; i < W * H; i++) { const v = lum[i] > 127 ? 246 : 16; d[i * 4] = v; d[i * 4 + 1] = v; d[i * 4 + 2] = v - (v > 100 ? 4 : 0); d[i * 4 + 3] = 255; }
+  c.putImageData(im, 0, 0);
+  return cv.toDataURL('image/png');
+}
+let mockSeq = 0;
+const mockGeo = (c) => ({ city: c[0], region: c[1], country: c[2], lat: c[3], lon: c[4] });
+const mockPick = (not) => { let c; do { c = MOCK_CITIES[Math.random() * MOCK_CITIES.length | 0]; } while (c === not); return c; };
+function mockLight(ageMs, inFlightFor) { // ageMs = how long ago it was sent; inFlightFor = null → already delivered
+  const id = ++mockSeq, now = Date.now(), from = mockPick(), ev = {
+    id, sentGeo: mockGeo(from), sentAt: now - ageMs, downloadGeo: null, downloadedAt: null, deliveryMs: null, imageUrl: mockPhoto(id),
+    _from: from, _dueAt: inFlightFor == null ? 0 : now + inFlightFor,
+  };
+  if (inFlightFor == null) mockDeliver(ev, now - ageMs);
+  return ev;
+}
+function mockDeliver(ev, at) { // delivery time is log-uniform 8 s … 36 h so every route looks different (sentAt is back-dated to match)
+  const to = mockPick(ev._from), dur = Math.exp(Math.log(8e3) + Math.random() * (Math.log(36 * 3600e3) - Math.log(8e3)));
+  ev.downloadGeo = mockGeo(to); ev.downloadedAt = at; ev.sentAt = at - dur; ev.deliveryMs = dur; ev._dueAt = 0;
+}
+function startMock() {
+  events = [];
+  for (let i = 0; i < 9; i++) events.push(mockLight((i + 1) * 4 * 60e3 + Math.random() * 120e3, null));
+  events.push(mockLight(6e3, 9e3), mockLight(2e3, 16e3)); // two already in flight
+  let nextSpawn = Date.now() + 7000;
+  emptyEl.style.display = 'none';
+  setInterval(() => {
+    const now = Date.now(); let changed = false;
+    for (const ev of events) if (ev._dueAt && now >= ev._dueAt) { mockDeliver(ev, now); changed = true; }
+    if (now >= nextSpawn) { events.push(mockLight(0, 10e3 + Math.random() * 12e3)); nextSpawn = now + 6000 + Math.random() * 5000; changed = true; }
+    if (events.length > 13) { const i = events.findIndex(e => !e._dueAt); if (i >= 0) { events.splice(i, 1); changed = true; } }
+    if (changed) { events = events.slice(); wake(); if (cardEl.classList.contains('open')) renderCard(); }
+  }, 1000);
+}
+
 async function poll() {
+  if (USE_MOCK) return; // sample lights are driven by startMock() instead
   try {
     const res = await fetch(`${WORKER_BASE_URL}/gallery/events?limit=200`);
     if (!res.ok) {
@@ -3056,6 +3820,8 @@ async function poll() {
     }
     const data = await res.json();
     events = data.events || [];
+    wake();
+    if (cardEl.classList.contains('open')) renderCard();
     emptyEl.style.display = events.length === 0 ? 'flex' : 'none';
     statusEl.textContent = 'live';
     statusEl.classList.add('live'); statusEl.classList.remove('error');
@@ -3066,28 +3832,24 @@ async function poll() {
   }
 }
 
-// polling only runs while the page is actually being watched: never in a
-// hidden tab, and not after IDLE_STOP_MS without any activity, so a tab left
-// open somewhere doesn't keep hitting the worker. Activity (or coming back to
-// the tab) refreshes at once and starts it again
-let pollTimer = null;
-let lastActivity = Date.now();
-function pollingAllowed() {
-  return !document.hidden && Date.now() - lastActivity < IDLE_STOP_MS;
-}
-function schedulePoll() {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(async () => {
-    if (!pollingAllowed()) { pollTimer = null; return; } // stopped; noteActivity() restarts it
-    await poll();
-    schedulePoll();
-  }, POLL_MS);
-}
-function noteActivity() {
-  lastActivity = Date.now();
-  if (pollTimer || document.hidden) return;
-  poll();
-  schedulePoll();
+// IDLE THROTTLE: when the docked map is just sitting there, redraw less often
+// to save battery (~1x/sec if nothing is animating, ~30x/sec while lights
+// animate). Everything that needs smooth frames keeps full rate: any input,
+// spin/momentum, transitions, undocked 2D, and 3D
+// (whose location readout is updated from draw()). Input is caught in the
+// capture phase on document so d3-zoom can't swallow it, and drawing
+// resumes at full rate on the very next frame.
+let lastActivity = performance.now();
+let lastDrawAt = 0;
+const IDLE_AFTER_MS = 1500, IDLE_DRAW_MS = 1000;
+const wake = () => { lastActivity = performance.now(); };
+['pointerdown', 'pointermove', 'pointerup', 'touchstart', 'touchmove', 'touchend',
+ 'mousedown', 'mousemove', 'wheel', 'keydown', 'visibilitychange']
+  .forEach(t => document.addEventListener(t, wake, { capture: true, passive: true }));
+function isIdle(now) {
+  return docked && !in3D && !transitioning && !twist
+    && Math.abs(spinVelocity) <= 0.01
+    && now - lastActivity > IDLE_AFTER_MS;
 }
 
 function tick() {
@@ -3095,7 +3857,12 @@ function tick() {
     rotationGamma += spinVelocity;
     spinVelocity *= 0.976; // friction, decay rate reduced 2.5x from before — spins longer before settling
   }
-  draw();
+  const now = performance.now();
+  // quiet + nothing animating → ~1/sec; quiet but lights are animating (slinky
+  // routes, pulsing rings) → ~30/sec; anything else (touch, spin, undocked, 3D…) → every frame
+  const animating = events.some(ev => project(ev.sentGeo));
+  const gap = !isIdle(now) ? 0 : (animating ? 33 : IDLE_DRAW_MS);
+  if (now - lastDrawAt >= gap) { draw(); lastDrawAt = now; }
   requestAnimationFrame(tick);
 }
 
@@ -3108,12 +3875,9 @@ function tick() {
   ]);
   land = landData; lakes = lakeData; rivers = riverData;
   resize();
+  if (USE_MOCK) startMock();
   await poll();
-  schedulePoll();
-  for (const type of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart']) {
-    window.addEventListener(type, noteActivity, { passive: true });
-  }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) noteActivity(); });
+  setInterval(poll, POLL_MS);
   tick();
 })();
 </script>

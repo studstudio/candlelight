@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="theme-color" content="#15100a">
+<meta name="theme-color" content="#f0be80">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Send to Lamp</title>
@@ -434,8 +434,8 @@
   .btn-save { background: var(--ember); color: #1a1108; }
   .btn-remove { background: transparent; color: var(--fail); font-size: 12px; border: none; margin-top: 10px; padding: 6px; width: 100%; }
 
-/* ===== theme: darkroom ===== */
-/* theme-color: #15100a */
+/* ===== theme: beige ===== */
+/* theme-color: #f0be80 */
 /* DARKROOM — the gallery's dark UI palette (bg #15100a, panel #1d1610, cream text), mono type,
    hairline strokes. Chrome stays quiet and neutral so the photo is the only bright thing on screen.
    Accents only where they mean something: lime = sent/baked, ocean = selected frame/done, sage = crop handles. */
@@ -565,6 +565,62 @@ hr.divider { border-top: 1px solid var(--line); }
 .send-rail:has(.send-btn:not(:disabled)) + .privacy-toggle .privacy-toggle-btn.active { box-shadow: 0 -12px 22px -8px rgba(181, 251, 0, 0.6), 0 -2px 8px -2px rgba(181, 251, 0, 0.5); }
 .send-btn:not(:disabled) { box-shadow: 0 0 28px rgba(181, 251, 0, 0.12), 0 22px 26px -10px rgba(181, 251, 0, 0.3); }
 
+/* ===== BEIGE: same components as Darkroom, gallery land beige for every surface ===== */
+:root {
+  --bg: #f0be80; --bg-elevated: #f6d3a6;
+  --cream: #4a2c1c; --cream-dim: #86533a; --neutral-grey: #744630;
+  --line: rgba(150, 84, 48, 0.5);
+  --success: #4a7a00; --fail: #c4473a;
+}
+html, body { background-color: #f0be80; background-image: none; }
+.pill.active, .layer-tab.active, .privacy-toggle-btn.active { background: #1d1610; border-color: #1d1610; color: #f2e9d8; }
+.mode-btn.active, .frame-tab.active, .boom-btn.on { background: rgba(105, 206, 241, 0.22); border-color: var(--ocean); color: #2d8fb5; }
+.pill.applied { background: transparent; border-color: var(--ocean); color: #2d8fb5; }
+.frame-tab.dragging { box-shadow: 0 4px 12px rgba(74, 40, 22, 0.3); }
+.photo-wrap, .preview-wrap { background: #f0be80; }
+.shader-card canvas { background: #1d1610; }
+.crop-box { border: 1px solid #dca56c; box-shadow: 0 0 0 2000px rgba(240, 190, 128, 0.62); }
+.moire-row input[type=range]::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, rgba(105, 206, 241, 0.7) 0, rgba(105, 206, 241, 0.7) var(--fillpx, 0px), rgba(74, 40, 22, 0.25) var(--fillpx, 0px), rgba(74, 40, 22, 0.25) 100%);
+}
+.moire-row input[type=range]::-webkit-slider-thumb, .opacity-row input[type=range]::-webkit-slider-thumb {
+  background-image: radial-gradient(circle closest-side at 50% 50%, rgba(105, 206, 241, 0.8) 0, rgba(105, 206, 241, 0.8) var(--knobr, -8%), rgba(105, 206, 241, 0) calc(var(--knobr, -8%) + 4%));
+}
+.contact-id, .hold-hint, .privacy-hint { color: rgba(74, 40, 22, 0.5); }
+.send-btn { background: radial-gradient(circle at 35% 30%, rgba(181, 251, 0, 0.42), rgba(181, 251, 0, 0.16) 75%); color: #2f4200; border: 1px solid rgba(110, 160, 0, 0.75); }
+.send-btn:not(:disabled) { box-shadow: 0 0 28px rgba(150, 220, 0, 0.3), 0 22px 26px -10px rgba(150, 220, 0, 0.45); }
+.send-btn:disabled { background: transparent; color: var(--cream-dim); border: 1px solid var(--line); box-shadow: none; }
+.send-rail:has(.send-btn:not(:disabled)) + .privacy-toggle .privacy-toggle-btn.active { box-shadow: 0 -12px 22px -8px rgba(150, 220, 0, 0.75), 0 -2px 8px -2px rgba(150, 220, 0, 0.6); }
+.speed-pop { background: #f6d3a6; box-shadow: 0 10px 26px rgba(74, 40, 22, 0.28); }
+.speed-pop::after { border-color: rgba(74, 40, 22, 0.5); }
+.modal-backdrop { background: rgba(29, 22, 16, 0.45); }
+.modal-sheet { background: #f6d3a6; }
+.modal-sheet input[type=text] { background: #fbf1d6; }
+.btn-save { color: #1d1610; }
+.send-status.success { color: #4a7a00; }
+
+/* ===== round 2 ===== */
+/* still / cycle: border highlight only, no fill */
+.mode-btn.active { background: transparent; border-color: var(--ocean); color: #2d8fb5; }
+
+/* crop handles: half-height rectangles, translucent blue fill, sage outline */
+.crop-box .handle::after { inset: 18px 12px; border-radius: 0; background: rgba(105, 206, 241, 0.42); border: 1px solid var(--sage); }
+
+
+
+
+/* ===== round 3 ===== */
+.mode-btn.active { color: var(--cream-dim); }
+/* handles sit fully inside the crop corners, solid fill */
+.crop-box .handle::after { inset: auto; width: 24px; height: 12px; background: #69cef1; border: 1px solid var(--sage); }
+.crop-box .handle-tl::after { left: 26px; top: 26px; right: auto; bottom: auto; }
+.crop-box .handle-tr::after { right: 26px; top: 26px; left: auto; bottom: auto; }
+.crop-box .handle-bl::after { left: 26px; bottom: 26px; right: auto; top: auto; }
+.crop-box .handle-br::after { right: 26px; bottom: 26px; left: auto; top: auto; }
+
+/* collapse chevrons lead their rows */
+.sec-head .name > .chev { order: -1; margin: 0 9px 0 0; }
+
 </style>
 </head>
 <body>
@@ -677,7 +733,7 @@ hr.divider { border-top: 1px solid var(--line); }
   </div>
   <button class="pill" id="invertBtn">invert</button>
   <button class="pill" id="patternBtn">floyd–steinberg</button>
-  <button class="pill" id="saveImageBtn">save image</button>
+  <button class="pill" id="saveImageBtn">save</button>
 </div>
 
 <div class="shader-panel" id="shaderPanel" style="display:none;">
@@ -1287,7 +1343,13 @@ frameBoomBtn.onclick = () => {
   cycleBoomerang = !cycleBoomerang;
   try { localStorage.setItem('lamp.boomerang', cycleBoomerang ? '1' : '0'); } catch (e) {}
   updateFrameFilmstrip();
-  if (animPlaying) { animSeqPos = 0; startAnimTimer(); }
+  if (animPlaying) {
+    // switch live: stay on the frame currently showing, just change what comes next
+    const seq = playOrder(animFilled.length);
+    const at = seq.indexOf(animCursor);
+    animSeqPos = at >= 0 ? at : 0;
+    startAnimTimer();
+  }
 };
 function updateFrameFilmstrip() {
   frameFilmstrip.innerHTML = '';
@@ -1430,7 +1492,7 @@ function setMode(next) {
   updateAnimControlsVisibility();
   document.getElementById('applyAllBtn').style.display = mode === 'cycle' ? '' : 'none'; // frames only exist in cycle
   document.getElementById('clearAllBtn').style.display = mode === 'cycle' ? '' : 'none';
-  saveImageBtn.textContent = mode === 'cycle' ? 'save frames' : 'save image';
+  saveImageBtn.textContent = 'save';
 
   activeLayerIdx = 0;
   const stack = currentStack();
@@ -1560,7 +1622,7 @@ function setEditLock(on) {
 function lockedHit(e) {
   if (!animPlaying) return;
   const t = e.target;
-  if (!t || !t.closest || t.closest('#animPlayBtn')) return;
+  if (!t || !t.closest || t.closest('#animPlayBtn, #frameBoomBtn')) return; // boomerang toggles live
   // the picture areas are drag surfaces (crop box, tone drag, tap to cycle), so anywhere on them counts;
   // everywhere else only a real control does, so empty space beside a label or button doesn't stop the preview
   if (t.closest('#previewWrap')) return; // the preview only stops on a real drag (see the preview touch handlers)
@@ -1799,8 +1861,10 @@ const SHADER_HEADER = `
 precision highp float;
 uniform vec2 u_res; uniform float u_phase;
 uniform float u_p0; uniform float u_p1; uniform float u_p2; uniform float u_p3; uniform float u_p4; uniform float u_p5;
+uniform sampler2D u_photo;  // the base photo (framed by its crop), for the photo shaders
 uniform vec3 u_touch[16];   // taps/drags: x,y in 0..1 (y up) and the phase they happened at; z < -5 = unused
 const float TAU = 6.2831853;
+float lum(vec2 q){ return dot(texture2D(u_photo, clamp(q, 0.0, 1.0)).rgb, vec3(0.299, 0.587, 0.114)); }
 float hash(vec2 p){ p = fract(p*vec2(5.3983, 5.4427)); p += dot(p.yx, p.xy + vec2(21.5351, 14.3137)); return fract(p.x*p.y*95.4337); }
 float vnoise(vec2 p){
   vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
@@ -2466,6 +2530,217 @@ void main(){
   }
 ];
 
+// ---------- PHOTO SHADERS: your picture is the material ----------
+// These read the current base photo (framed by its crop) as a texture, `u_photo`. The photo travels with the
+// shader layer (layer.shader.src), so switching shaders, cloning frames and baking all keep it.
+const PHOTO_SHADERS = [
+  {
+    id: 'ph_halftone', name: '◐ ● ◑', label: 'photo halftone', photo: true, touch: true,
+    demo: [[0.42, 0.55, 0.1], [0.6, 0.5, 0.3]],
+    params: [
+      { label: 'dot size', min: 4, max: 22, value: 9 }, { label: 'screen angle', min: 0.0, max: 1.0, value: 0.125 },
+      { label: 'contrast', min: 0.4, max: 2.4, value: 1.3 }, { label: 'breathe', min: 0.0, max: 1.0, value: 0.45 },
+      { label: 'touch pinch', min: 0.0, max: 1.0, value: 0.7 }, { label: 'touch fade', min: 0.2, max: 2.0, value: 0.9 } ],
+    code: `
+void main(){
+  vec2 px = gl_FragCoord.xy;
+  float T = u_phase * TAU;
+  float cell = u_p0 * (1.0 + 0.10 * u_p3 * sin(T));
+  float a = u_p1 * TAU + 0.18 * u_p3 * sin(T + 1.3);
+  vec2 c = rot(a) * (px + 3.0 * u_p3 * vec2(sin(T), cos(T)) * cell * 0.15) / cell;
+  vec2 id = floor(c) + 0.5;
+  vec2 f = c - id;
+  vec2 centerPx = rot(-a) * (id * cell);
+  vec2 q = centerPx / u_res;
+  // touches pinch the dots smaller (lighter) in a soft pool that heals over time
+  float pinch = 0.0;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t];
+    if (tc.z < -5.0) continue;
+    float age = u_phase - tc.z;
+    if (age < 0.0) continue;
+    vec2 d = (q - tc.xy) * vec2(u_res.x / u_res.y, 1.0);
+    pinch += exp(-dot(d, d) / 0.012) * exp(-age * (3.0 / u_p5));
+  }
+  float l = lum(q) ;
+  l = clamp((l - 0.5) * u_p2 + 0.5, 0.0, 1.0);
+  l = clamp(l + u_p4 * 0.9 * pinch, 0.0, 1.0);
+  float rad = sqrt(1.0 - l) * 0.78;
+  float aa = 1.2 / cell;
+  float dotv = 1.0 - smoothstep(rad - aa, rad + aa * 0.2, length(f));
+  float g = mix(0.95, 0.06, dotv);
+  gl_FragColor = vec4(vec3(g), 1.0);
+}`
+  },
+  {
+    id: 'ph_topo', name: '≋ ◔ ≋', label: 'photo contours', photo: true, touch: true,
+    demo: [[0.5, 0.5, 0.15]],
+    params: [
+      { label: 'levels', min: 3, max: 26, value: 11 }, { label: 'line weight', min: 0.04, max: 0.5, value: 0.12 },
+      { label: 'flow', min: 0, max: 3, value: 1 }, { label: 'smooth', min: 0.5, max: 6.0, value: 2.2 },
+      { label: 'touch ripple', min: 0.0, max: 1.0, value: 0.7 }, { label: 'wobble', min: 0.0, max: 1.0, value: 0.3 } ],
+    code: `
+float blurLum(vec2 q, float r){
+  vec2 e = r / u_res;
+  return (lum(q) * 2.0 + lum(q + vec2(e.x, 0.0)) + lum(q - vec2(e.x, 0.0)) + lum(q + vec2(0.0, e.y)) + lum(q - vec2(0.0, e.y))
+        + 0.7 * (lum(q + e) + lum(q - e) + lum(q + vec2(e.x, -e.y)) + lum(q + vec2(-e.x, e.y)))) / 7.8;
+}
+void main(){
+  vec2 q = gl_FragCoord.xy / u_res;
+  float T = u_phase * TAU;
+  float asp = u_res.x / u_res.y;
+  // the photo's own brightness is a landscape; lines are its contours, and they slowly wander
+  vec2 w = 0.02 * u_p5 * (vec2(lnoise(q * 3.0, T, 0.0, 1.0), lnoise(q * 3.0 + 7.0, T, 1.5, 1.0)) - 0.5) * 2.0;
+  float l = blurLum(q + w, u_p3 * 2.0);
+  // touches drop rings into the landscape
+  float rings = 0.0;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t];
+    if (tc.z < -5.0) continue;
+    float age = u_phase - tc.z;
+    if (age < 0.0) continue;
+    vec2 d = (q - tc.xy) * vec2(asp, 1.0);
+    float r = length(d);
+    rings += sin(r * 38.0 - age * 40.0) * exp(-r * 5.0) * exp(-age * 2.6);
+  }
+  l += u_p4 * 0.12 * rings;
+  float n = floor(u_p0 + 0.5);
+  float k = floor(u_p2 + 0.5);                       // whole turns of flow per loop, so it loops exactly
+  float s = l * n - u_phase * k;
+  float d = abs(fract(s) - 0.5) * 2.0;               // 0 on a contour, 1 between
+  float wgt = u_p1;
+  float line = 1.0 - smoothstep(wgt - 0.08, wgt + 0.08, d);
+  // darker parts of the photo get a hair of extra weight so the picture still reads
+  float ink = clamp(line * (0.75 + 0.5 * (1.0 - l)), 0.0, 1.0);
+  gl_FragColor = vec4(vec3(mix(0.95, 0.06, ink)), 1.0);
+}`
+  },
+  {
+    id: 'ph_sketch', name: '✎ ⌇ ✎', label: 'photo line boil', photo: true, touch: true,
+    demo: [[0.45, 0.5, 0.1]],
+    params: [
+      { label: 'edge ink', min: 0.5, max: 6.0, value: 3.0 }, { label: 'shading', min: 0.0, max: 1.0, value: 0.55 },
+      { label: 'hatch scale', min: 30, max: 160, value: 78 }, { label: 'boil', min: 0.0, max: 1.0, value: 0.45 },
+      { label: 'touch scribble', min: 0.0, max: 1.0, value: 0.8 }, { label: 'paper tone', min: 0.0, max: 1.0, value: 0.2 } ],
+    code: `
+void main(){
+  vec2 q = gl_FragCoord.xy / u_res;
+  float T = u_phase * TAU;
+  float asp = u_res.x / u_res.y;
+  // scribble pools: where you touched, the pen gets restless and shading gets denser
+  float pool = 0.0;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t];
+    if (tc.z < -5.0) continue;
+    float age = u_phase - tc.z;
+    if (age < 0.0) continue;
+    vec2 d = (q - tc.xy) * vec2(asp, 1.0);
+    pool += exp(-dot(d, d) / 0.03) * exp(-age * 1.6);
+  }
+  pool = clamp(pool, 0.0, 1.0) * u_p4;
+  // line boil: the whole drawing is re-sampled through a wobbling lens that loops
+  float amp = (0.0035 + 0.01 * pool) * (0.3 + 1.4 * u_p3);
+  vec2 wob = amp * (vec2(lnoise(q * 9.0, T, 0.0, 1.4), lnoise(q * 9.0 + 5.0, T, 2.0, 1.4)) - 0.5) * 2.0;
+  vec2 p = q + wob;
+  vec2 e = vec2(1.6) / u_res;
+  float gx = lum(p + vec2(e.x, 0.0)) - lum(p - vec2(e.x, 0.0));
+  float gy = lum(p + vec2(0.0, e.y)) - lum(p - vec2(0.0, e.y));
+  float edge = clamp(length(vec2(gx, gy)) * u_p0 * 2.2, 0.0, 1.0);
+  float l = lum(p);
+  // cross-hatch whose line spacing loops with phase; second pass only in deep shadow
+  float dark = clamp(1.0 - l + 0.4 * pool, 0.0, 1.0) * u_p1;
+  vec2 hp = rot(0.7) * (gl_FragCoord.xy + 4.0 * vec2(sin(T), cos(T)));
+  float h1 = abs(fract(hp.x / (u_res.y / u_p2 * 3.0)) - 0.5) * 2.0;
+  float hatchOn = smoothstep(0.03, 0.12, dark);
+  float hatch1 = (1.0 - smoothstep(dark * 0.9 - 0.06, dark * 0.9 + 0.06, h1)) * hatchOn;
+  vec2 hq = rot(-0.7) * (gl_FragCoord.xy + 4.0 * vec2(cos(T), sin(T)));
+  float h2 = abs(fract(hq.x / (u_res.y / u_p2 * 3.0)) - 0.5) * 2.0;
+  float hatch2 = (1.0 - smoothstep(dark * 0.7 - 0.06, dark * 0.7 + 0.06, h2)) * step(0.55, dark);
+  float ink = clamp(max(edge, max(hatch1, hatch2)), 0.0, 1.0);
+  float paper = 0.95 - 0.18 * u_p5 * (1.0 - l);
+  gl_FragColor = vec4(vec3(mix(paper, 0.06, ink)), 1.0);
+}`
+  },
+  {
+    id: 'ph_smudge', name: '◍ ⌇ ◍', label: 'photo smudge', photo: true, touch: true,
+    demo: [[0.38, 0.45, 0.06], [0.46, 0.5, 0.08], [0.55, 0.52, 0.1], [0.64, 0.5, 0.12]],
+    params: [
+      { label: 'liquid', min: 0.0, max: 1.0, value: 0.35 }, { label: 'brush size', min: 0.4, max: 2.2, value: 1.0 },
+      { label: 'smudge', min: 0.0, max: 1.0, value: 0.75 }, { label: 'swirl', min: 0.0, max: 1.0, value: 0.35 },
+      { label: 'heal', min: 0.2, max: 2.5, value: 0.8 }, { label: 'contrast', min: 0.5, max: 2.0, value: 1.1 } ],
+    code: `
+void main(){
+  vec2 q = gl_FragCoord.xy / u_res;
+  float T = u_phase * TAU;
+  float asp = u_res.x / u_res.y;
+  // the photo, always very slightly alive
+  vec2 disp = 0.012 * u_p0 * (vec2(lnoise(q * 3.2, T, 0.0, 1.0), lnoise(q * 3.2 + 9.0, T, 1.7, 1.0)) - 0.5) * 2.0;
+  disp += 0.006 * u_p0 * vec2(sin(q.y * 14.0 + T), cos(q.x * 12.0 - T));
+  vec2 prev = vec2(-9.0); float prevZ = -9.0;
+  float s2 = 0.014 * u_p1 * u_p1;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t];
+    if (tc.z < -5.0) { continue; }
+    float age = u_phase - tc.z;
+    if (age >= 0.0) {
+      vec2 d = (q - tc.xy) * vec2(asp, 1.0);
+      float dd = dot(d, d);
+      float w = exp(-dd / s2) * exp(-age * (2.2 / u_p4));
+      // drag direction from the touch before it (same stroke), else the finger just presses outward
+      bool stroke = prevZ > -5.0 && abs(tc.z - prevZ) < 0.12 && length(tc.xy - prev) < 0.25;
+      vec2 dir = stroke ? (tc.xy - prev) * 6.0 : normalize(d + 1e-4) * 0.06;
+      disp -= dir * w * u_p2 * 0.75;
+      disp += vec2(-d.y, d.x) / asp * w * u_p3 * 1.6;
+    }
+    prev = tc.xy; prevZ = tc.z;
+  }
+  vec3 col = texture2D(u_photo, clamp(q + disp, 0.0, 1.0)).rgb;
+  float l = dot(col, vec3(0.299, 0.587, 0.114));
+  l = clamp((l - 0.5) * u_p5 + 0.5, 0.0, 1.0);
+  gl_FragColor = vec4(vec3(l), 1.0);
+}`
+  },
+  {
+    id: 'ph_dust', name: '∴ ⋰ ∴', label: 'photo dust', photo: true, touch: true,
+    demo: [[0.5, 0.5, 0.0]],
+    params: [
+      { label: 'grain size', min: 1.0, max: 5.0, value: 2.0 }, { label: 'scatter', min: 0.0, max: 1.0, value: 0.55 },
+      { label: 'contrast', min: 0.5, max: 2.5, value: 1.4 }, { label: 'flicker', min: 1, max: 8, value: 3 },
+      { label: 'touch focus', min: 0.0, max: 1.0, value: 0.85 }, { label: 'focus fade', min: 0.2, max: 2.5, value: 1.0 } ],
+    code: `
+void main(){
+  vec2 px = gl_FragCoord.xy;
+  vec2 q = px / u_res;
+  float T = u_phase * TAU;
+  float asp = u_res.x / u_res.y;
+  // the picture assembles from scattered dust at mid-loop and blows apart again at the ends
+  float loose = u_p1 * (0.5 - 0.5 * cos(T));
+  loose = u_p1 - loose;                               // 0 = sharp (mid loop), u_p1 at the loop's ends
+  float focus = 0.0;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t];
+    if (tc.z < -5.0) continue;
+    float age = u_phase - tc.z;
+    if (age < 0.0) continue;
+    vec2 d = (q - tc.xy) * vec2(asp, 1.0);
+    focus += exp(-dot(d, d) / 0.035) * exp(-age * (2.0 / u_p5));
+  }
+  loose *= 1.0 - clamp(focus * u_p4, 0.0, 1.0);
+  vec2 cellId = floor(px / u_p0);
+  vec2 jitter = (vec2(hash(cellId + 3.1), hash(cellId + 8.7)) - 0.5) * 2.0;
+  vec2 drift = jitter * loose * 0.16 + 0.02 * loose * vec2(lnoise(q * 5.0, T, 0.0, 1.0), lnoise(q * 5.0 + 4.0, T, 2.0, 1.0)) ;
+  float l = lum(clamp(q + drift, 0.0, 1.0));
+  l = clamp((l - 0.5) * u_p2 + 0.5, 0.0, 1.0);
+  // stipple: a fresh noise threshold every flicker step (whole steps per loop, so it loops)
+  float stepN = floor(u_phase * floor(u_p3 + 0.5) * 4.0);
+  float th = hash(cellId + vec2(13.0 * stepN, 7.0 * stepN));
+  float ink = step(th, 1.0 - l);
+  gl_FragColor = vec4(vec3(mix(0.95, 0.06, ink)), 1.0);
+}`
+  }
+];
+SHADERS.unshift(...PHOTO_SHADERS);   // up front, so they're the first thing in the picker
+
 const glState = { gl: null, canvas: null, programs: {}, buf: null, failed: false, v2: false, lastError: '', noiseTex: null };
 function ensureGL() {
   if (glState.gl || glState.failed) return glState.gl;
@@ -2505,7 +2780,7 @@ function getShaderProgram(preset) {
   } catch (err) { glState.lastError = String(err.message || err); console.warn('shader "' + preset.id + '" failed —', glState.lastError); return null; }
 }
 // draws a preset at (params, phase) into the shared GL canvas
-function drawShader(preset, paramValues, phase, touches) {
+function drawShader(preset, paramValues, phase, touches, photo) {
   const gl = ensureGL(); if (!gl) return false;
   const prog = getShaderProgram(preset); if (!prog) return false;
   gl.useProgram(prog);
@@ -2523,9 +2798,59 @@ function drawShader(preset, paramValues, phase, touches) {
   if (tl) gl.uniform3fv(tl, tv);
   glState.curTouches = touches || [];
   if (preset.st) setShadertoyUniforms(gl, prog, paramValues, phase);
+  else if (preset.photo) bindPhotoTexture(gl, prog, photo || samplePhoto());
   gl.viewport(0, 0, PANEL_W, PANEL_H);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   return true;
+}
+
+
+// ----- photo texture for the photo shaders -----
+const photoTexCache = new WeakMap();   // canvas -> GL texture (a photo canvas never changes once made)
+function bindPhotoTexture(gl, prog, canvas) {
+  let tex = photoTexCache.get(canvas);
+  if (!tex || tex.gl !== gl) {
+    tex = gl.createTexture(); tex.gl = gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    photoTexCache.set(canvas, tex);
+  }
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(gl.getUniformLocation(prog, 'u_photo'), 0);
+}
+// stand-in picture (a lit sphere over a horizon) for when there's no photo yet
+let samplePhotoCanvas = null;
+function samplePhoto() {
+  if (samplePhotoCanvas) return samplePhotoCanvas;
+  const c = newShaderCanvas(), x = c.getContext('2d');
+  let g = x.createLinearGradient(0, 0, 0, PANEL_H);
+  g.addColorStop(0, '#d8d8d8'); g.addColorStop(0.62, '#7c7c7c'); g.addColorStop(0.63, '#303030'); g.addColorStop(1, '#101010');
+  x.fillStyle = g; x.fillRect(0, 0, PANEL_W, PANEL_H);
+  g = x.createRadialGradient(PANEL_W * 0.42, PANEL_H * 0.4, 8, PANEL_W * 0.5, PANEL_H * 0.5, 110);
+  g.addColorStop(0, '#fafafa'); g.addColorStop(0.55, '#a0a0a0'); g.addColorStop(1, '#2a2a2a');
+  x.fillStyle = g; x.beginPath(); x.arc(PANEL_W * 0.5, PANEL_H * 0.5, 100, 0, Math.PI * 2); x.fill();
+  x.fillStyle = '#0c0c0c'; x.fillRect(PANEL_W * 0.08, PANEL_H * 0.7, PANEL_W * 0.18, PANEL_H * 0.3);
+  x.fillRect(PANEL_W * 0.78, PANEL_H * 0.6, PANEL_W * 0.12, PANEL_H * 0.4);
+  samplePhotoCanvas = c; return c;
+}
+// the picture a photo shader should read: the base photo as framed by its crop (or the photo a
+// shader base is already carrying). Returns null when there's nothing yet.
+function currentPhotoSource() {
+  const base = currentStack()[0];
+  if (!base) return null;
+  if (base.shader) return base.shader.photo || null;
+  if (!base.img) return null;
+  const c = newShaderCanvas(), x = c.getContext('2d');
+  const sx = (base.box.left - base.coverX0) / base.coverScale, sy = (base.box.top - base.coverY0) / base.coverScale;
+  x.drawImage(base.img, sx, sy, base.box.width / base.coverScale, base.box.height / base.coverScale, 0, 0, PANEL_W, PANEL_H);
+  return c;
 }
 
 // ---------- Shadertoy import ----------
@@ -2635,18 +2960,19 @@ function shadertoyFromApi(json, sid) {
 function shaderPreset(id) { return SHADERS.find(s => s.id === id); }
 function renderShaderLayer(layer) {
   const preset = shaderPreset(layer.shader.id);
-  if (!preset || !drawShader(preset, layer.shader.params, layer.shader.phase, layer.shader.touches)) return false;
+  if (!preset || !drawShader(preset, layer.shader.params, layer.shader.phase, layer.shader.touches, layer.shader.photo)) return false;
   layer.img.getContext('2d').drawImage(glState.canvas, 0, 0);
   return true;
 }
 function newShaderCanvas() { const c = document.createElement('canvas'); c.width = PANEL_W; c.height = PANEL_H; return c; }
 
-function makeShaderLayer(presetId) {
+function makeShaderLayer(presetId, photo) {
   const preset = shaderPreset(presetId);
   const layer = makeDefaultLayerParams();
   layer.img = newShaderCanvas();
   layer.naturalW = PANEL_W; layer.naturalH = PANEL_H;
   layer.shader = { id: presetId, params: preset.params.map(p => p.value), phase: preset.phase ?? 0.25 };
+  if (photo) layer.shader.photo = photo;   // the picture travels with the shader, whatever shader it becomes
   renderShaderLayer(layer);
   const { cw, ch } = measureContainer();
   placeLayerImage(layer, cw, ch);
@@ -2659,8 +2985,8 @@ function makeShaderLayer(presetId) {
 // layer needs its own canvas or editing one copy's time would change the other
 function cloneLayer(layer) {
   if (!layer) return null;
-  const clone = JSON.parse(JSON.stringify(layer, (k, v) => k === 'img' ? undefined : v));
-  if (layer.shader) { clone.img = newShaderCanvas(); renderShaderLayer(clone); }
+  const clone = JSON.parse(JSON.stringify(layer, (k, v) => (k === 'img' || k === 'photo') ? undefined : v));
+  if (layer.shader) { clone.img = newShaderCanvas(); if (layer.shader.photo) clone.shader.photo = layer.shader.photo; renderShaderLayer(clone); }
   else clone.img = layer.img;
   return clone;
 }
@@ -2671,7 +2997,9 @@ function addShaderLayer(presetId) {
   if (animPlaying) stopAnimPreview();
   stopShaderPlay();
   snapshotActiveLayerState();
-  const layer = makeShaderLayer(presetId);
+  const wantsPhoto = !!shaderPreset(presetId).photo;
+  const photo = currentPhotoSource();
+  const layer = makeShaderLayer(presetId, photo);
   const stack = currentStack();
   const idx = 0; // the shader button always makes the shader the new base; overlays stay as they are
   stack[idx] = layer;
@@ -2683,19 +3011,30 @@ function addShaderLayer(presetId) {
   render();
   updateSendState();
   if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false); // a new base opens the crop area, like a photo does
+  if (wantsPhoto && !photo) flashStatus('no photo yet, so this is using a sample. add a photo first, then pick it again', 'success');
 }
 
 // ----- picker sheet -----
 const shaderBackdrop = document.getElementById('shaderBackdrop');
 const shaderGrid = document.getElementById('shaderGrid');
 let shaderStripKey = '';
+let thumbPhoto = null;
+function drawShaderThumb(preset, thumb) {
+  const ph = preset.photo ? (currentPhotoSource() || null) : null;
+  if (preset.photo) thumbPhoto = ph;
+  if (drawShader(preset, preset.params.map(p => p.value), preset.touch ? 0.5 : (preset.phase ?? 0.25), preset.demo, ph)) thumb.getContext('2d').drawImage(glState.canvas, 0, 0, 200, 150);
+}
+function refreshPhotoThumbs() { // the picture may have changed since the cards were drawn
+  shaderGrid.querySelectorAll('canvas[data-pid]').forEach(c => { const p = shaderPreset(c.dataset.pid); if (p && p.photo) drawShaderThumb(p, c); });
+}
 function buildShaderStrip() {
   shaderGrid.innerHTML = '';
   SHADERS.forEach(preset => {
     const card = document.createElement('button');
     card.type = 'button'; card.className = 'shader-card';
     const thumb = document.createElement('canvas'); thumb.width = 200; thumb.height = 150;
-    if (drawShader(preset, preset.params.map(p => p.value), preset.touch ? 0.5 : (preset.phase ?? 0.25), preset.demo)) thumb.getContext('2d').drawImage(glState.canvas, 0, 0, 200, 150);
+    thumb.dataset.pid = preset.id;
+    drawShaderThumb(preset, thumb);
     const label = document.createElement('span'); label.textContent = preset.name; card.title = preset.label || preset.name; card.setAttribute('aria-label', preset.label || preset.name);
     card.appendChild(thumb); card.appendChild(label);
     card.onclick = () => { shaderBackdrop.classList.remove('open'); addShaderLayer(preset.id); };
@@ -2711,6 +3050,7 @@ function buildShaderStrip() {
 function openShaderSheet() {
   if (!ensureGL()) { flashStatus("shaders need WebGL, which isn't available here", 'fail'); return; }
   if (shaderStripKey !== SHADERS.map(p => p.id).join(',')) buildShaderStrip(); // thumbnails are drawn once, then reused
+  refreshPhotoThumbs();
   shaderGrid.scrollLeft = 0;
   shaderBackdrop.classList.add('open');
 }
@@ -2809,11 +3149,11 @@ let shaderPlayTimer = null, shaderHold = 0;
 const shaderTouchRow = document.getElementById('shaderTouchRow');
 const shaderTouchBtn = document.getElementById('shaderTouchBtn');
 const shaderTouchCount = document.getElementById('shaderTouchCount');
-let shaderTouchMode = false, shaderTouchLast = null;
+let shaderTouchMode = false, shaderTouchLast = null, lastTouchPresetId = null;
 function setShaderTouchMode(on) {
   shaderTouchMode = !!on;
   shaderTouchBtn.classList.toggle('on', shaderTouchMode);
-  shaderTouchBtn.textContent = shaderTouchMode ? 'touching…' : 'touch the preview';
+  shaderTouchBtn.textContent = shaderTouchMode ? 'touching…' : 'touch off';
   previewWrap.classList.toggle('touch-on', shaderTouchMode);
 }
 function updateTouchCount() {
@@ -2870,7 +3210,8 @@ function updateShaderPanel() {
   shaderBakeBtn.classList.toggle('show', mode === 'cycle');
   setBaked(false);
   shaderTouchRow.style.display = preset.touch ? 'flex' : 'none';
-  if (!preset.touch) setShaderTouchMode(false);
+  if (!preset.touch) { setShaderTouchMode(false); lastTouchPresetId = null; }
+  else if (lastTouchPresetId !== preset.id) { lastTouchPresetId = preset.id; setShaderTouchMode(true); } // touch shaders start ready to touch; the button turns it off
   updateTouchCount();
 }
 let shaderSrcPending = false;
@@ -4374,6 +4715,7 @@ document.fonts.ready.then(() => { if (naturalW) render(); });
   window.addEventListener('load', all);
   all();
 })();
+
 
 </script>
 </body>

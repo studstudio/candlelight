@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="theme-color" content="#f0be80">
+<meta name="theme-color" content="#f2c183">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Send to Lamp</title>
@@ -435,7 +435,7 @@
   .btn-remove { background: transparent; color: var(--fail); font-size: 12px; border: none; margin-top: 10px; padding: 6px; width: 100%; }
 
 /* ===== theme: beige ===== */
-/* theme-color: #f0be80 */
+/* theme-color: #f2c183 */
 /* DARKROOM — the gallery's dark UI palette (bg #15100a, panel #1d1610, cream text), mono type,
    hairline strokes. Chrome stays quiet and neutral so the photo is the only bright thing on screen.
    Accents only where they mean something: lime = sent/baked, ocean = selected frame/done, sage = crop handles. */
@@ -567,19 +567,19 @@ hr.divider { border-top: 1px solid var(--line); }
 
 /* ===== BEIGE: same components as Darkroom, gallery land beige for every surface ===== */
 :root {
-  --bg: #f0be80; --bg-elevated: #f6d3a6;
+  --bg: #f2c183; --bg-elevated: #f7d6ab;
   --cream: #4a2c1c; --cream-dim: #86533a; --neutral-grey: #744630;
   --line: rgba(150, 84, 48, 0.5);
   --success: #4a7a00; --fail: #c4473a;
 }
-html, body { background-color: #f0be80; background-image: none; }
+html, body { background-color: #f2c183; background-image: none; }
 .pill.active, .layer-tab.active, .privacy-toggle-btn.active { background: #1d1610; border-color: #1d1610; color: #f2e9d8; }
 .mode-btn.active, .frame-tab.active, .boom-btn.on { background: rgba(105, 206, 241, 0.22); border-color: var(--ocean); color: #2d8fb5; }
 .pill.applied { background: transparent; border-color: var(--ocean); color: #2d8fb5; }
 .frame-tab.dragging { box-shadow: 0 4px 12px rgba(74, 40, 22, 0.3); }
-.photo-wrap, .preview-wrap { background: #f0be80; }
+.photo-wrap, .preview-wrap { background: #f2c183; }
 .shader-card canvas { background: #1d1610; }
-.crop-box { border: 1px solid #dca56c; box-shadow: 0 0 0 2000px rgba(240, 190, 128, 0.62); }
+.crop-box { border: 1px solid #dfa86f; box-shadow: 0 0 0 2000px rgba(242, 193, 131, 0.62); }
 .moire-row input[type=range]::-webkit-slider-runnable-track {
   background: linear-gradient(to right, rgba(105, 206, 241, 0.7) 0, rgba(105, 206, 241, 0.7) var(--fillpx, 0px), rgba(74, 40, 22, 0.25) var(--fillpx, 0px), rgba(74, 40, 22, 0.25) 100%);
 }
@@ -591,10 +591,10 @@ html, body { background-color: #f0be80; background-image: none; }
 .send-btn:not(:disabled) { box-shadow: 0 0 28px rgba(150, 220, 0, 0.3), 0 22px 26px -10px rgba(150, 220, 0, 0.45); }
 .send-btn:disabled { background: transparent; color: var(--cream-dim); border: 1px solid var(--line); box-shadow: none; }
 .send-rail:has(.send-btn:not(:disabled)) + .privacy-toggle .privacy-toggle-btn.active { box-shadow: 0 -12px 22px -8px rgba(150, 220, 0, 0.75), 0 -2px 8px -2px rgba(150, 220, 0, 0.6); }
-.speed-pop { background: #f6d3a6; box-shadow: 0 10px 26px rgba(74, 40, 22, 0.28); }
+.speed-pop { background: #f7d6ab; box-shadow: 0 10px 26px rgba(74, 40, 22, 0.28); }
 .speed-pop::after { border-color: rgba(74, 40, 22, 0.5); }
 .modal-backdrop { background: rgba(29, 22, 16, 0.45); }
-.modal-sheet { background: #f6d3a6; }
+.modal-sheet { background: #f7d6ab; }
 .modal-sheet input[type=text] { background: #fbf1d6; }
 .btn-save { color: #1d1610; }
 .send-status.success { color: #4a7a00; }

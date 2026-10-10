@@ -57,7 +57,7 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 ## TEG voltage monitor (`teg_monitor.html`)
 
 - Wiring: TEG + to A0 (GPIO36), TEG - to the common GND rail (shared with the FireBeetle GND and the button).
-- `tegTask` (in `main.cpp`) listens on USB serial. The page sends `TEG ON` every 3 s while connected; while those keep coming the lamp prints `TEG,<mV>` every 1 s (average of 3 calibrated `analogReadMilliVolts` reads, 11 dB attenuation: about 0.1 to 3.1 V, reads 0 below ~100 mV) and **does not sleep** (it stays in the idle window, buttons still work). `TEG OFF` (sent on Disconnect) or 10 s without a heartbeat ends it, and the lamp sleeps after the usual 30 s idle.
+- `tegTask` (in `main.cpp`) listens on USB serial. The page sends `TEG ON` every 3 s while connected; while those keep coming the lamp prints `TEG,<mV>` every 250 ms (average of 3 calibrated `analogReadMilliVolts` reads, 11 dB attenuation: about 0.1 to 3.1 V, reads 0 below ~100 mV) and **does not sleep** (it stays in the idle window, buttons still work). `TEG OFF` (sent on Disconnect) or 10 s without a heartbeat ends it, and the lamp sleeps after the usual 30 s idle.
 - The page reads only `TEG,` lines and ignores the rest of the log. If the lamp is asleep when the page connects, tap NEXT to wake it.
 - Keep the TEG under 3.3 V at the pin (the page warns at 2.8 V).
 

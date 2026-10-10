@@ -1369,12 +1369,12 @@ void saveSeenFlags() {
 //
 // TEG + on A0 (GPIO36, ADC1, so it reads fine with WiFi on), TEG - on GND.
 // The monitor page sends "TEG ON" every few seconds while it is connected;
-// while those keep coming the lamp prints "TEG,<millivolts>" once a second
+// while those keep coming the lamp prints "TEG,<millivolts>" 4 times a second
 // and stays awake instead of sleeping. "TEG OFF", or 10 s without a
 // heartbeat, ends it. The page ignores every other log line.
 
 const int TEG_PIN = A0;                     // GPIO36, input only
-const uint32_t TEG_SAMPLE_MS = 1000;        // one printed reading per this
+const uint32_t TEG_SAMPLE_MS = 250;         // one printed reading per this (4 a second)
 const uint32_t TEG_HEARTBEAT_MS = 10000;    // monitoring ends this long after the page's last "TEG ON"
 volatile uint32_t tegLastHeartbeat = 0;     // millis() of the last "TEG ON" (0 = not monitoring)
 

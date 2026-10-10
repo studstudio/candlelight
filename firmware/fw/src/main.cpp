@@ -13,6 +13,9 @@
 #include <esp_wifi.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
+#include <esp32/ulp.h>            // [PROTOTYPE-ONLY: LTC4150] the three ULP headers are only for the coulomb counter
+#include <soc/rtc_io_reg.h>
+#include <soc/rtc_cntl_reg.h>
 #include <qrcode.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include "epd_png.h"
@@ -56,6 +59,99 @@ const bool FULL_REFRESH_ON_WAKE = false;                     // set true if part
 const int MAX_IMAGES = 12;                // most images the device keeps at once
 const char* MANIFEST_PATH = "/manifest.json";
 const char* TMP_PATH = "/tmp.png";
+
+// ---------- coulomb counter (LTC4150 on the pack wire) ----------
+// [PROTOTYPE-ONLY: LTC4150] bench measurement only; the shipping lamp has no LTC4150.
+// Remove this whole section and every other line tagged with it before shipping:
+//   grep -rn PROTOTYPE-ONLY firmware/ candlelight-worker/
+//
+// The LTC4150 latches INT low each time a fixed charge has passed through its
+// sense resistor, with the direction latched on POL, and holds them until CLR
+// is pulsed low. CLR must NOT be tied to INT (that makes ~1 us pulses the ULP
+// can't see). The ULP coprocessor polls INT every COUL_POLL_US, also in deep
+// sleep, so the main CPU never wakes for a pulse: when INT is low it reads POL,
+// bumps one of two counters in RTC slow memory and pulses CLR. The main CPU
+// reads the counters whenever it's awake (the ULP keeps running) and keeps
+// 32-bit totals; they start at 0 on a real power-on.
+//
+// Wiring: INT -> D3 (GPIO26), POL -> D4 (GPIO27), CLR -> A4 (GPIO15),
+// VIO -> 3V3, GND -> common GND, SHDN high. INT and POL use the ESP32's pull-ups.
+
+const gpio_num_t COUL_INT = GPIO_NUM_26;    // D3
+const gpio_num_t COUL_POL = GPIO_NUM_27;    // D4
+const gpio_num_t COUL_CLR = GPIO_NUM_15;    // A4
+const uint32_t COUL_POLL_US = 100000;       // the LTC4150 pulses at most ~1.6 times a second, so 10 polls a second catch every one
+const float COUL_MAH_PER_TICK = 0.1707f;    // 1 / (32.55 Hz/V * 0.05 ohm) = 0.6144 C. Other sense resistor: 0.008533 / ohms
+const bool COUL_POL_HIGH_IS_CHARGE = true;  // POL high = current into the pack (pack on the chip's SENSE+ side); flip if they come out swapped
+const int COUL_SLOT_A = 0, COUL_SLOT_B = 1; // ULP counters: [0] POL high, [1] POL low (16 bits each)
+const int COUL_PROG = 8;                    // program loads here, after the counters (words)
+
+RTC_DATA_ATTR uint32_t rtcCoulMagic = 0;
+RTC_DATA_ATTR uint16_t rtcCoulSeenA = 0, rtcCoulSeenB = 0;  // ULP counter values already added to the totals
+RTC_DATA_ATTR uint32_t rtcCoulIn = 0, rtcCoulOut = 0;       // ticks into / out of the pack since power-on
+portMUX_TYPE coulMux = portMUX_INITIALIZER_UNLOCKED;
+
+void coulombBegin(bool wokeFromSleep) {
+  if (rtcCoulMagic != 0xC0170150 || esp_reset_reason() == ESP_RST_POWERON) {
+    RTC_SLOW_MEM[COUL_SLOT_A] = 0;
+    RTC_SLOW_MEM[COUL_SLOT_B] = 0;
+    rtcCoulSeenA = rtcCoulSeenB = 0;
+    rtcCoulIn = rtcCoulOut = 0;
+    rtcCoulMagic = 0xC0170150;
+  }
+  if (wokeFromSleep) return;  // the ULP has been running all along; reloading it could drop a pulse
+
+  for (gpio_num_t p : { COUL_INT, COUL_POL }) {
+    rtc_gpio_init(p);
+    rtc_gpio_set_direction(p, RTC_GPIO_MODE_INPUT_ONLY);
+    rtc_gpio_pullup_en(p);
+    rtc_gpio_pulldown_dis(p);
+  }
+  rtc_gpio_init(COUL_CLR);
+  rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(COUL_CLR, 1);
+
+  const int intBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_INT);
+  const int polBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_POL);
+  const int clrRtc = rtc_io_number_get(COUL_CLR);
+  enum { L_DONE, L_LOW, L_CLEAR };
+  const ulp_insn_t prog[] = {
+    I_MOVI(R3, 0),                                   // R3 = the counters' base address
+    I_RD_REG(RTC_GPIO_IN_REG, intBit, intBit),       // R0 = INT
+    M_BGE(L_DONE, 1),                                // high: nothing latched
+    I_RD_REG(RTC_GPIO_IN_REG, polBit, polBit),       // R0 = POL, latched with INT
+    M_BL(L_LOW, 1),
+    I_LD(R1, R3, COUL_SLOT_A), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_A),
+    M_BX(L_CLEAR),
+    M_LABEL(L_LOW),
+    I_LD(R1, R3, COUL_SLOT_B), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_B),
+    M_LABEL(L_CLEAR),                                // CLR low >= 20 us releases INT and POL
+    I_WR_REG(RTC_GPIO_OUT_W1TC_REG, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, 1),
+    I_DELAY(400),                                    // ~50 us at 8 MHz
+    I_WR_REG(RTC_GPIO_OUT_W1TS_REG, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, 1),
+    M_LABEL(L_DONE),
+    I_HALT(),
+  };
+  size_t size = sizeof(prog) / sizeof(ulp_insn_t);
+  CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // a soft reset can leave the old program ticking
+  esp_err_t err = ulp_process_macros_and_load(COUL_PROG, prog, &size);
+  if (err == ESP_OK) {
+    ulp_set_wakeup_period(0, COUL_POLL_US);
+    err = ulp_run(COUL_PROG);
+  }
+  Serial.printf("Coulomb counter: ULP %s\n", err == ESP_OK ? "running" : esp_err_to_name(err));
+}
+
+// adds what the ULP counted since the last call to the totals
+void coulombPoll() {
+  uint16_t a = RTC_SLOW_MEM[COUL_SLOT_A] & 0xFFFF, b = RTC_SLOW_MEM[COUL_SLOT_B] & 0xFFFF;
+  portENTER_CRITICAL(&coulMux);
+  uint16_t da = a - rtcCoulSeenA, db = b - rtcCoulSeenB;  // 16-bit wrap is fine: never 65 k pulses between reads
+  rtcCoulSeenA = a; rtcCoulSeenB = b;
+  rtcCoulIn += COUL_POL_HIGH_IS_CHARGE ? da : db;
+  rtcCoulOut += COUL_POL_HIGH_IS_CHARGE ? db : da;
+  portEXIT_CRITICAL(&coulMux);
+}
 
 // manifest.json is an array, oldest first, one entry per stored image:
 //   { "id": itemId, "sentAt": ms epoch, "geo": { city, region, country, lat, lon, ... },
@@ -757,7 +853,10 @@ SyncResult syncBundle(int& added) {
   bool tank = psramFound();
   uint32_t tGet = millis();
   long bodyLen;
-  int code = rawRequest(client, "GET", String("/lamp/") + LAMP_ID + "/sync", "", bodyLen);
+  // [PROTOTYPE-ONLY: LTC4150] the coulomb counter's totals ride along on the sync request; shipping: plain "/lamp/<id>/sync"
+  coulombPoll();
+  String syncPath = String("/lamp/") + LAMP_ID + "/sync?cin=" + rtcCoulIn + "&cout=" + rtcCoulOut + "&mpt=" + String(COUL_MAH_PER_TICK, 6);
+  int code = rawRequest(client, "GET", syncPath, "", bodyLen);
   Serial.printf("Request to response headers %u ms (WiFi signal %d dBm)\n", (unsigned)(millis() - tGet), (int)WiFi.RSSI());
   if (code != 200) {
     Serial.printf("Bundle sync: HTTP %d\n", code);
@@ -1393,7 +1492,7 @@ uint32_t readTegMv() {
 void tegTask(void*) {
   analogSetPinAttenuation(TEG_PIN, ADC_11db);
   String cmd;
-  uint32_t lastSample = 0;
+  uint32_t lastSample = 0, lastCoul = 0;  // lastCoul: [PROTOTYPE-ONLY: LTC4150]
   for (;;) {
     while (Serial.available()) {
       char c = Serial.read();
@@ -1415,6 +1514,11 @@ void tegTask(void*) {
     if (tegMonitoring() && millis() - lastSample >= TEG_SAMPLE_MS) {
       lastSample = millis();
       Serial.printf("TEG,%u\n", (unsigned)readTegMv());
+      if (millis() - lastCoul >= 1000) {  // [PROTOTYPE-ONLY: LTC4150] coulomb totals once a second: "COUL,<ticks in>,<ticks out>,<mAh per tick>"
+        lastCoul = millis();
+        coulombPoll();
+        Serial.printf("COUL,%u,%u,%.6f\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK);
+      }
     }
     delay(20);
   }
@@ -1999,6 +2103,7 @@ void idleWindow() {
   rtc_gpio_pullup_en((gpio_num_t)NEXT_BUTTON);
   rtc_gpio_pulldown_dis((gpio_num_t)NEXT_BUTTON);
   esp_sleep_enable_timer_wakeup((uint64_t)SYNC_INTERVAL_S * 1000000ULL);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);  // [PROTOTYPE-ONLY: LTC4150] the ULP's pins and pull-ups stay live in sleep
   Serial.printf("Sleeping (next sync in %us, or press the button)\n", (unsigned)SYNC_INTERVAL_S);
   Serial.flush();
   esp_deep_sleep_start();
@@ -2031,6 +2136,7 @@ void setup() {
   Serial.printf("Wake: %s, PSRAM %u KB free\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset",
                 (unsigned)(ESP.getFreePsram() / 1024));
   if (buttonWake) rtc_gpio_deinit((gpio_num_t)NEXT_BUTTON);
+  coulombBegin(wokeFromSleep);  // [PROTOTYPE-ONLY: LTC4150]
 
   if (!LittleFS.begin(true)) {  // true = format on first boot
     Serial.println("LittleFS mount failed");

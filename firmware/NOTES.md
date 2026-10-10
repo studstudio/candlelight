@@ -61,6 +61,31 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - The page reads only `TEG,` lines and ignores the rest of the log. If the lamp is asleep when the page connects, tap NEXT to wake it.
 - Keep the TEG under 3.3 V at the pin (the page warns at 2.8 V).
 
+## Coulomb counter (LTC4150, untested on hardware)
+
+> **PROTOTYPE ONLY: remove before shipping.** The shipping lamp has no LTC4150. Every piece of this is tagged `[PROTOTYPE-ONLY: LTC4150]`; see **Before shipping** below.
+
+- Measures real charge into and out of the pack. The pack goes on the chip's SENSE+ side, everything else (BQ25504 output, and the lamp in a battery test) on the SENSE- side, so all pack current passes through it and the chip's own ~0.1 mA comes straight from the pack, uncounted.
+- Wiring: INT -> D3 (GPIO26), POL -> D4 (GPIO27), CLR -> A4 (GPIO15), VIO -> 3V3, SHDN high, GND common. **CLR must not be tied to INT**: tied, INT pulses for ~1 us, too short for the ULP.
+- The ULP coprocessor (macro-assembled in `coulombBegin()`, no extra toolchain) polls INT every 100 ms, awake or in deep sleep: on a latched pulse it reads POL, bumps one of two 16-bit counters in RTC slow memory (words 0 and 1) and pulses CLR low for ~50 us. The main CPU never wakes for a pulse. `coulombPoll()` folds the counters into 32-bit totals (`rtcCoulIn`, `rtcCoulOut`), reset on a real power-on. Deep sleep keeps the RTC peripherals powered for the pins.
+- 0.1707 mAh per pulse with the SparkFun board's 0.05 ohm sense resistor (`COUL_MAH_PER_TICK`). If "in" and "out" come out swapped, flip `COUL_POL_HIGH_IS_CHARGE`.
+- Reporting: while the monitor page is connected, `COUL,<in>,<out>,<mAh per tick>` once a second over serial (the page shows this session's in/out, and relays them to the phone view). Every sync also carries `?cin=&cout=&mpt=` on its request; the worker stores them at `teg/<lampId>/coulomb`, and the page shows those totals when nothing is connected, so a battery test needs no USB.
+- With USB plugged in the board runs from USB: lamp use is only measured on battery with USB unplugged (and the pack must never share a power rail with USB). TEG charge can be measured with USB in, as long as the pack is wired only to the counter.
+
+## Before shipping: remove prototype-only code
+
+Bench-measurement code that must not ship. Find every piece with:
+
+```
+grep -rn PROTOTYPE-ONLY firmware/ candlelight-worker/
+```
+
+- **LTC4150 coulomb counter** (`[PROTOTYPE-ONLY: LTC4150]`):
+  - `fw/src/main.cpp`: the whole "coulomb counter" section, the three ULP `#include`s, the `coulombBegin()` call in `setup()`, the `esp_sleep_pd_config(RTC_PERIPH)` line in `goToSleep()` (only the ULP needs it; the NEXT button's ext0 wake keeps those pins powered on its own), the `?cin=&cout=&mpt=` on the sync request (back to plain `/lamp/<id>/sync`), and the `COUL,` serial line plus `lastCoul` in `tegTask`.
+  - `candlelight-worker/src/index.js`: the `GET /teg/{lampId}/coulomb` route, the `cin/cout` block at the top of the sync handler, and the `coulomb` field in the `/teg` relay.
+  - Also delete the stored objects `teg/<lampId>/coulomb` in R2.
+- After removing: build, and check `grep -rn "coul\|ulp" firmware/fw/src` comes back empty.
+
 ## Timing reference (everything here is a prototype placeholder)
 
 Every value below is a placeholder chosen to make prototyping fast. All of them are expected to change for the final product. Each one is tagged `[PLACEHOLDER]` in the code, so this lists them all:

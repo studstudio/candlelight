@@ -53,7 +53,7 @@ button, input, select { font: inherit; color: inherit; }
 .label { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
 
 .hero { display: grid; grid-template-columns: minmax(170px, 220px) minmax(0, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
-@media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .hero { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .readout { background: var(--bg); padding: 10px 14px; display: grid; gap: 2px; align-content: center; min-width: 0; }
 .big { display: flex; align-items: baseline; gap: 6px; }
 .big .v { font-family: "Fraunces", Georgia, serif; font-weight: 300; font-size: 44px; line-height: 1.05; text-shadow: 0 0 22px rgba(255, 205, 130, .22); white-space: nowrap; }
@@ -63,7 +63,7 @@ button, input, select { font: inherit; color: inherit; }
 .big .u { color: var(--muted); font-size: 13px; }
 .sub { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); min-width: 0; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line); min-width: 0; }
 .s { background: var(--bg); padding: 7px 12px; display: grid; gap: 1px; min-width: 0; }
 .s .val { font-size: 14px; font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .s .hint { font-size: 9px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -117,7 +117,9 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     <div class="stats">
       <div class="s"><div class="label">charge in</div><div class="val" id="gMa">0.0 mA</div><div class="hint">mppt, after booster</div></div>
       <div class="s"><div class="label">break-even in</div><div class="val" id="gBe">—</div><div class="hint" id="gBeHint">7 mAh to go</div></div>
-      <div class="s"><div class="label">harvested</div><div class="val" id="gMah">0.00 mAh</div><div class="hint" id="gMahHint">0.0 days of use</div></div>
+      <div class="s"><div class="label">harvested est.</div><div class="val" id="gMah">0.00 mAh</div><div class="hint" id="gMahHint">0.0 days of use</div></div>
+      <div class="s"><div class="label">pack in · ltc</div><div class="val" id="gCin">—</div><div class="hint" id="gCinHint">no counter data</div></div>
+      <div class="s"><div class="label">pack out · ltc</div><div class="val" id="gCout">—</div><div class="hint" id="gCoutHint">no counter data</div></div>
       <div class="s"><div class="label">peak</div><div class="val" id="gPeak">0.000 V</div><div class="hint" id="gPeakT">—</div></div>
       <div class="s"><div class="label">trend</div><div class="val" id="gSlope">—</div><div class="hint">mV/min, last 2 min</div></div>
       <div class="s"><div class="label">burn time</div><div class="val" id="gBurn">0:00</div><div class="hint">above lit threshold</div></div>
@@ -175,6 +177,9 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   let t0 = performance.now();
   let demoTimer = null, port = null, reader = null, keepReading = false, beatTimer = null, gotSample = false;
   let peak = 0, peakT = 0, mahTotal = 0, burnSec = 0;
+  // LTC4150 counter: live from the serial line ({in, out, mahPerTick, at} + this session's starting point),
+  // or the totals the lamp last reported to the worker with a sync
+  let coulLive = null, coulBase = null, coulLamp = null;
   let liveMv = 0;  // eased toward the newest sample every frame, so the readout and trace head glide
   let session = newSessionId(), sessionStart = Date.now();
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
@@ -244,9 +249,26 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     $("gBurn").textContent = fmtTime(burnSec);
     $("gMah").textContent = mahTotal.toFixed(2) + " mAh";
     $("gMahHint").textContent = `${(use > 0 ? mahTotal / use : 0).toFixed(2)} days of use`;
+    renderCoulomb();
     const b = $("banner");
     if (mv >= 2800) { b.hidden = false; b.textContent = "TEG above 2.8 V. BQ25504 input limit is 3 V, FireBeetle pin limit 3.3 V. Back the flame off or raise the copper tip."; }
     else if (b.dataset.alert !== "1") b.hidden = true;
+  }
+
+  function renderCoulomb() {
+    const live = coulLive && coulBase && Date.now() - coulLive.at < 10000;
+    const set = (id, mah, hint) => { $(id).textContent = mah === null ? "—" : mah.toFixed(2) + " mAh"; $(id + "Hint").textContent = hint; };
+    if (live) {
+      set("gCin", (coulLive.in - coulBase.in) * coulLive.mahPerTick, "measured · this session");
+      set("gCout", (coulLive.out - coulBase.out) * coulLive.mahPerTick, "measured · this session");
+    } else if (coulLamp) {
+      const when = new Date(coulLamp.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      set("gCin", coulLamp.in * coulLamp.mahPerTick, `since lamp power-up · ${when}`);
+      set("gCout", coulLamp.out * coulLamp.mahPerTick, `since lamp power-up · ${when}`);
+    } else { set("gCin", null, "no counter data"); set("gCout", null, "no counter data"); }
+  }
+  async function fetchLampCoulomb() {
+    try { const c = await (await fetch(`${API}/teg/${encodeURIComponent(LAMP_ID)}/coulomb`, { cache: "no-store" })).json(); if (c) { coulLamp = c; renderCoulomb(); } } catch (e) {}
   }
 
   // ---------- zoom controls ----------
@@ -466,6 +488,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   function resetSession() {
     clearSession();
     t0 = performance.now(); session = newSessionId(); sessionStart = Date.now(); pushedIdx = 0;
+    coulBase = coulLive ? { in: coulLive.in, out: coulLive.out } : null;
   }
   $("btnReset").onclick = resetSession;
 
@@ -519,6 +542,13 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
           if (isFinite(mv) && mv >= 0 && mv < 5000) {
             if (!gotSample) { gotSample = true; setConn("live · A0", "on"); }
             addSample(mv);
+          }
+          // "COUL,<ticks in>,<ticks out>,<mAh per tick>": the LTC4150 totals since the lamp's power-on
+          const c = line.match(/COUL,(\d+),(\d+),([\d.]+)/);
+          if (c) {
+            coulLive = { in: +c[1], out: +c[2], mahPerTick: +c[3], at: Date.now() };
+            if (!coulBase || coulLive.in < coulBase.in || coulLive.out < coulBase.out) coulBase = { in: coulLive.in, out: coulLive.out };  // new session, or the lamp restarted
+            renderCoulomb();
           }
         }
       }
@@ -583,6 +613,8 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
           session, start: sessionStart, settings,
           notes: notes.map(n => ({ t: n.t, text: n.text })),
           samples: data.slice(pushedIdx, end).map(d => [d.t, d.mv]),
+          coulomb: coulLive && coulBase && Date.now() - coulLive.at < 10000
+            ? { in: coulLive.in, out: coulLive.out, baseIn: coulBase.in, baseOut: coulBase.out, mahPerTick: coulLive.mahPerTick } : null,
         }),
       });
       if (!r.ok) throw new Error(r.status);
@@ -615,6 +647,11 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         if (viewClock === null || Math.abs(now() - target) > 3) { viewClock = target; viewClockAt = performance.now(); }
         else { viewClock += (target - now()) * .15; }
       }
+      if (s.coulomb) {
+        coulLive = { in: s.coulomb.in, out: s.coulomb.out, mahPerTick: s.coulomb.mahPerTick, at: Date.now() - (s.now - s.updated) };
+        coulBase = { in: s.coulomb.baseIn, out: s.coulomb.baseOut };
+      }
+      renderCoulomb();
       const prevNotes = notes.length;
       notes = s.notes || [];
       if (notes.length !== prevNotes) renderLog();
@@ -639,6 +676,9 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     a.click();
   };
 
+  fetchLampCoulomb();
+  setInterval(fetchLampCoulomb, 30000);
+  setInterval(renderCoulomb, 5000);  // so a stopped live feed falls back to the lamp's totals
   if (viewer) {
     SETTINGS.forEach(id => $(id).disabled = true);
     setConn("phone view · connecting", "");

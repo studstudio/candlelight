@@ -327,6 +327,14 @@ export default {
     // phone opening the same page polls them. Readings are stored per minute of
     // session time (teg/{lampId}/{session}/{minute}, [[seconds, mV], ...]) next
     // to a small head object, so neither side ever moves the whole session ----
+    // GET teg/{lampId}/coulomb: the LTC4150 totals the lamp last reported with a sync. [PROTOTYPE-ONLY: LTC4150]
+    if (parts[0] === 'teg' && parts[1] && parts[2] === 'coulomb' && parts.length === 3 && request.method === 'GET') {
+      const obj = await env.LAMP_IMAGES.get(`teg/${parts[1]}/coulomb`);
+      return new Response(obj ? await obj.text() : 'null', {
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      });
+    }
+
     if (parts[0] === 'teg' && parts[1] && parts.length === 2) {
       const lampId = parts[1];
       const headKey = `teg/${lampId}/head`;
@@ -377,6 +385,9 @@ export default {
           settings: body.settings && typeof body.settings === 'object' ? body.settings : {},
           notes,
           lastT,
+          // [PROTOTYPE-ONLY: LTC4150] live LTC4150 totals from the lamp's serial line, relayed for the phone: {in, out, baseIn, baseOut, mahPerTick}
+          coulomb: body.coulomb && ['in', 'out', 'baseIn', 'baseOut', 'mahPerTick'].every(k => Number.isFinite(body.coulomb[k]))
+            ? body.coulomb : null,
           updated: Date.now(),
         }));
         return json({ ok: true });
@@ -652,6 +663,15 @@ export default {
     // (one request for all of them). The older /queue + /items routes still work
     // as the lamp's fallback and serve the full PNGs. ----
     if (action === 'sync' && request.method === 'GET') {
+      // [PROTOTYPE-ONLY: LTC4150] coulomb counter totals (ticks into / out of the pack since the lamp's
+      // power-on) ride along on the query string; stored for the TEG monitor page
+      const cin = parseInt(url.searchParams.get('cin'), 10), cout = parseInt(url.searchParams.get('cout'), 10);
+      if (Number.isFinite(cin) && Number.isFinite(cout)) {
+        const mpt = parseFloat(url.searchParams.get('mpt'));
+        ctx.waitUntil(env.LAMP_IMAGES.put(`teg/${lampId}/coulomb`, JSON.stringify({
+          in: cin, out: cout, mahPerTick: Number.isFinite(mpt) ? mpt : 0.1707, at: Date.now(),
+        })));
+      }
       const prefix = `queue/${lampId}/`;
       const t0 = Date.now();
       const [listed, fw] = await Promise.all([

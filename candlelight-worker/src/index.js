@@ -322,6 +322,84 @@ export default {
     const url = new URL(request.url);
     const parts = url.pathname.split('/').filter(Boolean);
 
+    // ---- teg/{lampId}: live relay for teg_monitor.html. The page on the laptop
+    // the lamp is plugged into posts its new readings about once a second; a
+    // phone opening the same page polls them. Readings are stored per minute of
+    // session time (teg/{lampId}/{session}/{minute}, [[seconds, mV], ...]) next
+    // to a small head object, so neither side ever moves the whole session ----
+    if (parts[0] === 'teg' && parts[1] && parts.length === 2) {
+      const lampId = parts[1];
+      const headKey = `teg/${lampId}/head`;
+      const chunkKey = (session, minute) => `teg/${lampId}/${session}/${minute}`;
+      const readJson = async (key, fallback) => {
+        const obj = await env.LAMP_IMAGES.get(key);
+        return obj ? obj.json().catch(() => fallback) : fallback;
+      };
+
+      if (request.method === 'POST') {
+        const body = await request.json().catch(() => null);
+        if (!body || typeof body.session !== 'string' || !/^[\w-]{1,40}$/.test(body.session) || !Array.isArray(body.samples)) {
+          return json({ error: 'expected {session, start, samples: [[seconds, mV], ...]}' }, 400);
+        }
+        const samples = body.samples
+          .filter(s => Array.isArray(s) && Number.isFinite(s[0]) && Number.isFinite(s[1]) && s[0] >= 0)
+          .slice(0, 2000)
+          .map(s => [Math.round(s[0] * 100) / 100, Math.round(s[1])]);
+        const head = await readJson(headKey, null);
+        if (head && head.session !== body.session) {
+          // a new session: the old one's readings go
+          ctx.waitUntil((async () => {
+            const old = await env.LAMP_IMAGES.list({ prefix: `teg/${lampId}/${head.session}/` });
+            await Promise.all(old.objects.map(o => env.LAMP_IMAGES.delete(o.key)));
+          })());
+        }
+        const byMinute = new Map();
+        for (const s of samples) {
+          const m = Math.floor(s[0] / 60);
+          if (!byMinute.has(m)) byMinute.set(m, []);
+          byMinute.get(m).push(s);
+        }
+        for (const [m, list] of byMinute) {
+          const key = chunkKey(body.session, m);
+          const prev = await readJson(key, []);
+          const lastT = prev.length ? prev[prev.length - 1][0] : -1;
+          await env.LAMP_IMAGES.put(key, JSON.stringify(prev.concat(list.filter(s => s[0] > lastT))));
+        }
+        const sameSession = head && head.session === body.session;
+        const lastT = Math.max(sameSession ? head.lastT : 0, samples.length ? samples[samples.length - 1][0] : 0);
+        const notes = (Array.isArray(body.notes) ? body.notes : [])
+          .filter(n => n && Number.isFinite(n.t) && typeof n.text === 'string')
+          .slice(-200)
+          .map(n => ({ t: n.t, text: n.text.slice(0, 80) }));
+        await env.LAMP_IMAGES.put(headKey, JSON.stringify({
+          session: body.session,
+          start: Number(body.start) || Date.now(),
+          settings: body.settings && typeof body.settings === 'object' ? body.settings : {},
+          notes,
+          lastT,
+          updated: Date.now(),
+        }));
+        return json({ ok: true });
+      }
+
+      if (request.method === 'GET') {
+        const head = await readJson(headKey, null);
+        if (!head) return json({ session: null });
+        // a new viewer (or a new session) gets the last 30 min, then only what's new
+        let after = parseFloat(url.searchParams.get('after'));
+        if (url.searchParams.get('session') !== head.session || !Number.isFinite(after)) after = -1;
+        after = Math.max(after, head.lastT - 1800);
+        const m0 = Math.max(0, Math.floor(after / 60)), m1 = Math.floor(head.lastT / 60);
+        const minutes = [];
+        for (let m = m0; m <= m1 && minutes.length < 32; m++) minutes.push(m);
+        const chunks = await Promise.all(minutes.map(m => readJson(chunkKey(head.session, m), [])));
+        const samples = chunks.flat().filter(s => s[0] > after);
+        return new Response(JSON.stringify({ ...head, samples, now: Date.now() }), {
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      }
+    }
+
     // ---- gallery/events: recent delivery events across ALL lamps, most
     // recent first — the data feed the future Gallery/map page will read.
     // Shape of this may evolve once that page actually gets designed. ----

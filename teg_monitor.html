@@ -3,185 +3,155 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ember TEG Monitor</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<meta name="theme-color" content="#050607">
+<title>TEG Monitor</title>
 <style>
-/* Layout: instrument bench. Big live readout + state, gauges row, full-width trace, log beneath. Single dark theme by choice (reads well next to a flame). */
+/* One flat dark field, hairlines instead of boxes, everything monospace. The trace is the only thing that glows. */
+@font-face { font-family: "JetBrains Mono Local"; src: url("fonts/JetBrainsMono-Regular.ttf") format("truetype"); font-display: swap; }
 :root {
-  --bg: #0e1216;
-  --panel: #151b21;
-  --line: #24303a;
-  --grid: #1c252d;
-  --fg: #dfe6ea;
-  --muted: #7d8c97;
-  --copper: #e08a4c;
-  --copper-dim: #6b4128;
-  --cool: #6fb7c9;
-  --ok: #8fc87a;
-  --warn: #e6c25a;
-  --crit: #e5604f;
-  --display: "Chakra Petch", "Arial Narrow", system-ui, sans-serif;
-  --body: "IBM Plex Sans", system-ui, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --bg: #050607;
+  --line: #14171a;
+  --fg: #ece4d4;
+  --muted: #6c7074;
+  --dim: #34383c;
+  --gold: #ffd98a;
+  --teal: #62d6ca;
+  --ember: #ff6a3d;
+  --mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, "JetBrains Mono Local", Consolas, monospace;
   color-scheme: dark;
 }
-* { box-sizing: border-box; }
+* { box-sizing: border-box; border-radius: 0; }
 html, body { margin: 0; }
 body {
   background: var(--bg); color: var(--fg);
-  font: 14px/1.5 var(--body);
-  padding: 20px 16px 40px;
+  font: 400 12px/1.5 var(--mono);
+  padding: 18px 16px 40px;
+  -webkit-font-smoothing: antialiased;
 }
-.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; }
-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-.brand { display: flex; align-items: baseline; gap: 12px; }
-.brand h1 { font: 700 22px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; margin: 0; }
-.brand span { font: 12px var(--mono); color: var(--muted); }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-button, select, input {
-  font: 500 13px var(--body); color: var(--fg);
-  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
-  padding: 8px 12px;
-}
-button { cursor: pointer; }
-button:hover { border-color: var(--copper); }
-button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
-button.primary { background: var(--copper); color: #1a0f08; border-color: var(--copper); font-weight: 600; }
-button.primary:hover { filter: brightness(1.08); }
-.conn { display: inline-flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--muted); }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.dot.demo { background: var(--warn); }
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 14px; }
 
-.hero {
-  display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px;
-}
-@media (max-width: 760px) { .hero { grid-template-columns: 1fr; } }
-.readout {
-  background: radial-gradient(120% 140% at 0% 0%, rgba(224,138,76,.14), transparent 55%), var(--panel);
-  border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px;
-  display: grid; gap: 6px; min-width: 0;
-}
-.label { font: 500 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
-.big { display: flex; align-items: baseline; gap: 10px; }
-.big .v { font: 600 clamp(64px, 12vw, 112px)/.95 var(--display); font-variant-numeric: tabular-nums; color: var(--copper); }
-.big .u { font: 500 22px var(--display); color: var(--muted); }
-.sub { font: 13px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
-.state {
-  justify-self: start; margin-top: 6px;
-  font: 600 12px var(--mono); letter-spacing: .12em; text-transform: uppercase;
-  padding: 4px 10px; border-radius: 999px; border: 1px solid currentColor;
-}
-.s-cold { color: var(--cool); } .s-warm { color: var(--warn); } .s-burn { color: var(--copper); }
-.s-plat { color: var(--ok); } .s-cool { color: var(--cool); } .s-crit { color: var(--crit); }
+header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; }
+.status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); min-width: 0; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex: none; }
+.dot.on { background: var(--gold); box-shadow: 0 0 8px var(--gold); }
+.dot.demo { background: var(--teal); box-shadow: 0 0 8px var(--teal); }
+.relay { color: var(--dim); }
+.relay.ok { color: var(--muted); }
+.links { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 
-.gauges { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-.g { background: var(--panel); padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
-.g .val { font: 600 26px/1.1 var(--display); font-variant-numeric: tabular-nums; }
-.g .hint { font: 11px var(--mono); color: var(--muted); }
+button, input, select { font: inherit; color: inherit; }
+.link {
+  background: none; border: 0; padding: 2px 0; cursor: pointer; color: var(--fg);
+  text-decoration: underline; text-decoration-color: var(--dim); text-underline-offset: 4px; text-decoration-thickness: 1px;
+}
+.link:hover { text-decoration-color: var(--gold); color: var(--gold); }
+.link[aria-pressed="true"] { color: var(--gold); text-decoration: none; }
+.link:focus-visible, input:focus-visible { outline: 1px solid var(--gold); outline-offset: 3px; }
 
-.trace { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 10px; display: grid; gap: 10px; min-width: 0; }
-.trace-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
-.legend { display: flex; flex-wrap: wrap; gap: 14px; font: 11px var(--mono); color: var(--muted); }
-.legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 6px; }
-canvas { width: 100%; height: 320px; display: block; }
+.label { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
 
-.bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.hero { display: grid; grid-template-columns: minmax(170px, 220px) minmax(0, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+@media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }
+.readout { background: var(--bg); padding: 10px 14px; display: grid; gap: 2px; align-content: center; min-width: 0; }
+.big { display: flex; align-items: baseline; gap: 6px; }
+.big .v { font-weight: 300; font-size: 38px; line-height: 1.05; letter-spacing: -.02em; font-variant-numeric: tabular-nums; text-shadow: 0 0 22px rgba(255, 205, 130, .22); }
+.big .u { color: var(--muted); font-size: 13px; }
+.sub { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); min-width: 0; }
+.s { background: var(--bg); padding: 7px 12px; display: grid; gap: 1px; min-width: 0; }
+.s .val { font-size: 14px; font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s .hint { font-size: 9px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.trace { border: 1px solid var(--line); display: grid; min-width: 0; }
+.trace-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 20px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.zoom { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.zoom .label { margin-right: 2px; }
+canvas { width: 100%; height: 420px; display: block; touch-action: pan-y; cursor: crosshair; }
+@media (max-width: 640px) { canvas { height: 300px; } }
+
+.bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
 @media (max-width: 760px) { .bottom { grid-template-columns: 1fr; } }
-.box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 10px; align-content: start; min-width: 0; }
-.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.row input[type=text] { flex: 1 1 180px; min-width: 0; }
-.row input[type=number] { width: 90px; }
-.field { display: grid; gap: 4px; }
-.field label { font: 11px var(--mono); color: var(--muted); }
-.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.box { background: var(--bg); padding: 12px 14px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; }
+input[type=text], input[type=number] {
+  background: transparent; border: 0; border-bottom: 1px solid var(--dim); padding: 4px 0; min-width: 0;
+}
+input:disabled { color: var(--muted); border-bottom-color: var(--line); }
+.row input[type=text] { flex: 1 1 200px; }
+.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 16px; }
+.settings label { display: grid; gap: 2px; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .settings input { width: 100%; }
-.log { font: 12px/1.6 var(--mono); max-height: 180px; overflow: auto; color: var(--muted); }
-.log b { color: var(--fg); font-weight: 500; }
-.note { font-size: 12px; color: var(--muted); max-width: 70ch; }
-.banner { border: 1px solid var(--crit); color: var(--crit); background: rgba(229,96,79,.08); border-radius: 8px; padding: 10px 14px; font: 13px var(--mono); }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.log { font-size: 11px; line-height: 1.7; max-height: 160px; overflow: auto; color: var(--muted); }
+.log b { color: var(--fg); font-weight: 400; }
+.note { font-size: 10px; color: var(--dim); max-width: 72ch; margin: 0; }
+.banner { border: 1px solid var(--ember); color: var(--ember); padding: 8px 12px; cursor: pointer; }
+.viewer .ctl { display: none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div class="brand"><h1>Ember · TEG Monitor</h1><span>FireBeetle A0 · GPIO36</span></div>
-    <div class="controls">
-      <span class="conn"><span class="dot" id="dot"></span><span id="connText">Not connected</span></span>
-      <button class="primary" id="btnConnect">Connect FireBeetle</button>
-      <button id="btnDemo">Demo burn</button>
-      <button id="btnReset">New session</button>
-      <button id="btnCsv">Export CSV</button>
-    </div>
+    <div class="status"><span class="dot" id="dot"></span><span id="connText">not connected</span><span class="relay" id="relay"></span></div>
+    <nav class="links">
+      <button class="link ctl" id="btnConnect">connect</button>
+      <button class="link ctl" id="btnDemo">demo</button>
+      <button class="link ctl" id="btnReset">new session</button>
+      <button class="link" id="btnCsv">export csv</button>
+    </nav>
   </header>
 
   <div class="banner" id="banner" hidden></div>
 
   <section class="hero">
     <div class="readout">
-      <div class="label">TEG open-circuit voltage</div>
+      <div class="label">open circuit · A0</div>
       <div class="big"><span class="v" id="vNow">0.000</span><span class="u">V</span></div>
       <div class="sub" id="vSub">waiting for data</div>
-      <div class="state s-cold" id="state">Cold</div>
     </div>
-    <div class="gauges">
-      <div class="g"><div class="label">Est. charge into pack</div><div class="val" id="gMa">0.0 mA</div><div class="hint">at MPPT 50%, after booster losses</div></div>
-      <div class="g"><div class="label">Break-even candle</div><div class="val" id="gBe">—</div><div class="hint" id="gBeHint">per day at 7 mAh use</div></div>
-      <div class="g"><div class="label">Peak this session</div><div class="val" id="gPeak">0.000 V</div><div class="hint" id="gPeakT">—</div></div>
-      <div class="g"><div class="label">Trend (last 2 min)</div><div class="val" id="gSlope">—</div><div class="hint">mV per minute</div></div>
-      <div class="g"><div class="label">Burn time</div><div class="val" id="gBurn">0:00</div><div class="hint">time above "lit" threshold</div></div>
-      <div class="g"><div class="label">Harvested (est.)</div><div class="val" id="gMah">0.00 mAh</div><div class="hint" id="gMahHint">≈ 0.0 days of use</div></div>
+    <div class="stats">
+      <div class="s"><div class="label">charge in</div><div class="val" id="gMa">0.0 mA</div><div class="hint">mppt, after booster</div></div>
+      <div class="s"><div class="label">break-even in</div><div class="val" id="gBe">—</div><div class="hint" id="gBeHint">7 mAh to go</div></div>
+      <div class="s"><div class="label">harvested</div><div class="val" id="gMah">0.00 mAh</div><div class="hint" id="gMahHint">0.0 days of use</div></div>
+      <div class="s"><div class="label">peak</div><div class="val" id="gPeak">0.000 V</div><div class="hint" id="gPeakT">—</div></div>
+      <div class="s"><div class="label">trend</div><div class="val" id="gSlope">—</div><div class="hint">mV/min, last 2 min</div></div>
+      <div class="s"><div class="label">burn time</div><div class="val" id="gBurn">0:00</div><div class="hint">above lit threshold</div></div>
     </div>
   </section>
 
   <section class="trace">
     <div class="trace-head">
-      <div class="label">Live trace</div>
-      <div class="row">
-        <div class="legend">
-          <span><i style="background:var(--copper)"></i>TEG voltage</span>
-          <span><i style="background:var(--crit)"></i>3.0 V BQ input limit</span>
-          <span><i style="background:var(--cool)"></i>Lit threshold</span>
-        </div>
-        <select id="window" aria-label="Time window">
-          <option value="300">Last 5 min</option>
-          <option value="900">Last 15 min</option>
-          <option value="1800" selected>Last 30 min</option>
-          <option value="3600">Last 60 min</option>
-          <option value="0">Whole session</option>
-        </select>
-      </div>
+      <div class="zoom" id="zoomT"><span class="label">time</span></div>
+      <div class="zoom" id="zoomY"><span class="label">volts</span></div>
     </div>
-    <canvas id="chart"></canvas>
+    <canvas id="chart" aria-label="Live TEG voltage trace"></canvas>
   </section>
 
   <section class="bottom">
     <div class="box">
-      <div class="label">Burn notes</div>
-      <div class="row">
-        <input type="text" id="noteText" placeholder="e.g. moved flame 5 mm closer, added ice">
-        <button id="btnNote">Mark</button>
+      <div class="label">burn notes</div>
+      <div class="row ctl">
+        <input type="text" id="noteText" placeholder="moved flame 5 mm closer, added ice…" aria-label="Note">
+        <button class="link" id="btnNote">mark</button>
       </div>
-      <div class="row">
-        <button data-q="Candle lit">Candle lit</button>
-        <button data-q="Ice added">Ice added</button>
-        <button data-q="Flame moved">Flame moved</button>
-        <button data-q="Candle out">Candle out</button>
+      <div class="row ctl">
+        <button class="link" data-q="Candle lit">candle lit</button>
+        <button class="link" data-q="Ice added">ice added</button>
+        <button class="link" data-q="Flame moved">flame moved</button>
+        <button class="link" data-q="Candle out">candle out</button>
       </div>
-      <div class="log" id="log"><span>Notes appear on the trace as markers.</span></div>
+      <div class="log" id="log"><span>notes appear on the trace as markers</span></div>
     </div>
     <div class="box">
-      <div class="label">Model settings</div>
+      <div class="label">model</div>
       <div class="settings">
-        <div class="field"><label for="rInt">TEG resistance (Ω)</label><input type="number" id="rInt" step="0.1" value="2.0"></div>
-        <div class="field"><label for="eff">Booster efficiency (%)</label><input type="number" id="eff" step="1" value="75"></div>
-        <div class="field"><label for="vPack">Pack voltage (V)</label><input type="number" id="vPack" step="0.1" value="5.0"></div>
-        <div class="field"><label for="use">Daily use (mAh)</label><input type="number" id="use" step="0.5" value="7"></div>
-        <div class="field"><label for="lit">Lit threshold (mV)</label><input type="number" id="lit" step="10" value="150"></div>
+        <label>teg resistance Ω<input type="number" id="rInt" step="0.1" value="2.0"></label>
+        <label>booster eff. %<input type="number" id="eff" step="1" value="75"></label>
+        <label>pack volts<input type="number" id="vPack" step="0.1" value="5.0"></label>
+        <label>daily use mAh<input type="number" id="use" step="0.5" value="7"></label>
+        <label>lit threshold mV<input type="number" id="lit" step="10" value="150"></label>
       </div>
-      <p class="note">Charge is an estimate: power at the TEG's best point is V²/(4R), times booster efficiency, divided by pack voltage. Measure the TEG's real resistance once and enter it here to tighten the numbers. Warning fires above 2.8 V, before the BQ25504's 3 V input limit.</p>
+      <p class="note">Charge is an estimate: V²/(4R) at the TEG's best point, times booster efficiency, over pack voltage. Break-even counts down what this session has already harvested against a day's use, at the current rate. Warning above 2.8 V (BQ25504 input limit 3 V).</p>
     </div>
   </section>
 </div>
@@ -189,17 +159,34 @@ canvas { width: 100%; height: 320px; display: block; }
 <script>
 (() => {
   const $ = id => document.getElementById(id);
+  const API = "https://candlelight.daniloinfinite.workers.dev";
+  const LAMP_ID = "test-lamp-1";
+  // phones can't do USB serial, so they (or any page opened with ?view) watch the laptop's stream instead
+  const viewer = new URLSearchParams(location.search).has("view") || !("serial" in navigator);
+  if (viewer) document.body.classList.add("viewer");
+
   const data = [];   // {t: seconds since session start, mv}
-  const notes = [];  // {t, text}
+  let notes = [];    // {t, text}
   let t0 = performance.now();
   let demoTimer = null, port = null, reader = null, keepReading = false, beatTimer = null, gotSample = false;
   let peak = 0, peakT = 0, mahTotal = 0, burnSec = 0;
   let liveMv = 0;  // eased toward the newest sample every frame, so the readout and trace head glide
+  let session = newSessionId(), sessionStart = Date.now();
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
 
+  function newSessionId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
   const num = id => parseFloat($(id).value) || 0;
-  const now = () => (performance.now() - t0) / 1000;
+  // live: seconds since the session started. Viewer: the playback clock (see the relay section)
+  let viewClock = null, viewClockAt = 0;
+  const now = () => viewer
+    ? (viewClock === null ? 0 : viewClock + (performance.now() - viewClockAt) / 1000)
+    : (performance.now() - t0) / 1000;
   const fmtTime = s => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m + ":" + String(s % 60).padStart(2, "0"); };
+  const fmtClock = (s, frac) => {
+    s = Math.max(0, s);
+    const m = Math.floor(s / 60), r = s - m * 60;
+    return m + ":" + (frac ? r.toFixed(1).padStart(4, "0") : String(Math.floor(r)).padStart(2, "0"));
+  };
 
   function chargeMa(mv) {
     const v = mv / 1000, r = Math.max(0.1, num("rInt"));
@@ -207,9 +194,9 @@ canvas { width: 100%; height: 320px; display: block; }
     return p / Math.max(0.5, num("vPack")) * 1000;
   }
 
-  function addSample(mv) {
-    const t = now();
+  function addSample(mv, t = now()) {
     const prev = data[data.length - 1];
+    if (prev && t <= prev.t) return;
     data.push({ t, mv });
     if (prev) {
       const dt = t - prev.t;
@@ -224,186 +211,267 @@ canvas { width: 100%; height: 320px; display: block; }
 
   function slopePerMin() {
     const t = now();
-    const recent = data.filter(d => d.t >= t - 120);
-    if (recent.length < 5) return null;
-    const n = recent.length;
-    let sx = 0, sy = 0, sxx = 0, sxy = 0;
-    for (const d of recent) { sx += d.t; sy += d.mv; sxx += d.t * d.t; sxy += d.t * d.mv; }
+    let i = data.length, n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    while (i > 0 && data[i - 1].t >= t - 120) { const d = data[--i]; n++; sx += d.t; sy += d.mv; sxx += d.t * d.t; sxy += d.t * d.mv; }
+    if (n < 5) return null;
     const den = n * sxx - sx * sx;
     return den ? (n * sxy - sx * sy) / den * 60 : null;
-  }
-
-  function stateFor(mv, slope) {
-    if (mv >= 2800) return ["Over limit", "s-crit"];
-    if (mv < num("lit")) return [slope !== null && slope < -20 && peak > num("lit") ? "Cooling" : "Cold", "s-cold"];
-    if (slope === null) return ["Burning", "s-burn"];
-    if (slope > 15) return ["Warming", "s-warm"];
-    if (slope < -15) return ["Falling", "s-cool"];
-    return ["Plateau", "s-plat"];
   }
 
   function render() {
     const last = data[data.length - 1];
     const mv = last ? last.mv : 0;
     const slope = slopePerMin();
-    $("vSub").textContent = last ? `${Math.round(mv)} mV · ${data.length} samples · session ${fmtTime(now())}` : "waiting for data";
-    const [st, cls] = stateFor(mv, slope);
-    const s = $("state"); s.textContent = st; s.className = "state " + cls;
+    $("vSub").textContent = last ? `${Math.round(mv)} mV · ${data.length} pts · ${fmtTime(now())}` : "waiting for data";
     const ma = chargeMa(mv);
     $("gMa").textContent = ma.toFixed(1) + " mA";
-    const use = num("use");
-    $("gBe").textContent = ma > 0.2 ? Math.round(use / ma * 60) + " min" : "—";
-    $("gBeHint").textContent = `per day at ${use} mAh use`;
+    // break-even: what's still missing from a day's use after this session's harvest, at the current rate
+    const use = num("use"), left = use - mahTotal;
+    if (left <= 0) { $("gBe").textContent = "reached"; $("gBeHint").textContent = `${use} mAh day covered`; }
+    else {
+      const min = ma > 0.05 ? left / ma * 60 : null;
+      $("gBe").textContent = min === null ? "—" : min >= 90 ? `${Math.floor(min / 60)}h ${String(Math.round(min % 60)).padStart(2, "0")}m` : `${Math.ceil(min)} min`;
+      $("gBeHint").textContent = `${left.toFixed(2)} mAh to go`;
+    }
     $("gPeak").textContent = (peak / 1000).toFixed(3) + " V";
     $("gPeakT").textContent = peak ? "at " + fmtTime(peakT) : "—";
     $("gSlope").textContent = slope === null ? "—" : (slope > 0 ? "+" : "") + slope.toFixed(0);
     $("gBurn").textContent = fmtTime(burnSec);
     $("gMah").textContent = mahTotal.toFixed(2) + " mAh";
-    $("gMahHint").textContent = `≈ ${(use > 0 ? mahTotal / use : 0).toFixed(1)} days of use`;
+    $("gMahHint").textContent = `${(use > 0 ? mahTotal / use : 0).toFixed(2)} days of use`;
     const b = $("banner");
-    if (mv >= 2800) { b.hidden = false; b.textContent = "TEG above 2.8 V. The BQ25504 input limit is 3 V and the FireBeetle pin limit is 3.3 V. Back the flame off or raise the copper tip."; }
-    else b.hidden = true;
+    if (mv >= 2800) { b.hidden = false; b.textContent = "TEG above 2.8 V. BQ25504 input limit is 3 V, FireBeetle pin limit 3.3 V. Back the flame off or raise the copper tip."; }
+    else if (b.dataset.alert !== "1") b.hidden = true;
   }
 
-  // Chart
+  // ---------- zoom controls ----------
+  const T_SPANS = [[1, "1s"], [5, "5s"], [60, "1m"], [300, "5m"], [900, "15m"], [3600, "1h"], [0, "all"]];
+  const Y_RANGES = [[700, 1200, "0.7–1.2"], [500, 1500, "0.5–1.5"], [0, 1500, "0–1.5"], [0, 3300, "0–3.3"], [null, null, "auto"]];
+  let span = 5, yRange = Y_RANGES[0];
+  let yLo = yRange[0], yHi = yRange[1];  // eased toward the chosen range
+  function zoomRow(el, items, isOn, pick) {
+    const btns = items.map(it => {
+      const b = document.createElement("button");
+      b.className = "link"; b.textContent = it[it.length - 1];
+      b.onclick = () => { pick(it); btns.forEach((x, i) => x.setAttribute("aria-pressed", isOn(items[i]))); };
+      b.setAttribute("aria-pressed", isOn(it));
+      el.append(b);
+      return b;
+    });
+  }
+  zoomRow($("zoomT"), T_SPANS, it => it[0] === span, it => { span = it[0]; });
+  zoomRow($("zoomY"), Y_RANGES, it => it === yRange, it => { yRange = it; });
+
+  // ---------- trace ----------
   const cv = $("chart"), ctx = cv.getContext("2d");
-  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
-  function draw() {
+  const FONT = "10px " + getComputedStyle(document.body).fontFamily;
+  let hoverX = null;
+  cv.addEventListener("pointermove", e => { hoverX = e.offsetX; });
+  cv.addEventListener("pointerleave", () => { hoverX = null; });
+
+  const firstAtOrAfter = t => { let lo = 0, hi = data.length; while (lo < hi) { const m = (lo + hi) >> 1; data[m].t < t ? lo = m + 1 : hi = m; } return lo; };
+  const niceStep = raw => [10, 20, 25, 50, 100, 200, 250, 500, 1000].find(s => s >= raw) || 1000;
+  const T_STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+
+  function draw(dt) {
     const dpr = window.devicePixelRatio || 1;
     const W = cv.clientWidth, H = cv.clientHeight;
-    if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    const pad = { l: 46, r: 12, t: 10, b: 24 };
+    const pad = { l: 50, r: 14, t: 16, b: 26 };
     const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
-    const win = parseFloat($("window").value);
-    const tEnd = Math.max(now(), 10);
-    const tStart = win ? Math.max(0, tEnd - win) : 0;
-    let first = data.length;
-    while (first > 0 && data[first - 1].t >= tStart) first--;
-    let shown = data.slice(Math.max(0, first - 1));  // one point before the window so the line enters from the edge
-    // more points than pixels: keep the min and max of each pixel column so spikes survive
-    if (shown.length > pw * 2) {
+    const tNow = now();
+    // the live point sits mid-plot: history on the left, open time on the right
+    const sp = span || Math.max(20, tNow * 2);
+    const tStart = tNow - sp / 2;
+    const x = t => pad.l + (t - tStart) / sp * pw;
+
+    let shown = data.slice(Math.max(0, firstAtOrAfter(tStart) - 1));
+    if (shown.length > pw) {  // more points than pixels: keep each column's min and max so spikes survive
       const cols = new Map();
       for (const d of shown) {
-        const c = Math.floor((d.t - tStart) / Math.max(1, tEnd - tStart) * pw);
+        const c = Math.floor(x(d.t));
         const e = cols.get(c);
         if (!e) cols.set(c, [d, d]);
         else { if (d.mv < e[0].mv) e[0] = d; if (d.mv > e[1].mv) e[1] = d; }
       }
       shown = [];
-      for (const [lo, hi] of cols.values()) lo.t <= hi.t ? shown.push(lo, hi) : shown.push(hi, lo);
+      for (const [a, b] of cols.values()) a.t <= b.t ? shown.push(a, b) : shown.push(b, a);
     }
-    if (data.length && !demoTimer) shown.push({ t: tEnd, mv: liveMv });  // live head at "now"
-    let maxMv = Math.max(1500, peak * 1.15);
-    for (const d of shown) if (d.mv > maxMv) maxMv = d.mv;
-    const yMax = Math.min(3300, Math.ceil(maxMv / 500) * 500);
-    const x = t => pad.l + (t - tStart) / Math.max(1, tEnd - tStart) * pw;
-    const y = mv => pad.t + ph - Math.min(mv, yMax) / yMax * ph;
+    if (data.length) shown.push({ t: tNow, mv: liveMv });
 
-    ctx.font = "11px " + css("--mono");
-    ctx.textBaseline = "middle";
+    // vertical range: a preset, or auto-fit to what's visible
+    let lo = yRange[0], hi = yRange[1];
+    if (lo === null) {
+      let mn = Infinity, mx = -Infinity;
+      for (const d of shown) if (d.t >= tStart) { mn = Math.min(mn, d.mv); mx = Math.max(mx, d.mv); }
+      if (!isFinite(mn)) { mn = 0; mx = 1500; }
+      const mid = (mn + mx) / 2, half = Math.max(50, (mx - mn) * .65);
+      lo = Math.max(0, mid - half); hi = mid + half;
+    }
+    const k = calm.matches ? 1 : 1 - Math.exp(-dt / 220);
+    yLo += (lo - yLo) * k; yHi += (hi - yHi) * k;
+    const y = mv => pad.t + ph - (mv - yLo) / Math.max(1, yHi - yLo) * ph;
+
+    ctx.font = FONT; ctx.lineWidth = 1;
     // grid
-    for (let v = 0; v <= yMax; v += 500) {
-      ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(pad.l, y(v)); ctx.lineTo(W - pad.r, y(v)); ctx.stroke();
-      ctx.fillStyle = css("--muted"); ctx.textAlign = "right";
-      ctx.fillText((v / 1000).toFixed(1) + " V", pad.l - 8, y(v));
+    const ys = niceStep((yHi - yLo) / 5);
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (let v = Math.ceil(yLo / ys) * ys; v <= yHi + .01; v += ys) {
+      const yy = Math.round(y(v)) + .5;
+      ctx.strokeStyle = "rgba(255,255,255,.035)";
+      ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+      ctx.fillStyle = "#4c5054"; ctx.fillText((v / 1000).toFixed(ys < 50 ? 3 : 2), pad.l - 10, yy);
     }
-    const span = tEnd - tStart;
-    const step = span <= 360 ? 60 : span <= 1200 ? 300 : span <= 2400 ? 600 : 900;
+    const ts = T_STEPS.find(s => sp / s <= 8) || 3600;
     ctx.textAlign = "center"; ctx.textBaseline = "top";
-    for (let t = Math.ceil(tStart / step) * step; t <= tEnd; t += step) {
-      ctx.fillStyle = css("--muted"); ctx.fillText(fmtTime(t), x(t), H - pad.b + 6);
+    for (let t = Math.ceil(Math.max(0, tStart) / ts) * ts; t <= tNow; t += ts) {
+      const xx = Math.round(x(t)) + .5;
+      ctx.strokeStyle = "rgba(255,255,255,.022)";
+      ctx.beginPath(); ctx.moveTo(xx, pad.t); ctx.lineTo(xx, pad.t + ph); ctx.stroke();
+      ctx.fillStyle = "#4c5054"; ctx.fillText(fmtClock(t, ts < 1), xx, H - pad.b + 8);
     }
-    // limit + threshold lines
-    const hline = (mv, color) => { if (mv > yMax) return; ctx.strokeStyle = color; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(pad.l, y(mv)); ctx.lineTo(W - pad.r, y(mv)); ctx.stroke(); ctx.setLineDash([]); };
-    hline(3000, css("--crit"));
-    hline(num("lit"), css("--cool"));
+    // now line
+    const ex = x(tNow);
+    ctx.strokeStyle = "rgba(255,236,200,.07)";
+    ctx.beginPath(); ctx.moveTo(Math.round(ex) + .5, pad.t); ctx.lineTo(Math.round(ex) + .5, pad.t + ph); ctx.stroke();
+    // limit and threshold, labelled where they end
+    const hline = (mv, color, text) => {
+      if (mv < yLo || mv > yHi) return;
+      const yy = Math.round(y(mv)) + .5;
+      ctx.strokeStyle = color; ctx.setLineDash([2, 5]);
+      ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = color; ctx.textAlign = "right"; ctx.textBaseline = "bottom"; ctx.fillText(text, W - pad.r, yy - 3);
+    };
+    hline(3000, "rgba(255,106,61,.55)", "3.0 V limit");
+    hline(num("lit"), "rgba(98,214,202,.45)", "lit");
     // notes
     ctx.textAlign = "left"; ctx.textBaseline = "top";
     for (const n of notes) {
-      if (n.t < tStart) continue;
-      ctx.strokeStyle = css("--copper-dim"); ctx.beginPath(); ctx.moveTo(x(n.t), pad.t); ctx.lineTo(x(n.t), pad.t + ph); ctx.stroke();
-      ctx.fillStyle = css("--muted"); ctx.fillText(n.text.slice(0, 22), Math.min(x(n.t) + 4, W - pad.r - 120), pad.t + 2);
+      if (n.t < tStart || n.t > tNow) continue;
+      const xx = Math.round(x(n.t)) + .5;
+      ctx.strokeStyle = "rgba(98,214,202,.22)";
+      ctx.beginPath(); ctx.moveTo(xx, pad.t); ctx.lineTo(xx, pad.t + ph); ctx.stroke();
+      ctx.fillStyle = "rgba(98,214,202,.7)"; ctx.fillText(n.text.slice(0, 24), xx + 4, pad.t + 2);
     }
-    if (shown.length < 2) return;
-    // area
-    const g = ctx.createLinearGradient(0, pad.t, 0, pad.t + ph);
-    g.addColorStop(0, "rgba(224,138,76,.28)"); g.addColorStop(1, "rgba(224,138,76,0)");
-    ctx.beginPath(); ctx.moveTo(x(shown[0].t), y(0));
-    for (const d of shown) ctx.lineTo(x(d.t), y(d.mv));
-    ctx.lineTo(x(shown[shown.length - 1].t), y(0)); ctx.closePath();
-    ctx.fillStyle = g; ctx.fill();
-    // line
-    ctx.save();
-    ctx.beginPath();
-    shown.forEach((d, i) => i ? ctx.lineTo(x(d.t), y(d.mv)) : ctx.moveTo(x(d.t), y(d.mv)));
-    ctx.strokeStyle = css("--copper"); ctx.lineWidth = 2; ctx.lineJoin = "round";
-    ctx.shadowColor = "rgba(224,138,76,.55)"; ctx.shadowBlur = 8;
-    ctx.stroke();
-    ctx.restore();
-    // endpoint: a dot with a slow pulse ring
-    const L = shown[shown.length - 1], ex = x(L.t), ey = y(L.mv);
-    if (!calm.matches) {
-      const ph2 = (performance.now() % 1600) / 1600;
-      ctx.strokeStyle = `rgba(224,138,76,${(1 - ph2) * .6})`; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(ex, ey, 4 + ph2 * 12, 0, Math.PI * 2); ctx.stroke();
+
+    if (shown.length >= 2) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(pad.l, pad.t, pw, ph); ctx.clip();
+      const path = () => { ctx.beginPath(); shown.forEach((d, i) => i ? ctx.lineTo(x(d.t), y(d.mv)) : ctx.moveTo(x(d.t), y(d.mv))); };
+      ctx.globalCompositeOperation = "lighter";
+      // faint wash under the trace: gold up top, ember, then a cold teal floor
+      const wash = ctx.createLinearGradient(0, pad.t, 0, pad.t + ph);
+      wash.addColorStop(0, "rgba(255,214,140,.11)"); wash.addColorStop(.55, "rgba(255,110,60,.035)"); wash.addColorStop(1, "rgba(70,200,190,.03)");
+      path(); ctx.lineTo(x(shown[shown.length - 1].t), pad.t + ph); ctx.lineTo(x(shown[0].t), pad.t + ph); ctx.closePath();
+      ctx.fillStyle = wash; ctx.fill();
+      // three passes, wide and hazy to thin and hot. Along x the tail cools to teal, the head burns golden white
+      const along = stops => { const g = ctx.createLinearGradient(pad.l, 0, ex, 0); stops.forEach(([o, c]) => g.addColorStop(o, c)); return g; };
+      ctx.lineJoin = "round"; ctx.lineCap = "round";
+      path();
+      ctx.lineWidth = 5; ctx.shadowBlur = 22; ctx.shadowColor = "rgba(255,90,40,.55)";
+      ctx.strokeStyle = along([[0, "rgba(60,190,180,0)"], [.5, "rgba(255,90,40,.08)"], [1, "rgba(255,110,50,.22)"]]);
+      ctx.stroke();
+      ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = "rgba(255,190,70,.7)";
+      ctx.strokeStyle = along([[0, "rgba(90,210,200,0)"], [.4, "rgba(90,210,200,.14)"], [.8, "rgba(255,190,70,.3)"], [1, "rgba(255,210,100,.45)"]]);
+      ctx.stroke();
+      ctx.lineWidth = 1; ctx.shadowBlur = 3; ctx.shadowColor = "rgba(255,242,215,.9)";
+      ctx.strokeStyle = along([[0, "rgba(130,228,218,.12)"], [.55, "rgba(255,236,200,.62)"], [1, "#fff8ea"]]);
+      ctx.stroke();
+      ctx.restore();
+
+      // head: bloom, pulse, dot, value
+      const eyRaw = y(liveMv), ey = Math.min(pad.t + ph, Math.max(pad.t, eyRaw));
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const bloom = ctx.createRadialGradient(ex, ey, 0, ex, ey, 70);
+      bloom.addColorStop(0, "rgba(255,238,200,.26)"); bloom.addColorStop(.25, "rgba(255,160,80,.10)"); bloom.addColorStop(.6, "rgba(80,200,190,.035)"); bloom.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = bloom; ctx.fillRect(ex - 70, ey - 70, 140, 140);
+      if (!calm.matches) {
+        const p = (performance.now() % 1800) / 1800;
+        ctx.strokeStyle = `rgba(255,230,190,${(1 - p) * .45})`; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(ex, ey, 3 + p * 14, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.shadowBlur = 8; ctx.shadowColor = "rgba(255,215,140,.9)"; ctx.fillStyle = "#fffaf0";
+      ctx.beginPath(); ctx.arc(ex, ey, 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      ctx.fillStyle = "rgba(255,240,215,.85)"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      const arrow = eyRaw < pad.t ? " ↑" : eyRaw > pad.t + ph ? " ↓" : "";
+      ctx.fillText((liveMv / 1000).toFixed(3) + arrow, ex + 12, ey);
     }
-    ctx.fillStyle = css("--copper"); ctx.beginPath(); ctx.arc(ex, ey, 4, 0, Math.PI * 2); ctx.fill();
+
+    // hover readout
+    if (hoverX !== null && hoverX > pad.l && hoverX < ex && data.length) {
+      const t = tStart + (hoverX - pad.l) / pw * sp;
+      let i = firstAtOrAfter(t);
+      if (i >= data.length || (i > 0 && t - data[i - 1].t < data[i].t - t)) i--;
+      const d = data[Math.max(0, i)];
+      const hx = Math.round(x(d.t)) + .5, hy = Math.min(pad.t + ph, Math.max(pad.t, y(d.mv)));
+      ctx.strokeStyle = "rgba(255,255,255,.12)";
+      ctx.beginPath(); ctx.moveTo(hx, pad.t); ctx.lineTo(hx, pad.t + ph); ctx.stroke();
+      ctx.fillStyle = "#ece4d4"; ctx.beginPath(); ctx.arc(hx, hy, 2, 0, Math.PI * 2); ctx.fill();
+      const label = `${(d.mv / 1000).toFixed(3)} V  ${fmtClock(d.t, true)}`;
+      ctx.textBaseline = "top"; ctx.textAlign = hx > W - 160 ? "right" : "left";
+      ctx.fillText(label, hx + (ctx.textAlign === "left" ? 6 : -6), pad.t + 16);
+    }
   }
 
-  // frame loop: eases the readout toward the newest sample and scrolls the trace with the clock
+  // frame loop: plays back the viewer's buffer, eases the readout, redraws the trace
   let lastFrame = performance.now();
   function frame(ts) {
-    const dt = ts - lastFrame; lastFrame = ts;
+    const dt = Math.min(200, ts - lastFrame); lastFrame = ts;
+    if (viewer) releasePending();
     const target = data.length ? data[data.length - 1].mv : 0;
     liveMv = calm.matches ? target : liveMv + (target - liveMv) * (1 - Math.exp(-dt / 90));
     if (Math.abs(target - liveMv) < 0.5) liveMv = target;
     $("vNow").textContent = (liveMv / 1000).toFixed(3);
-    draw();
+    draw(dt);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 
-  // Notes
+  // ---------- notes ----------
+  const esc = s => s.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  function renderLog() {
+    const log = $("log");
+    if (!notes.length) { log.innerHTML = "<span>notes appear on the trace as markers</span>"; return; }
+    log.innerHTML = notes.slice().reverse().map(n => `<div><b>${fmtTime(n.t)}</b>  ${esc(n.text)}${n.v ? "  · " + n.v : ""}</div>`).join("");
+  }
   function addNote(text) {
     text = text.trim(); if (!text) return;
-    notes.push({ t: now(), text });
-    const log = $("log");
-    if (notes.length === 1) log.innerHTML = "";
-    const line = document.createElement("div");
-    line.innerHTML = `<b>${fmtTime(now())}</b>  ${text.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}  · ${data.length ? (data[data.length - 1].mv / 1000).toFixed(3) + " V" : "—"}`;
-    log.prepend(line);
+    notes.push({ t: now(), text, v: data.length ? (data[data.length - 1].mv / 1000).toFixed(3) + " V" : "" });
+    renderLog();
   }
   $("btnNote").onclick = () => { addNote($("noteText").value); $("noteText").value = ""; };
   $("noteText").addEventListener("keydown", e => { if (e.key === "Enter") $("btnNote").click(); });
   document.querySelectorAll("[data-q]").forEach(b => b.onclick = () => addNote(b.dataset.q));
-  ["rInt", "eff", "vPack", "use", "lit", "window"].forEach(id => $(id).addEventListener("input", render));
+  const SETTINGS = ["rInt", "eff", "vPack", "use", "lit"];
+  SETTINGS.forEach(id => $(id).addEventListener("input", render));
 
   function setConn(text, cls) { $("connText").textContent = text; $("dot").className = "dot " + (cls || ""); }
+  function alertBanner(msg) { const b = $("banner"); b.hidden = false; b.dataset.alert = "1"; b.textContent = msg + "  (tap to dismiss)"; }
+  $("banner").onclick = () => { const b = $("banner"); b.hidden = true; delete b.dataset.alert; };
 
+  function clearSession() {
+    data.length = 0; notes = []; liveMv = 0; peak = 0; peakT = 0; mahTotal = 0; burnSec = 0;
+    renderLog(); render();
+  }
   function resetSession() {
-    data.length = 0; notes.length = 0; liveMv = 0; peak = 0; peakT = 0; mahTotal = 0; burnSec = 0; t0 = performance.now();
-    $("log").innerHTML = "<span>Notes appear on the trace as markers.</span>";
-    render();
+    clearSession();
+    t0 = performance.now(); session = newSessionId(); sessionStart = Date.now(); pushedIdx = 0;
   }
   $("btnReset").onclick = resetSession;
 
-  // Serial
+  // ---------- serial (the laptop the lamp is plugged into) ----------
   $("btnConnect").onclick = async () => {
     if (port) { await disconnect(); return; }
-    if (!("serial" in navigator)) {
-      setConn("Use Chrome or Edge on a computer", "");
-      alertBanner("This browser can't talk to USB serial. Open this file in Chrome or Edge on your laptop.");
-      return;
-    }
     try {
       stopDemo();
       port = await navigator.serial.requestPort();
       await port.open({ baudRate: 115200 });
-      setConn("Connected · tap NEXT to wake the lamp", "on");
-      $("btnConnect").textContent = "Disconnect";
+      setConn("connected · tap NEXT to wake the lamp", "on");
+      $("btnConnect").textContent = "disconnect";
       gotSample = false;
       readLoop();
       // the firmware streams TEG readings and stays awake only while these keep coming
@@ -411,7 +479,7 @@ canvas { width: 100%; height: 320px; display: block; }
       beatTimer = setInterval(() => sendLine("TEG ON"), 3000);
     } catch (e) {
       port = null;
-      setConn("Not connected", "");
+      setConn("not connected", "");
       if (e && e.name !== "NotFoundError") alertBanner("Couldn't open the port. Close the Arduino Serial Monitor/Plotter first, then try again. (" + e.message + ")");
     }
   };
@@ -424,8 +492,6 @@ canvas { width: 100%; height: 320px; display: block; }
       w.releaseLock();
     } catch (e) {}
   }
-
-  function alertBanner(msg) { const b = $("banner"); b.hidden = false; b.textContent = msg; }
 
   async function readLoop() {
     keepReading = true;
@@ -445,7 +511,7 @@ canvas { width: 100%; height: 320px; display: block; }
           const m = line.match(/TEG,(\d+(?:\.\d+)?)/);
           const mv = m ? parseFloat(m[1]) : NaN;
           if (isFinite(mv) && mv >= 0 && mv < 5000) {
-            if (!gotSample) { gotSample = true; setConn("Connected · live from A0", "on"); }
+            if (!gotSample) { gotSample = true; setConn("live · A0", "on"); }
             addSample(mv);
           }
         }
@@ -462,41 +528,103 @@ canvas { width: 100%; height: 320px; display: block; }
     try { await reader?.cancel(); } catch (e) {}
     try { await port?.close(); } catch (e) {}
     port = null; reader = null;
-    setConn("Not connected", "");
-    $("btnConnect").textContent = "Connect FireBeetle";
+    setConn("not connected", "");
+    $("btnConnect").textContent = "connect";
   }
 
-  // Demo: simulated burn — rises past 1 V, sags as the cold side warms, plateaus
-  function stopDemo() { if (demoTimer) { clearInterval(demoTimer); demoTimer = null; $("btnDemo").textContent = "Demo burn"; } }
+  // ---------- demo: a simulated burn in real time, 12x compressed ----------
+  function stopDemo() { if (demoTimer) { clearInterval(demoTimer); demoTimer = null; $("btnDemo").textContent = "demo"; } }
   $("btnDemo").onclick = () => {
-    if (demoTimer) { stopDemo(); setConn("Not connected", ""); return; }
+    if (demoTimer) { stopDemo(); setConn("not connected", ""); return; }
     if (port) return;
     resetSession();
-    setConn("Demo data (simulated)", "demo");
-    $("btnDemo").textContent = "Stop demo";
-    let k = 0; addNote("Candle lit (demo)");
+    setConn("demo · simulated", "demo");
+    $("btnDemo").textContent = "stop demo";
+    addNote("Candle lit (demo)");
+    const begin = performance.now();
+    let outNoted = false;
     demoTimer = setInterval(() => {
-      k += 1; // one demo step = 6 simulated seconds, drawn every 100 ms
-      const s = k * 6;
+      const s = (performance.now() - begin) / 1000 * 12;  // simulated seconds
       let mv = 1180 * (1 - Math.exp(-s / 90)) - 260 * (1 - Math.exp(-s / 900)) + 20;
       if (s > 1500) mv *= Math.exp(-(s - 1500) / 200);
-      mv += (Math.random() - .5) * 18;
-      if (s % 16 === 0) mv += 40;
-      t0 -= 5900; // fast-forward the session clock
+      mv += (Math.random() - .5) * 14 + Math.sin(s / 7) * 6;
       addSample(Math.max(0, mv));
-      if (s === 1500) addNote("Candle out (demo)");
-      if (s > 2200) stopDemo();
-    }, 100);
+      if (s > 1500 && !outNoted) { outNoted = true; addNote("Candle out (demo)"); }
+      if (s > 2400) stopDemo();
+    }, 250);
   };
 
-  // CSV
+  // ---------- relay to the phone view, through the worker ----------
+  // The laptop posts its new readings once a second. A viewer polls once a
+  // second and plays them back LAG seconds behind, so it moves as smoothly as
+  // the laptop does instead of jumping a second at a time.
+  const RELAY = `${API}/teg/${encodeURIComponent(LAMP_ID)}`;
+  const LAG = 1.6;
+  let pushedIdx = 0, pushing = false;
+  const relayStatus = (text, ok) => { const r = $("relay"); r.textContent = text ? "· " + text : ""; r.className = "relay" + (ok ? " ok" : ""); };
+
+  async function push() {
+    if (pushing || !(gotSample && port) && !demoTimer) return;
+    if (pushedIdx >= data.length && pushedIdx > 0) return;
+    pushing = true;
+    const end = Math.min(data.length, pushedIdx + 2000);
+    const settings = Object.fromEntries(SETTINGS.map(id => [id, num(id)]));
+    settings.demo = !!demoTimer;
+    try {
+      const r = await fetch(RELAY, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session, start: sessionStart, settings,
+          notes: notes.map(n => ({ t: n.t, text: n.text })),
+          samples: data.slice(pushedIdx, end).map(d => [d.t, d.mv]),
+        }),
+      });
+      if (!r.ok) throw new Error(r.status);
+      pushedIdx = end;
+      relayStatus("phone view on", true);
+    } catch (e) { relayStatus("phone relay offline", false); }
+    pushing = false;
+  }
+
+  let viewSession = null, viewAfter = -1, pending = [];
+  function releasePending() {
+    const t = now();
+    while (pending.length && pending[0][0] <= t) { const [st, mv] = pending.shift(); addSample(mv, st); }
+  }
+  async function poll() {
+    try {
+      const q = viewSession ? `?session=${encodeURIComponent(viewSession)}&after=${viewAfter}` : "";
+      const r = await fetch(RELAY + q, { cache: "no-store" });
+      const s = await r.json();
+      if (!s.session) { setConn("waiting for the laptop", ""); return; }
+      if (s.session !== viewSession) {  // a new session on the laptop: start over
+        viewSession = s.session; viewAfter = -1; pending = []; viewClock = null;
+        clearSession();
+      }
+      if (s.settings) for (const id of SETTINGS) if (isFinite(s.settings[id])) $(id).value = s.settings[id];
+      for (const smp of s.samples) if (smp[0] > viewAfter) { pending.push(smp); viewAfter = smp[0]; }
+      if (s.samples.length) {
+        // keep the playback clock LAG behind the newest reading; snap if it drifted far
+        const target = viewAfter - LAG;
+        if (viewClock === null || Math.abs(now() - target) > 3) { viewClock = target; viewClockAt = performance.now(); }
+        else { viewClock += (target - now()) * .15; }
+      }
+      const prevNotes = notes.length;
+      notes = s.notes || [];
+      if (notes.length !== prevNotes) renderLog();
+      const stale = s.now - s.updated > 10000;
+      setConn(stale ? "laptop stopped streaming" : s.settings?.demo ? "phone view · demo" : "phone view · live", stale ? "" : s.settings?.demo ? "demo" : "on");
+    } catch (e) { setConn("can't reach the relay", ""); }
+  }
+
+  // ---------- CSV ----------
   $("btnCsv").onclick = () => {
     const rows = ["seconds,millivolts,est_mA,note"];
     let ni = 0;
     for (const d of data) {
       let note = "";
       while (ni < notes.length && notes[ni].t <= d.t) { note += (note ? " | " : "") + notes[ni].text; ni++; }
-      rows.push(`${d.t.toFixed(1)},${Math.round(d.mv)},${chargeMa(d.mv).toFixed(2)},"${note.replace(/"/g, "'")}"`);
+      rows.push(`${d.t.toFixed(2)},${Math.round(d.mv)},${chargeMa(d.mv).toFixed(2)},"${note.replace(/"/g, "'")}"`);
     }
     const blob = new Blob([rows.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");
@@ -505,6 +633,14 @@ canvas { width: 100%; height: 320px; display: block; }
     a.click();
   };
 
+  if (viewer) {
+    SETTINGS.forEach(id => $(id).disabled = true);
+    setConn("phone view · connecting", "");
+    poll();
+    setInterval(poll, 1000);
+  } else {
+    setInterval(push, 1000);
+  }
   render();
 })();
 </script>

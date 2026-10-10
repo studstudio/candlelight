@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#050607">
 <title>TEG Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..400,100&display=swap">
 <style>
 /* One flat dark field, hairlines instead of boxes, everything monospace. The trace is the only thing that glows. */
 @font-face { font-family: "JetBrains Mono Local"; src: url("fonts/JetBrainsMono-Regular.ttf") format("truetype"); font-display: swap; }
@@ -54,7 +56,10 @@ button, input, select { font: inherit; color: inherit; }
 @media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }
 .readout { background: var(--bg); padding: 10px 14px; display: grid; gap: 2px; align-content: center; min-width: 0; }
 .big { display: flex; align-items: baseline; gap: 6px; }
-.big .v { font-weight: 300; font-size: 38px; line-height: 1.05; letter-spacing: -.02em; font-variant-numeric: tabular-nums; text-shadow: 0 0 22px rgba(255, 205, 130, .22); }
+.big .v { font-family: "Fraunces", Georgia, serif; font-weight: 300; font-size: 44px; line-height: 1.05; text-shadow: 0 0 22px rgba(255, 205, 130, .22); white-space: nowrap; }
+/* Fraunces' figures are proportional: fixed slots keep the gliding number from shuffling sideways */
+.big .v .d { display: inline-block; width: .64em; text-align: center; }
+.big .v .p { display: inline-block; width: .26em; text-align: center; }
 .big .u { color: var(--muted); font-size: 13px; }
 .sub { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -418,14 +423,15 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   }
 
   // frame loop: plays back the viewer's buffer, eases the readout, redraws the trace
-  let lastFrame = performance.now();
+  let lastFrame = performance.now(), shownV = "";
   function frame(ts) {
     const dt = Math.min(200, ts - lastFrame); lastFrame = ts;
     if (viewer) releasePending();
     const target = data.length ? data[data.length - 1].mv : 0;
     liveMv = calm.matches ? target : liveMv + (target - liveMv) * (1 - Math.exp(-dt / 90));
     if (Math.abs(target - liveMv) < 0.5) liveMv = target;
-    $("vNow").textContent = (liveMv / 1000).toFixed(3);
+    const vs = (liveMv / 1000).toFixed(3);
+    if (vs !== shownV) { shownV = vs; $("vNow").innerHTML = [...vs].map(c => c === "." ? '<span class="p">.</span>' : `<span class="d">${c}</span>`).join(""); }
     draw(dt);
     requestAnimationFrame(frame);
   }

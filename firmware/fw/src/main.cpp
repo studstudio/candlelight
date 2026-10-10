@@ -1365,6 +1365,61 @@ void saveSeenFlags() {
   if (saveManifest(doc)) seenDirty = false;
 }
 
+// ---------- TEG voltage monitor (teg_monitor.html over USB serial) ----------
+//
+// TEG + on A0 (GPIO36, ADC1, so it reads fine with WiFi on), TEG - on GND.
+// The monitor page sends "TEG ON" every few seconds while it is connected;
+// while those keep coming the lamp prints "TEG,<millivolts>" once a second
+// and stays awake instead of sleeping. "TEG OFF", or 10 s without a
+// heartbeat, ends it. The page ignores every other log line.
+
+const int TEG_PIN = A0;                     // GPIO36, input only
+const uint32_t TEG_SAMPLE_MS = 1000;        // one printed reading per this
+const uint32_t TEG_HEARTBEAT_MS = 10000;    // monitoring ends this long after the page's last "TEG ON"
+volatile uint32_t tegLastHeartbeat = 0;     // millis() of the last "TEG ON" (0 = not monitoring)
+
+bool tegMonitoring() {
+  return tegLastHeartbeat && millis() - tegLastHeartbeat < TEG_HEARTBEAT_MS;
+}
+
+// calibrated millivolts on A0, averaged over 3 reads to take the edge off ADC noise.
+// At 11 dB the ESP32 reads about 0.1 to 3.1 V; below ~100 mV it reads 0
+uint32_t readTegMv() {
+  uint32_t sum = 0;
+  for (int i = 0; i < 3; i++) sum += analogReadMilliVolts(TEG_PIN);
+  return sum / 3;
+}
+
+void tegTask(void*) {
+  analogSetPinAttenuation(TEG_PIN, ADC_11db);
+  String cmd;
+  uint32_t lastSample = 0;
+  for (;;) {
+    while (Serial.available()) {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r') {
+        cmd.trim();
+        cmd.toUpperCase();
+        if (cmd == "TEG ON") {
+          if (!tegMonitoring()) Serial.println("TEG monitor on: staying awake while the page is connected");
+          tegLastHeartbeat = millis() | 1;  // never 0
+        } else if (cmd == "TEG OFF") {
+          if (tegLastHeartbeat) Serial.println("TEG monitor off");
+          tegLastHeartbeat = 0;
+        }
+        cmd = "";
+      } else if (cmd.length() < 32) {
+        cmd += c;
+      }
+    }
+    if (tegMonitoring() && millis() - lastSample >= TEG_SAMPLE_MS) {
+      lastSample = millis();
+      Serial.printf("TEG,%u\n", (unsigned)readTegMv());
+    }
+    delay(20);
+  }
+}
+
 // ---------- WiFi setup (captive portal) ----------
 
 const int RESET_BUTTON = D5;                 // GPIO0, the BOOT button
@@ -1899,8 +1954,9 @@ void manualSync() {
 // toggles the info box), a 5 s hold syncs
 void idleWindow() {
   uint32_t last = millis();
-  while (millis() - last < AWAKE_IDLE_MS) {
-    bool pressed = waitForNext(AWAKE_IDLE_MS - (millis() - last));
+  while (millis() - last < AWAKE_IDLE_MS || tegMonitoring()) {  // the TEG monitor page keeps the lamp up
+    uint32_t idle = millis() - last;
+    bool pressed = waitForNext(idle < AWAKE_IDLE_MS ? AWAKE_IDLE_MS - idle : 1000);
     if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
     if (syncRequested) {
       manualSync();
@@ -1925,6 +1981,7 @@ void idleWindow() {
 }
 
 [[noreturn]] void goToSleep() {
+  if (tegMonitoring()) idleWindow();   // the TEG monitor is connected: stay up (buttons work) until it goes away
   waitForWriter();                     // the images must be on flash (and acked) before sleep wipes PSRAM
   if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
@@ -1953,6 +2010,7 @@ void setup() {
   Serial.setTxBufferSize(4096);
   Serial.begin(115200);
   otaguard::begin(FW_VERSION);  // before anything that could fail
+  xTaskCreate(tegTask, "teg", 4096, nullptr, 1, nullptr);  // early, so a timer wake hears the monitor page too
 #ifdef FW_TEST_CRASH  // test builds only: proves the rollback works
   Serial.println("FW_TEST_CRASH: crashing on purpose");
   delay(200);

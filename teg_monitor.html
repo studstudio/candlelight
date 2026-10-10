@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ember TEG Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+/* Layout: instrument bench. Big live readout + state, gauges row, full-width trace, log beneath. Single dark theme by choice (reads well next to a flame). */
+:root {
+  --bg: #0e1216;
+  --panel: #151b21;
+  --line: #24303a;
+  --grid: #1c252d;
+  --fg: #dfe6ea;
+  --muted: #7d8c97;
+  --copper: #e08a4c;
+  --copper-dim: #6b4128;
+  --cool: #6fb7c9;
+  --ok: #8fc87a;
+  --warn: #e6c25a;
+  --crit: #e5604f;
+  --display: "Chakra Petch", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 14px/1.5 var(--body);
+  padding: 20px 16px 40px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.brand { display: flex; align-items: baseline; gap: 12px; }
+.brand h1 { font: 700 22px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; margin: 0; }
+.brand span { font: 12px var(--mono); color: var(--muted); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button, select, input {
+  font: 500 13px var(--body); color: var(--fg);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px 12px;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--copper); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
+button.primary { background: var(--copper); color: #1a0f08; border-color: var(--copper); font-weight: 600; }
+button.primary:hover { filter: brightness(1.08); }
+.conn { display: inline-flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.dot.demo { background: var(--warn); }
+
+.hero {
+  display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px;
+}
+@media (max-width: 760px) { .hero { grid-template-columns: 1fr; } }
+.readout {
+  background: radial-gradient(120% 140% at 0% 0%, rgba(224,138,76,.14), transparent 55%), var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px;
+  display: grid; gap: 6px; min-width: 0;
+}
+.label { font: 500 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.big { display: flex; align-items: baseline; gap: 10px; }
+.big .v { font: 600 clamp(64px, 12vw, 112px)/.95 var(--display); font-variant-numeric: tabular-nums; color: var(--copper); }
+.big .u { font: 500 22px var(--display); color: var(--muted); }
+.sub { font: 13px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.state {
+  justify-self: start; margin-top: 6px;
+  font: 600 12px var(--mono); letter-spacing: .12em; text-transform: uppercase;
+  padding: 4px 10px; border-radius: 999px; border: 1px solid currentColor;
+}
+.s-cold { color: var(--cool); } .s-warm { color: var(--warn); } .s-burn { color: var(--copper); }
+.s-plat { color: var(--ok); } .s-cool { color: var(--cool); } .s-crit { color: var(--crit); }
+
+.gauges { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.g { background: var(--panel); padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+.g .val { font: 600 26px/1.1 var(--display); font-variant-numeric: tabular-nums; }
+.g .hint { font: 11px var(--mono); color: var(--muted); }
+
+.trace { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 10px; display: grid; gap: 10px; min-width: 0; }
+.trace-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font: 11px var(--mono); color: var(--muted); }
+.legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 6px; }
+canvas { width: 100%; height: 320px; display: block; }
+
+.bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 760px) { .bottom { grid-template-columns: 1fr; } }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.row input[type=text] { flex: 1 1 180px; min-width: 0; }
+.row input[type=number] { width: 90px; }
+.field { display: grid; gap: 4px; }
+.field label { font: 11px var(--mono); color: var(--muted); }
+.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.settings input { width: 100%; }
+.log { font: 12px/1.6 var(--mono); max-height: 180px; overflow: auto; color: var(--muted); }
+.log b { color: var(--fg); font-weight: 500; }
+.note { font-size: 12px; color: var(--muted); max-width: 70ch; }
+.banner { border: 1px solid var(--crit); color: var(--crit); background: rgba(229,96,79,.08); border-radius: 8px; padding: 10px 14px; font: 13px var(--mono); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><h1>Ember · TEG Monitor</h1><span>FireBeetle A0 · GPIO36</span></div>
+    <div class="controls">
+      <span class="conn"><span class="dot" id="dot"></span><span id="connText">Not connected</span></span>
+      <button class="primary" id="btnConnect">Connect FireBeetle</button>
+      <button id="btnDemo">Demo burn</button>
+      <button id="btnReset">New session</button>
+      <button id="btnCsv">Export CSV</button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <section class="hero">
+    <div class="readout">
+      <div class="label">TEG open-circuit voltage</div>
+      <div class="big"><span class="v" id="vNow">0.000</span><span class="u">V</span></div>
+      <div class="sub" id="vSub">waiting for data</div>
+      <div class="state s-cold" id="state">Cold</div>
+    </div>
+    <div class="gauges">
+      <div class="g"><div class="label">Est. charge into pack</div><div class="val" id="gMa">0.0 mA</div><div class="hint">at MPPT 50%, after booster losses</div></div>
+      <div class="g"><div class="label">Break-even candle</div><div class="val" id="gBe">—</div><div class="hint" id="gBeHint">per day at 7 mAh use</div></div>
+      <div class="g"><div class="label">Peak this session</div><div class="val" id="gPeak">0.000 V</div><div class="hint" id="gPeakT">—</div></div>
+      <div class="g"><div class="label">Trend (last 2 min)</div><div class="val" id="gSlope">—</div><div class="hint">mV per minute</div></div>
+      <div class="g"><div class="label">Burn time</div><div class="val" id="gBurn">0:00</div><div class="hint">time above "lit" threshold</div></div>
+      <div class="g"><div class="label">Harvested (est.)</div><div class="val" id="gMah">0.00 mAh</div><div class="hint" id="gMahHint">≈ 0.0 days of use</div></div>
+    </div>
+  </section>
+
+  <section class="trace">
+    <div class="trace-head">
+      <div class="label">Live trace</div>
+      <div class="row">
+        <div class="legend">
+          <span><i style="background:var(--copper)"></i>TEG voltage</span>
+          <span><i style="background:var(--crit)"></i>3.0 V BQ input limit</span>
+          <span><i style="background:var(--cool)"></i>Lit threshold</span>
+        </div>
+        <select id="window" aria-label="Time window">
+          <option value="300">Last 5 min</option>
+          <option value="900">Last 15 min</option>
+          <option value="1800" selected>Last 30 min</option>
+          <option value="3600">Last 60 min</option>
+          <option value="0">Whole session</option>
+        </select>
+      </div>
+    </div>
+    <canvas id="chart"></canvas>
+  </section>
+
+  <section class="bottom">
+    <div class="box">
+      <div class="label">Burn notes</div>
+      <div class="row">
+        <input type="text" id="noteText" placeholder="e.g. moved flame 5 mm closer, added ice">
+        <button id="btnNote">Mark</button>
+      </div>
+      <div class="row">
+        <button data-q="Candle lit">Candle lit</button>
+        <button data-q="Ice added">Ice added</button>
+        <button data-q="Flame moved">Flame moved</button>
+        <button data-q="Candle out">Candle out</button>
+      </div>
+      <div class="log" id="log"><span>Notes appear on the trace as markers.</span></div>
+    </div>
+    <div class="box">
+      <div class="label">Model settings</div>
+      <div class="settings">
+        <div class="field"><label for="rInt">TEG resistance (Ω)</label><input type="number" id="rInt" step="0.1" value="2.0"></div>
+        <div class="field"><label for="eff">Booster efficiency (%)</label><input type="number" id="eff" step="1" value="75"></div>
+        <div class="field"><label for="vPack">Pack voltage (V)</label><input type="number" id="vPack" step="0.1" value="5.0"></div>
+        <div class="field"><label for="use">Daily use (mAh)</label><input type="number" id="use" step="0.5" value="7"></div>
+        <div class="field"><label for="lit">Lit threshold (mV)</label><input type="number" id="lit" step="10" value="150"></div>
+      </div>
+      <p class="note">Charge is an estimate: power at the TEG's best point is V²/(4R), times booster efficiency, divided by pack voltage. Measure the TEG's real resistance once and enter it here to tighten the numbers. Warning fires above 2.8 V, before the BQ25504's 3 V input limit.</p>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const data = [];   // {t: seconds since session start, mv}
+  const notes = [];  // {t, text}
+  let t0 = performance.now();
+  let demoTimer = null, port = null, reader = null, keepReading = false, beatTimer = null, gotSample = false;
+  let peak = 0, peakT = 0, mahTotal = 0, burnSec = 0;
+
+  const num = id => parseFloat($(id).value) || 0;
+  const now = () => (performance.now() - t0) / 1000;
+  const fmtTime = s => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m + ":" + String(s % 60).padStart(2, "0"); };
+
+  function chargeMa(mv) {
+    const v = mv / 1000, r = Math.max(0.1, num("rInt"));
+    const p = v * v / (4 * r) * (num("eff") / 100);
+    return p / Math.max(0.5, num("vPack")) * 1000;
+  }
+
+  function addSample(mv) {
+    const t = now();
+    const prev = data[data.length - 1];
+    data.push({ t, mv });
+    if (prev) {
+      const dt = t - prev.t;
+      if (dt > 0 && dt < 30) {
+        mahTotal += chargeMa((mv + prev.mv) / 2) * dt / 3600;
+        if (mv >= num("lit")) burnSec += dt;
+      }
+    }
+    if (mv > peak) { peak = mv; peakT = t; }
+    render();
+  }
+
+  function slopePerMin() {
+    const t = now();
+    const recent = data.filter(d => d.t >= t - 120);
+    if (recent.length < 5) return null;
+    const n = recent.length;
+    let sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (const d of recent) { sx += d.t; sy += d.mv; sxx += d.t * d.t; sxy += d.t * d.mv; }
+    const den = n * sxx - sx * sx;
+    return den ? (n * sxy - sx * sy) / den * 60 : null;
+  }
+
+  function stateFor(mv, slope) {
+    if (mv >= 2800) return ["Over limit", "s-crit"];
+    if (mv < num("lit")) return [slope !== null && slope < -20 && peak > num("lit") ? "Cooling" : "Cold", "s-cold"];
+    if (slope === null) return ["Burning", "s-burn"];
+    if (slope > 15) return ["Warming", "s-warm"];
+    if (slope < -15) return ["Falling", "s-cool"];
+    return ["Plateau", "s-plat"];
+  }
+
+  function render() {
+    const last = data[data.length - 1];
+    const mv = last ? last.mv : 0;
+    const slope = slopePerMin();
+    $("vNow").textContent = (mv / 1000).toFixed(3);
+    $("vSub").textContent = last ? `${Math.round(mv)} mV · ${data.length} samples · session ${fmtTime(now())}` : "waiting for data";
+    const [st, cls] = stateFor(mv, slope);
+    const s = $("state"); s.textContent = st; s.className = "state " + cls;
+    const ma = chargeMa(mv);
+    $("gMa").textContent = ma.toFixed(1) + " mA";
+    const use = num("use");
+    $("gBe").textContent = ma > 0.2 ? Math.round(use / ma * 60) + " min" : "—";
+    $("gBeHint").textContent = `per day at ${use} mAh use`;
+    $("gPeak").textContent = (peak / 1000).toFixed(3) + " V";
+    $("gPeakT").textContent = peak ? "at " + fmtTime(peakT) : "—";
+    $("gSlope").textContent = slope === null ? "—" : (slope > 0 ? "+" : "") + slope.toFixed(0);
+    $("gBurn").textContent = fmtTime(burnSec);
+    $("gMah").textContent = mahTotal.toFixed(2) + " mAh";
+    $("gMahHint").textContent = `≈ ${(use > 0 ? mahTotal / use : 0).toFixed(1)} days of use`;
+    const b = $("banner");
+    if (mv >= 2800) { b.hidden = false; b.textContent = "TEG above 2.8 V. The BQ25504 input limit is 3 V and the FireBeetle pin limit is 3.3 V. Back the flame off or raise the copper tip."; }
+    else b.hidden = true;
+    draw();
+  }
+
+  // Chart
+  const cv = $("chart"), ctx = cv.getContext("2d");
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function draw() {
+    const dpr = window.devicePixelRatio || 1;
+    const W = cv.clientWidth, H = cv.clientHeight;
+    if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const pad = { l: 46, r: 12, t: 10, b: 24 };
+    const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+    const win = parseFloat($("window").value);
+    const tEnd = Math.max(now(), 10);
+    const tStart = win ? Math.max(0, tEnd - win) : 0;
+    const shown = data.filter(d => d.t >= tStart);
+    const maxMv = Math.max(1500, peak * 1.15, ...shown.map(d => d.mv));
+    const yMax = Math.min(3300, Math.ceil(maxMv / 500) * 500);
+    const x = t => pad.l + (t - tStart) / Math.max(1, tEnd - tStart) * pw;
+    const y = mv => pad.t + ph - Math.min(mv, yMax) / yMax * ph;
+
+    ctx.font = "11px " + css("--mono");
+    ctx.textBaseline = "middle";
+    // grid
+    for (let v = 0; v <= yMax; v += 500) {
+      ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(pad.l, y(v)); ctx.lineTo(W - pad.r, y(v)); ctx.stroke();
+      ctx.fillStyle = css("--muted"); ctx.textAlign = "right";
+      ctx.fillText((v / 1000).toFixed(1) + " V", pad.l - 8, y(v));
+    }
+    const span = tEnd - tStart;
+    const step = span <= 360 ? 60 : span <= 1200 ? 300 : span <= 2400 ? 600 : 900;
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (let t = Math.ceil(tStart / step) * step; t <= tEnd; t += step) {
+      ctx.fillStyle = css("--muted"); ctx.fillText(fmtTime(t), x(t), H - pad.b + 6);
+    }
+    // limit + threshold lines
+    const hline = (mv, color) => { if (mv > yMax) return; ctx.strokeStyle = color; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(pad.l, y(mv)); ctx.lineTo(W - pad.r, y(mv)); ctx.stroke(); ctx.setLineDash([]); };
+    hline(3000, css("--crit"));
+    hline(num("lit"), css("--cool"));
+    // notes
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    for (const n of notes) {
+      if (n.t < tStart) continue;
+      ctx.strokeStyle = css("--copper-dim"); ctx.beginPath(); ctx.moveTo(x(n.t), pad.t); ctx.lineTo(x(n.t), pad.t + ph); ctx.stroke();
+      ctx.fillStyle = css("--muted"); ctx.fillText(n.text.slice(0, 22), Math.min(x(n.t) + 4, W - pad.r - 120), pad.t + 2);
+    }
+    if (shown.length < 2) return;
+    // area
+    const g = ctx.createLinearGradient(0, pad.t, 0, pad.t + ph);
+    g.addColorStop(0, "rgba(224,138,76,.28)"); g.addColorStop(1, "rgba(224,138,76,0)");
+    ctx.beginPath(); ctx.moveTo(x(shown[0].t), y(0));
+    for (const d of shown) ctx.lineTo(x(d.t), y(d.mv));
+    ctx.lineTo(x(shown[shown.length - 1].t), y(0)); ctx.closePath();
+    ctx.fillStyle = g; ctx.fill();
+    // line
+    ctx.beginPath();
+    shown.forEach((d, i) => i ? ctx.lineTo(x(d.t), y(d.mv)) : ctx.moveTo(x(d.t), y(d.mv)));
+    ctx.strokeStyle = css("--copper"); ctx.lineWidth = 2; ctx.stroke();
+    // endpoint
+    const L = shown[shown.length - 1];
+    ctx.fillStyle = css("--copper"); ctx.beginPath(); ctx.arc(x(L.t), y(L.mv), 4, 0, Math.PI * 2); ctx.fill();
+  }
+  new ResizeObserver(draw).observe(cv);
+
+  // Notes
+  function addNote(text) {
+    text = text.trim(); if (!text) return;
+    notes.push({ t: now(), text });
+    const log = $("log");
+    if (notes.length === 1) log.innerHTML = "";
+    const line = document.createElement("div");
+    line.innerHTML = `<b>${fmtTime(now())}</b>  ${text.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}  · ${data.length ? (data[data.length - 1].mv / 1000).toFixed(3) + " V" : "—"}`;
+    log.prepend(line);
+    draw();
+  }
+  $("btnNote").onclick = () => { addNote($("noteText").value); $("noteText").value = ""; };
+  $("noteText").addEventListener("keydown", e => { if (e.key === "Enter") $("btnNote").click(); });
+  document.querySelectorAll("[data-q]").forEach(b => b.onclick = () => addNote(b.dataset.q));
+  ["rInt", "eff", "vPack", "use", "lit", "window"].forEach(id => $(id).addEventListener("input", render));
+
+  function setConn(text, cls) { $("connText").textContent = text; $("dot").className = "dot " + (cls || ""); }
+
+  function resetSession() {
+    data.length = 0; notes.length = 0; peak = 0; peakT = 0; mahTotal = 0; burnSec = 0; t0 = performance.now();
+    $("log").innerHTML = "<span>Notes appear on the trace as markers.</span>";
+    render();
+  }
+  $("btnReset").onclick = resetSession;
+
+  // Serial
+  $("btnConnect").onclick = async () => {
+    if (port) { await disconnect(); return; }
+    if (!("serial" in navigator)) {
+      setConn("Use Chrome or Edge on a computer", "");
+      alertBanner("This browser can't talk to USB serial. Open this file in Chrome or Edge on your laptop.");
+      return;
+    }
+    try {
+      stopDemo();
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      setConn("Connected · tap NEXT to wake the lamp", "on");
+      $("btnConnect").textContent = "Disconnect";
+      gotSample = false;
+      readLoop();
+      // the firmware streams TEG readings and stays awake only while these keep coming
+      sendLine("TEG ON");
+      beatTimer = setInterval(() => sendLine("TEG ON"), 3000);
+    } catch (e) {
+      port = null;
+      setConn("Not connected", "");
+      if (e && e.name !== "NotFoundError") alertBanner("Couldn't open the port. Close the Arduino Serial Monitor/Plotter first, then try again. (" + e.message + ")");
+    }
+  };
+
+  async function sendLine(text) {
+    if (!port?.writable) return;
+    try {
+      const w = port.writable.getWriter();
+      await w.write(new TextEncoder().encode(text + "\n"));
+      w.releaseLock();
+    } catch (e) {}
+  }
+
+  function alertBanner(msg) { const b = $("banner"); b.hidden = false; b.textContent = msg; }
+
+  async function readLoop() {
+    keepReading = true;
+    const decoder = new TextDecoderStream();
+    const closed = port.readable.pipeTo(decoder.writable).catch(() => {});
+    reader = decoder.readable.getReader();
+    let buf = "";
+    try {
+      while (keepReading) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+          // only "TEG,<mV>" lines; the lamp's other log lines are ignored
+          const m = line.match(/TEG,(\d+(?:\.\d+)?)/);
+          const mv = m ? parseFloat(m[1]) : NaN;
+          if (isFinite(mv) && mv >= 0 && mv < 5000) {
+            if (!gotSample) { gotSample = true; setConn("Connected · live from A0", "on"); }
+            addSample(mv);
+          }
+        }
+      }
+    } catch (e) { alertBanner("Lost the connection to the FireBeetle. Check the USB cable and reconnect."); }
+    try { reader.releaseLock(); } catch (e) {}
+    await closed;
+  }
+
+  async function disconnect() {
+    clearInterval(beatTimer); beatTimer = null;
+    await sendLine("TEG OFF");  // lets the lamp go back to sleep right away
+    keepReading = false;
+    try { await reader?.cancel(); } catch (e) {}
+    try { await port?.close(); } catch (e) {}
+    port = null; reader = null;
+    setConn("Not connected", "");
+    $("btnConnect").textContent = "Connect FireBeetle";
+  }
+
+  // Demo: simulated burn — rises past 1 V, sags as the cold side warms, plateaus
+  function stopDemo() { if (demoTimer) { clearInterval(demoTimer); demoTimer = null; $("btnDemo").textContent = "Demo burn"; } }
+  $("btnDemo").onclick = () => {
+    if (demoTimer) { stopDemo(); setConn("Not connected", ""); return; }
+    if (port) return;
+    resetSession();
+    setConn("Demo data (simulated)", "demo");
+    $("btnDemo").textContent = "Stop demo";
+    let k = 0; addNote("Candle lit (demo)");
+    demoTimer = setInterval(() => {
+      k += 1; // one demo step = 6 simulated seconds, drawn every 100 ms
+      const s = k * 6;
+      let mv = 1180 * (1 - Math.exp(-s / 90)) - 260 * (1 - Math.exp(-s / 900)) + 20;
+      if (s > 1500) mv *= Math.exp(-(s - 1500) / 200);
+      mv += (Math.random() - .5) * 18;
+      if (s % 16 === 0) mv += 40;
+      t0 -= 5900; // fast-forward the session clock
+      addSample(Math.max(0, mv));
+      if (s === 1500) addNote("Candle out (demo)");
+      if (s > 2200) stopDemo();
+    }, 100);
+  };
+
+  // CSV
+  $("btnCsv").onclick = () => {
+    const rows = ["seconds,millivolts,est_mA,note"];
+    let ni = 0;
+    for (const d of data) {
+      let note = "";
+      while (ni < notes.length && notes[ni].t <= d.t) { note += (note ? " | " : "") + notes[ni].text; ni++; }
+      rows.push(`${d.t.toFixed(1)},${Math.round(d.mv)},${chargeMa(d.mv).toFixed(2)},"${note.replace(/"/g, "'")}"`);
+    }
+    const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "teg-burn-" + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-") + ".csv";
+    a.click();
+  };
+
+  render();
+})();
+</script>
+</body>
+</html>

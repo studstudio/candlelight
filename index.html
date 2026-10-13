@@ -379,12 +379,23 @@
   .font-dial-btn circle { transition: opacity 0.15s, r 0.1s; }
 
   .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cream-dim); margin-bottom: 10px; }
-  .contacts-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .contacts-row { overflow: hidden; padding-bottom: 4px; }
+  /* the chips ride a track that slides so the selected lamp always sits right over the send arrow */
+  .contacts-track { display: flex; gap: 14px; width: max-content; min-width: 100%; transition: transform 1.6s cubic-bezier(.35,.6,.25,1); will-change: transform; }
+  .contacts-track.no-anim { transition: none; }
+  @media (prefers-reduced-motion: reduce) { .contacts-track { transition: none; } }
   .contact-chip {
     flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 5px;
     padding: 4px; border-radius: 12px; opacity: 0.55; width: 68px;
   }
   .contact-chip.selected { opacity: 1; }
+  /* nothing on the page is selectable except text the person is actually typing */
+  html, body, body * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  input, textarea, [contenteditable="true"] { user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
+  .contact-chip, .contact-chip *, .contacts-row, .modal-sheet h2, .modal-sheet label, .hold-hint { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .contact-chip { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; touch-action: pan-x; }
+  .contact-chip .contact-avatar { transition: transform .45s cubic-bezier(.2,.8,.3,1); }
+  .contact-chip.pressing .contact-avatar { transform: scale(.9); }
   .contact-avatar {
     width: 52px; height: 52px; border-radius: 50%; background: var(--bg-elevated);
     border: 2px solid var(--line); display: flex; align-items: center; justify-content: center;
@@ -411,14 +422,13 @@
   }
   .send-btn:active { transform: scale(0.94); }
   .send-btn:disabled { opacity: 0.3; box-shadow: none; }
-  /* hold-to-send: a slow ring sweeps around the button; a quick tap still sends instantly */
-  @property --hold { syntax: '<angle>'; inherits: true; initial-value: 0deg; }
+  /* send arrow: grey outline arrow; the fill color runs along it while the button is held (or quickly after a tap) */
+  @property --fill { syntax: '<number>'; inherits: true; initial-value: 0; }
   .send-btn { position: relative; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-  .send-btn::after { content: ''; position: absolute; inset: -9px; border-radius: 50%; pointer-events: none; opacity: 0;
-    background: conic-gradient(var(--ember) var(--hold), transparent 0);
-    -webkit-mask: radial-gradient(circle, transparent 0 calc(50% - 4px), #000 calc(50% - 3px)); mask: radial-gradient(circle, transparent 0 calc(50% - 4px), #000 calc(50% - 3px));
-    transition: opacity .2s; }
-  .send-btn.holding::after { opacity: 1; }
+  .send-arrow { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -26px 0 0 -23px; pointer-events: none; overflow: visible; }
+  .send-arrow .a-base { stroke: #a5a29a; }
+  .send-arrow-fill { clip-path: inset(calc((1 - var(--fill)) * 100%) 0 0 0); }
+  .send-arrow .a-fill { stroke: var(--lime); }
   .send-btn.holding { transform: scale(0.96); }
   .send-btn { color: #1a1108; font-family: inherit; font-size: 17px; font-weight: 700; letter-spacing: 0.04em; text-transform: lowercase; }
   .send-status { margin-top: 14px; font-size: 12px; color: var(--cream-dim); text-align: center; min-height: 16px; }
@@ -426,21 +436,32 @@
   .send-status.fail { color: var(--fail); }
   .last-seen { font-size: 11px; color: var(--cream-dim); text-align: center; margin-top: 6px; opacity: 0.7; }
 
+  /* lamp editor: a small card that blooms in at the center of the page; no dimming behind it */
   .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none;
-    align-items: flex-end; justify-content: center; z-index: 50;
+    position: fixed; inset: 0; background: transparent; display: flex;
+    align-items: center; justify-content: center; z-index: 50; padding: 24px;
+    visibility: hidden; pointer-events: none; opacity: 0;
+    transition: opacity .22s ease, visibility 0s linear .3s;
   }
-  .modal-backdrop.open { display: flex; }
+  .modal-backdrop.open { visibility: visible; pointer-events: auto; opacity: 1; transition: opacity .2s ease, visibility 0s; }
   .modal-sheet {
-    background: var(--bg-elevated); border-radius: 18px 18px 0 0; padding: 22px 20px 32px;
-    width: 100%; max-width: 480px; border-top: 1px solid var(--line);
+    background: var(--bg-elevated); border-radius: 16px; padding: 18px 18px 16px;
+    width: 100%; max-width: 290px; border: 1px solid var(--line);
+    box-shadow: 0 18px 50px rgba(0,0,0,.28);
+    transform: translateY(14px) scale(.9); transform-origin: 50% 55%;
+    transition: transform .3s cubic-bezier(.4,0,1,1);
   }
+  .modal-backdrop.open .modal-sheet { transform: none; transition: transform .45s cubic-bezier(.2,1.1,.3,1); }
+  @media (prefers-reduced-motion: reduce) { .modal-sheet, .modal-backdrop.open .modal-sheet { transition: none; } }
   .modal-sheet h2 { font-size: 15px; font-weight: 600; margin: 0 0 16px; color: var(--cream); }
   .modal-sheet label { font-size: 12px; color: var(--cream-dim); display: block; margin-bottom: 6px; }
   .modal-sheet input[type=text] {
     width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line);
     background: var(--bg); color: var(--cream); font-size: 14px; margin-bottom: 14px;
   }
+  .modal-sheet h2 { margin-bottom: 12px; }
+  .modal-sheet input[type=text] { padding: 9px 10px; margin-bottom: 10px; }
+  .modal-actions button { padding: 9px; }
   .modal-actions { display: flex; gap: 10px; margin-top: 4px; }
   .modal-actions button { flex: 1; padding: 12px; border-radius: 10px; border: none; font-size: 14px; font-weight: 600; }
   .privacy-toggle { display: flex; gap: 10px; margin: 18px 0 4px; }
@@ -830,6 +851,32 @@ html, body { background-color: #fdd48d; background-image: none; }
 /* round 52: send button is solid lime */
 .send-btn:not(:disabled) { background: var(--lime); color: #4a2c1c; border: none; box-shadow: 0 0 0 6px rgba(181, 251, 0, 0.16), 0 0 28px rgba(150, 220, 0, 0.3); }
 
+/* round 53: the big send circle is lime even before a photo + lamp are picked (dimmed until it can fire) */
+.send-btn:disabled { background: var(--lime); color: #4a2c1c; border: none; opacity: .4; box-shadow: none; }
+
+/* round 54: send circle is sage, no glow */
+.send-btn, .send-btn:not(:disabled), .send-btn:disabled { background: var(--sage); box-shadow: none; }
+
+/* round 55: send circle uses the same olive sage as the selected private/gallery button */
+.send-btn, .send-btn:not(:disabled), .send-btn:disabled { background: #a8b86e; }
+
+/* round 56: no dimming, no label; holding fills a small lime ring inside the circle */
+.send-btn, .send-btn:disabled { opacity: 1; font-size: 0; color: transparent; }
+.send-btn::after { inset: 14px; background: conic-gradient(var(--lime) var(--hold), transparent 0);
+  -webkit-mask: radial-gradient(circle, transparent 0 calc(50% - 4px), #000 calc(50% - 3px)); mask: radial-gradient(circle, transparent 0 calc(50% - 4px), #000 calc(50% - 3px)); }
+
+/* round 57: selected contact in the olive sage; "send" as a small mono label above the circle */
+.contact-chip.selected .contact-avatar { border-color: #a8b86e; color: #a8b86e; }
+.send-btn::before { content: 'send'; position: absolute; left: 50%; top: -20px; transform: translateX(-50%);
+  font: 400 11px/1 'SF Mono', ui-monospace, 'Menlo', 'Courier New', monospace; letter-spacing: 0.08em; text-transform: lowercase; color: rgb(134, 83, 58); pointer-events: none; }
+
+/* round 58: lamp editor is a small centered card, page stays undimmed */
+.modal-backdrop { background: transparent; }
+.modal-sheet { border: 1px solid var(--ember); box-shadow: 0 16px 44px rgba(74, 44, 28, 0.22); }
+
+/* round 59: no label above the circle, no inner ring — the arrow does the work */
+.send-btn::before, .send-btn::after { content: none; display: none; }
+
 </style>
 </head>
 <body>
@@ -985,16 +1032,16 @@ html, body { background-color: #fdd48d; background-image: none; }
 <hr class="divider">
 
 <div class="section-label">send to</div>
-<div class="contacts-row" id="contactsRow">
+<div class="contacts-row" id="contactsRow"><div class="contacts-track" id="contactsTrack">
   <div class="contact-chip add-chip" id="addContactBtn">
     <div class="contact-avatar">+</div>
     <div class="contact-name">add lamp</div>
   </div>
-</div>
+</div></div>
 <p class="hold-hint">tap to select · hold to edit</p>
 
 <div class="send-rail" id="sendRail">
-  <button class="send-btn" id="sendBtn" disabled>send</button>
+  <button class="send-btn" id="sendBtn" aria-label="send" disabled><svg class="send-arrow" viewBox="0 0 24 24" aria-hidden="true"><path class='a-base' d="M12 16.5V7.5M7.4 12.1L12 7.5l4.6 4.6" fill="none" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="send-arrow send-arrow-fill" viewBox="0 0 24 24" aria-hidden="true"><path class='a-fill' d="M12 16.5V7.5M7.4 12.1L12 7.5l4.6 4.6" fill="none" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 </div>
 <div class="privacy-toggle" id="privacyToggle">
   <button type="button" class="privacy-toggle-btn active" id="privacyPrivateBtn">private</button>
@@ -1930,33 +1977,55 @@ function renderContacts() {
     const shortId = c.id.length > 10 ? c.id.slice(0, 10) + '…' : c.id;
     chip.innerHTML = `<div class="contact-avatar">${c.name.charAt(0).toUpperCase()}</div><div class="contact-name">${c.name}</div><div class="contact-id">${shortId}</div>`;
 
-    let pressTimer = null;
-    let firedLongPress = false;
-
-    chip.addEventListener('touchstart', () => {
-      firedLongPress = false;
-      pressTimer = setTimeout(() => { firedLongPress = true; openModal(i); }, 550);
-    }, { passive: true });
-
-    chip.addEventListener('touchend', () => {
-      clearTimeout(pressTimer);
-      if (!firedLongPress) {
-        selectedContact = i;
-        renderContacts();
-        updateSendState();
-        checkLastSeen(c.id);
-      }
+    // press-and-hold to edit: the avatar eases down while you hold, a short buzz + the sheet on fire.
+    // pointer events, no text selection or callout, and the click that trails a hold is swallowed.
+    let pressTimer = null, firedLongPress = false, sx = 0, sy = 0;
+    const endPress = () => { clearTimeout(pressTimer); pressTimer = null; chip.classList.remove('pressing'); };
+    chip.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      firedLongPress = false; sx = e.clientX; sy = e.clientY;
+      chip.classList.add('pressing');
+      pressTimer = setTimeout(() => {
+        pressTimer = null; firedLongPress = true; chip.classList.remove('pressing');
+        try { window.getSelection().removeAllRanges(); } catch (_) {}
+        if (navigator.vibrate) { try { navigator.vibrate(12); } catch (_) {} }
+        openModal(i);
+      }, 450);
     });
-
-    chip.addEventListener('touchmove', () => { clearTimeout(pressTimer); });
-
-    chip.addEventListener('click', () => {
+    chip.addEventListener('pointermove', (e) => { if (pressTimer && Math.hypot(e.clientX - sx, e.clientY - sy) > 10) endPress(); });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => chip.addEventListener(ev, endPress));
+    chip.addEventListener('contextmenu', e => e.preventDefault());
+    chip.addEventListener('selectstart', e => e.preventDefault());
+    chip.addEventListener('click', (e) => {
+      if (firedLongPress) { firedLongPress = false; e.preventDefault(); return; }
       selectedContact = i; renderContacts(); updateSendState(); checkLastSeen(c.id);
     });
 
-    contactsRow.insertBefore(chip, addContactBtn);
+    addContactBtn.parentNode.insertBefore(chip, addContactBtn);
   });
+  slideContacts(!renderContacts._done); renderContacts._done = true;
 }
+
+// slide the chip track so the selected lamp's circle is centered right over the send button (which moves with private/gallery)
+let contactsTx = 0;
+function slideContacts(instant) {
+  const track = document.getElementById('contactsTrack');
+  const chip = contactsRow.querySelector('.contact-chip.selected');
+  const rail = document.getElementById('sendRail');
+  if (!track || !rail) return;
+  let tx = 0;
+  if (chip) {
+    const rr = rail.getBoundingClientRect();
+    const target = rr.left + rr.width * (rail.classList.contains('gallery') ? 0.75 : 0.25) + (rail.classList.contains('gallery') ? 2.5 : -2.5);
+    const cr = chip.getBoundingClientRect();
+    tx = contactsTx + (target - (cr.left + cr.width / 2));
+  }
+  if (instant) track.classList.add('no-anim');
+  contactsTx = tx;
+  track.style.transform = 'translateX(' + tx + 'px)';
+  if (instant) { void track.offsetWidth; track.classList.remove('no-anim'); }
+}
+window.addEventListener('resize', () => slideContacts(true));
 
 function openModal(idx) {
   editingContactIdx = idx;
@@ -2010,6 +2079,7 @@ function setShareToGallery(on) {
   privacyPrivateBtn.classList.toggle('active', !on);
   privacyGalleryBtn.classList.toggle('active', on);
   document.getElementById('sendRail').classList.toggle('gallery', on);
+  slideContacts(false);
   privacyHint.textContent = on ? "this'll also show up in the public gallery" : "only they'll see this";
 }
 privacyPrivateBtn.onclick = () => setShareToGallery(false);
@@ -4937,30 +5007,43 @@ async function buildChunkedPNG() {
 // the real gallery tag this ships with eventually — 'test-gallery' for now
 const GALLERY_UPLOAD_TAG = 'test-gallery';
 
-// hold the send button to send: after a short press a ring fills over ~1.2s, then it sends.
-// Releasing early cancels; a quick tap is just a normal click.
+// send: hold the button and the arrow fills upward over ~1.2s, then it sends. A tap fills it fast, then sends.
+// Letting go mid-hold cancels.
 (function () {
-  const HOLD_DELAY = 260, HOLD_MS = 1200;
-  let t0 = 0, startT = null, raf = 0, active = false, suppressClick = false;
+  const HOLD_DELAY = 260, HOLD_MS = 1200, TAP_MS = 260;
+  let t0 = 0, dur = HOLD_MS, startT = null, raf = 0, active = false, suppressClick = false, busy = false;
+  const setFill = f => sendBtn.style.setProperty('--fill', f);
   function reset() {
-    clearTimeout(startT); cancelAnimationFrame(raf); active = false;
-    sendBtn.classList.remove('holding'); sendBtn.style.setProperty('--hold', '0deg');
+    clearTimeout(startT); startT = null; cancelAnimationFrame(raf); active = false; busy = false;
+    sendBtn.classList.remove('holding'); setFill(0);
   }
-  function tick(now) {
-    const f = Math.min(1, (now - t0) / HOLD_MS);
-    sendBtn.style.setProperty('--hold', (f * 360) + 'deg');
-    if (f >= 1) { reset(); suppressClick = true; if (!sendBtn.disabled) sendBtn.click(); return; }
+  function run(ms, from) {
+    dur = ms; t0 = performance.now() - from * ms; busy = true;
+    const tick = now => {
+      const f = Math.min(1, (now - t0) / dur);
+      setFill(f);
+      if (f >= 1) { cancelAnimationFrame(raf); active = false; sendBtn.classList.remove('holding'); suppressClick = true;
+        if (!sendBtn.disabled) sendBtn.click();
+        setTimeout(() => { busy = false; setFill(0); }, 700); return; }
+      raf = requestAnimationFrame(tick);
+    };
     raf = requestAnimationFrame(tick);
   }
   sendBtn.addEventListener('pointerdown', () => {
-    if (sendBtn.disabled) return;
+    if (sendBtn.disabled || busy) return;
     suppressClick = false;
-    startT = setTimeout(() => { active = true; suppressClick = true; sendBtn.classList.add('holding'); t0 = performance.now(); raf = requestAnimationFrame(tick); }, HOLD_DELAY);
+    startT = setTimeout(() => { startT = null; active = true; suppressClick = true; sendBtn.classList.add('holding'); run(HOLD_MS, 0); }, HOLD_DELAY);
   });
   ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => sendBtn.addEventListener(ev, () => { if (active || startT) reset(); }));
   sendBtn.addEventListener('contextmenu', e => e.preventDefault());
-  // swallow the click that follows a hold (cancelled or completed); programmatic click from tick() runs before suppress is re-armed
-  sendBtn.addEventListener('click', e => { if (suppressClick && e.isTrusted) { suppressClick = false; e.stopImmediatePropagation(); } }, true);
+  // trusted click = a tap (or the click trailing a hold); programmatic clicks from run() go straight through to the real handler
+  sendBtn.addEventListener('click', e => {
+    if (!e.isTrusted) return;
+    e.stopImmediatePropagation();
+    if (suppressClick) { suppressClick = false; return; }
+    if (sendBtn.disabled || busy) return;
+    run(TAP_MS, 0);
+  }, true);
 })();
 
 sendBtn.onclick = async () => {

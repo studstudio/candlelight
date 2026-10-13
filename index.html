@@ -422,14 +422,24 @@
   }
   .send-btn:active { transform: scale(0.94); }
   .send-btn:disabled { opacity: 0.3; box-shadow: none; }
-  /* send arrow: grey outline arrow; the fill color runs along it while the button is held (or quickly after a tap) */
-  @property --fill { syntax: '<number>'; inherits: true; initial-value: 0; }
-  .send-btn { position: relative; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  /* send arrow: tap and the lime fills it from the head down while it dips, then it shoots out the top and a fresh arrow fades in */
+  .send-btn { position: relative; touch-action: manipulation; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; overflow: hidden; }
   .send-arrow { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -26px 0 0 -23px; pointer-events: none; overflow: visible; }
   .send-arrow .a-base { stroke: #a5a29a; }
-  .send-arrow-fill { clip-path: inset(calc((1 - var(--fill)) * 100%) 0 0 0); }
+  .send-arrow-fill { clip-path: inset(0 0 100% 0); }
   .send-arrow .a-fill { stroke: var(--lime); }
-  .send-btn.holding { transform: scale(0.96); }
+  .send-btn.go .send-arrow { animation: sendGo 1.7s both; }
+  .send-btn.go .send-arrow-fill { animation: sendGo 1.7s both, sendFill 1.7s ease-out both; }
+  @keyframes sendGo { 0% { transform: none; opacity: 1; animation-timing-function: ease-out; }
+    8% { transform: translateY(5px); } 26% { transform: translateY(5px); animation-timing-function: cubic-bezier(.6,0,1,.6); }
+    42% { transform: translateY(-100px); opacity: 1; } 42.5% { opacity: 0; } 43% { transform: none; opacity: 0; }
+    64% { transform: translateY(8px); opacity: 0; animation-timing-function: ease-out; } 100% { transform: none; opacity: 1; } }
+  @keyframes sendFill { 0% { clip-path: inset(0 0 100% 0); } 26% { clip-path: inset(0); } 42.4% { clip-path: inset(0); } 42.5%, 100% { clip-path: inset(0 0 100% 0); } }
+  @media (prefers-reduced-motion: reduce) { .send-btn.go .send-arrow, .send-btn.go .send-arrow-fill { animation-duration: .01s; } }
+  /* the send status sits beside the circle, on whichever side has room */
+  .send-rail .send-status { position: absolute; top: 0; height: 96px; margin: 0; width: 104px; display: flex; align-items: center; justify-content: flex-start; text-align: left; font-size: 12px; line-height: 1.35; min-height: 0;
+    left: calc(25% + 58px); transition: left .5s cubic-bezier(.3,.9,.3,1); }
+  .send-rail.gallery .send-status { left: calc(75% - 162px); justify-content: flex-end; text-align: right; }
   .send-btn { color: #1a1108; font-family: inherit; font-size: 17px; font-weight: 700; letter-spacing: 0.04em; text-transform: lowercase; }
   .send-status { margin-top: 14px; font-size: 12px; color: var(--cream-dim); text-align: center; min-height: 16px; }
   .send-status.success { color: var(--success); }
@@ -877,6 +887,11 @@ html, body { background-color: #fdd48d; background-image: none; }
 /* round 59: no label above the circle, no inner ring — the arrow does the work */
 .send-btn::before, .send-btn::after { content: none; display: none; }
 
+/* round 60: status text beside the circle in the page's muted brown */
+.send-rail .send-status { color: #86533a; }
+.send-rail .send-status.success { color: #4a7a00; }
+.send-rail .send-status.fail { color: #c4473a; }
+
 </style>
 </head>
 <body>
@@ -1042,6 +1057,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 <div class="send-rail" id="sendRail">
   <button class="send-btn" id="sendBtn" aria-label="send" disabled><svg class="send-arrow" viewBox="0 0 24 24" aria-hidden="true"><path class='a-base' d="M12 16.5V7.5M7.4 12.1L12 7.5l4.6 4.6" fill="none" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="send-arrow send-arrow-fill" viewBox="0 0 24 24" aria-hidden="true"><path class='a-fill' d="M12 16.5V7.5M7.4 12.1L12 7.5l4.6 4.6" fill="none" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <div class="send-status" id="sendStatus" aria-live="polite"></div>
 </div>
 <div class="privacy-toggle" id="privacyToggle">
   <button type="button" class="privacy-toggle-btn active" id="privacyPrivateBtn">private</button>
@@ -1050,7 +1066,6 @@ html, body { background-color: #fdd48d; background-image: none; }
 <p class="privacy-hint" id="privacyHint">only they'll see this</p>
 
 <div class="send-zone">
-  <div class="send-status" id="sendStatus"></div>
   <div class="last-seen" id="lastSeen"></div>
 </div>
 
@@ -5007,42 +5022,16 @@ async function buildChunkedPNG() {
 // the real gallery tag this ships with eventually — 'test-gallery' for now
 const GALLERY_UPLOAD_TAG = 'test-gallery';
 
-// send: hold the button and the arrow fills upward over ~1.2s, then it sends. A tap fills it fast, then sends.
-// Letting go mid-hold cancels.
+// send: a tap runs the arrow animation; the real send starts as the arrow launches.
 (function () {
-  const HOLD_DELAY = 260, HOLD_MS = 1200, TAP_MS = 260;
-  let t0 = 0, dur = HOLD_MS, startT = null, raf = 0, active = false, suppressClick = false, busy = false;
-  const setFill = f => sendBtn.style.setProperty('--fill', f);
-  function reset() {
-    clearTimeout(startT); startT = null; cancelAnimationFrame(raf); active = false; busy = false;
-    sendBtn.classList.remove('holding'); setFill(0);
-  }
-  function run(ms, from) {
-    dur = ms; t0 = performance.now() - from * ms; busy = true;
-    const tick = now => {
-      const f = Math.min(1, (now - t0) / dur);
-      setFill(f);
-      if (f >= 1) { cancelAnimationFrame(raf); active = false; sendBtn.classList.remove('holding'); suppressClick = true;
-        if (!sendBtn.disabled) sendBtn.click();
-        setTimeout(() => { busy = false; setFill(0); }, 700); return; }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-  }
-  sendBtn.addEventListener('pointerdown', () => {
-    if (sendBtn.disabled || busy) return;
-    suppressClick = false;
-    startT = setTimeout(() => { startT = null; active = true; suppressClick = true; sendBtn.classList.add('holding'); run(HOLD_MS, 0); }, HOLD_DELAY);
-  });
-  ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => sendBtn.addEventListener(ev, () => { if (active || startT) reset(); }));
-  sendBtn.addEventListener('contextmenu', e => e.preventDefault());
-  // trusted click = a tap (or the click trailing a hold); programmatic clicks from run() go straight through to the real handler
+  let busy = false;
   sendBtn.addEventListener('click', e => {
-    if (!e.isTrusted) return;
+    if (!e.isTrusted) return;          // the programmatic click below goes straight to the real handler
     e.stopImmediatePropagation();
-    if (suppressClick) { suppressClick = false; return; }
     if (sendBtn.disabled || busy) return;
-    run(TAP_MS, 0);
+    busy = true; sendBtn.classList.add('go');
+    setTimeout(() => { if (!sendBtn.disabled) sendBtn.click(); }, 440);
+    setTimeout(() => { sendBtn.classList.remove('go'); busy = false; }, 1750);
   }, true);
 })();
 

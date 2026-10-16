@@ -386,25 +386,37 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     if (shown.length >= 2) {
       ctx.save();
       ctx.beginPath(); ctx.rect(pad.l, pad.t, pw, ph); ctx.clip();
-      const path = () => { ctx.beginPath(); shown.forEach((d, i) => i ? ctx.lineTo(x(d.t), y(d.mv)) : ctx.moveTo(x(d.t), y(d.mv))); };
+      // monotone cubic (Fritsch-Carlson) through the samples: smooth, but never overshoots past a real reading
+      const px = shown.map(d => x(d.t)), py = shown.map(d => y(d.mv)), n = px.length;
+      const sl = [], m = new Array(n);
+      for (let i = 0; i < n - 1; i++) { const dx = px[i + 1] - px[i]; sl.push(dx > 0 ? (py[i + 1] - py[i]) / dx : 0); }
+      m[0] = sl[0]; m[n - 1] = sl[n - 2];
+      for (let i = 1; i < n - 1; i++) m[i] = sl[i - 1] * sl[i] <= 0 ? 0 : 2 / (1 / sl[i - 1] + 1 / sl[i]);
+      const path = () => {
+        ctx.beginPath(); ctx.moveTo(px[0], py[0]);
+        for (let i = 0; i < n - 1; i++) {
+          const h = (px[i + 1] - px[i]) / 3;
+          ctx.bezierCurveTo(px[i] + h, py[i] + m[i] * h, px[i + 1] - h, py[i + 1] - m[i + 1] * h, px[i + 1], py[i + 1]);
+        }
+      };
       ctx.globalCompositeOperation = "lighter";
-      // faint wash under the trace: gold up top, ember, then a cold teal floor
+      // faint yellow wash under the trace, fading toward the floor
       const wash = ctx.createLinearGradient(0, pad.t, 0, pad.t + ph);
-      wash.addColorStop(0, "rgba(255,214,140,.11)"); wash.addColorStop(.55, "rgba(255,110,60,.035)"); wash.addColorStop(1, "rgba(70,200,190,.03)");
+      wash.addColorStop(0, "rgba(255,220,80,.11)"); wash.addColorStop(.55, "rgba(255,210,60,.035)"); wash.addColorStop(1, "rgba(255,200,40,0)");
       path(); ctx.lineTo(x(shown[shown.length - 1].t), pad.t + ph); ctx.lineTo(x(shown[0].t), pad.t + ph); ctx.closePath();
       ctx.fillStyle = wash; ctx.fill();
-      // three passes, wide and hazy to thin and hot. Along x the tail cools to teal, the head burns golden white
+      // three passes, wide and hazy to thin and hot, all yellow. Along x the tail fades out, the head is brightest
       const along = stops => { const g = ctx.createLinearGradient(pad.l, 0, ex, 0); stops.forEach(([o, c]) => g.addColorStop(o, c)); return g; };
       ctx.lineJoin = "round"; ctx.lineCap = "round";
       path();
-      ctx.lineWidth = 5; ctx.shadowBlur = 22; ctx.shadowColor = "rgba(255,90,40,.55)";
-      ctx.strokeStyle = along([[0, "rgba(60,190,180,0)"], [.5, "rgba(255,90,40,.08)"], [1, "rgba(255,110,50,.22)"]]);
+      ctx.lineWidth = 5; ctx.shadowBlur = 22; ctx.shadowColor = "rgba(255,200,40,.55)";
+      ctx.strokeStyle = along([[0, "rgba(255,200,40,0)"], [.5, "rgba(255,200,40,.08)"], [1, "rgba(255,205,50,.22)"]]);
       ctx.stroke();
-      ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = "rgba(255,190,70,.7)";
-      ctx.strokeStyle = along([[0, "rgba(90,210,200,0)"], [.4, "rgba(90,210,200,.14)"], [.8, "rgba(255,190,70,.3)"], [1, "rgba(255,210,100,.45)"]]);
+      ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = "rgba(255,215,60,.7)";
+      ctx.strokeStyle = along([[0, "rgba(255,215,60,0)"], [.4, "rgba(255,215,60,.16)"], [.8, "rgba(255,215,60,.32)"], [1, "rgba(255,220,80,.45)"]]);
       ctx.stroke();
-      ctx.lineWidth = 1; ctx.shadowBlur = 3; ctx.shadowColor = "rgba(255,242,215,.9)";
-      ctx.strokeStyle = along([[0, "rgba(130,228,218,.12)"], [.55, "rgba(255,236,200,.62)"], [1, "#fff8ea"]]);
+      ctx.lineWidth = 1; ctx.shadowBlur = 3; ctx.shadowColor = "rgba(255,230,110,.9)";
+      ctx.strokeStyle = along([[0, "rgba(255,225,90,.14)"], [.55, "rgba(255,225,90,.7)"], [1, "#ffe45c"]]);
       ctx.stroke();
       ctx.restore();
 

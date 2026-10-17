@@ -92,6 +92,8 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 4. If still ~4 pulses/s with no current: the board is bad (fake/damaged chip, missing 4.7 uF CF cap). Photo of both sides; options: genuine SparkFun BOB-12052 (drop-in), or an INA219/INA226 (accurate at mA, but only counts while awake).
 5. Afterwards: ignore today's pack in/out totals and gauge (all phantom). The lamp's since-power-up totals reset on a power cycle.
 
+**Resolved, 2026-10-17 afternoon:** SJ2/SJ3 bridged, no change. Real cause: on this HiLetgo board **one of the two OUT pads is not connected to the sense resistor** (OL to both ends) but still feeds the chip's SENSE+/VDD side, so with the bus wired to it the chip read the ~1.3 V pack-to-BQ gap (pack and BQ weren't even connected). Fix on the bench: **both OUT pins jumpered into the BQ BAT row**, pack + -> IN (matches `COUL_POL_HIGH_IS_CHARGE = true`). `LTC TEST` then: no pulse within 1.5 s of a clear. For anything permanent, solder a wire on the board from the dead OUT pad to the resistor's OUT end, or use a genuine BOB-12052.
+
 **Built today:** monitor page split (TEG 3/4, pack column 1/4 with gauge, in/out, measured rate, net, net-charge graph), smooth yellow TEG trace, LTC fuel gauge (localStorage, auto-full after 20 min lit with no pulse), serial console with pop-out, "sync now" and "test ltc" buttons; firmware edge counting + stuck flag + raw pins on `COUL,`, `LTC TEST`, 1 ms CLR pulse, `BAT,` on A1, updates install while the monitor holds the lamp awake. Lamp runs `61be939` (merged.bin = same). Worker version 6226ab63.
 
 ## Before shipping: remove prototype-only code

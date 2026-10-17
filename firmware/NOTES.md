@@ -75,6 +75,25 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - Reporting: while the monitor page is connected, `COUL,<in>,<out>,<mAh per tick>,<INT>,<POL>,<stuck>` once a second over serial (the last three are the raw pin levels and whether INT has read low 3+ polls in a row, i.e. CLR isn't releasing it; the page shows them under the gauge) (the page shows this session's in/out, and relays them to the phone view). Every sync also carries `?cin=&cout=&mpt=` on its request; the worker stores them at `teg/<lampId>/coulomb`, and the page shows those totals when nothing is connected, so a battery test needs no USB.
 - With USB plugged in the board runs from USB: lamp use is only measured on battery with USB unplugged (and the pack must never share a power rail with USB). TEG charge can be measured with USB in, as long as the pack is wired only to the counter.
 
+### Debrief, 2026-10-17: where the LTC4150 work stands (resume here)
+
+**Bench setup now:** a USB step-down (set ~1 V, A0 reads ~1.1-1.57 V) stands in for the TEG and feeds BQ25504 VIN; A0 reads the same row. Pack (4xAA NiMH) + -> LTC IN, LTC OUT -> BQ BAT (shared row). LTC: INT -> D3, POL -> **A2 (GPIO34)** (the FireBeetle 2 has no D4 pin), CLR -> A4, VIO and SHDN -> one row fed from 3V3, GND common. FireBeetle on laptop USB; nothing from the pack reaches its VCC/BAT. No resistors for the A1 pack-voltage divider (only 3.9 ohm on hand), so `BAT,` reads nothing yet.
+
+**The board:** HiLetgo LTC4150 module from Amazon, a SparkFun BOB-12052 copy: IN = SENSE-, OUT = SENSE+ and VDD, 3.3k pull-ups to VIO on INT/POL, 47k/75k dividers into the chip's CLR and SHDN unless SJ2/SJ3 are closed. The LTC test showed SJ1 is effectively open (INT doesn't follow CLR).
+
+**The fault:** the counter climbs ~4 ticks/s (~0.7 mAh/s) even with LTC OUT disconnected, i.e. with no current possible. `LTC TEST` (page: "test ltc") shows CLR releases INT fine, then INT re-latches every ~297 ms, steady, POL 1: the chip behaves as if ~120-150 mV sat across its sense resistor (~2.5-3 A). Nothing got warm. Not the wiring, not a short, not the step-down. Firmware side is verified (edge counting, CLR pulse, pin reads).
+
+**Leading suspect:** SJ2 and SJ3 are still open (the board's 5 V-logic default), so with VIO at 3.3 V the chip's SHDN and CLR see only ~2.0 V, right at its ~1.9 V threshold; a marginal SHDN can leave it half shut down.
+
+**Next steps:**
+1. Solder-bridge **SJ2 and SJ3** (back of the board). User plans this on 2026-10-18.
+2. Unplug the step-down (no charge current), connect the page, press **test ltc**. Expected: "no pulse within 1.5 s of a clear". Paste the `LTC test:` lines.
+3. If clean: plug the step-down back in; "pack in" should climb slowly (tens of mA through the BQ = a tick every several seconds; the test's pulse timing gives the real mA). Press **new session**, then **mark full** once the pack is charged, or let auto-full do it.
+4. If still ~4 pulses/s with no current: the board is bad (fake/damaged chip, missing 4.7 uF CF cap). Photo of both sides; options: genuine SparkFun BOB-12052 (drop-in), or an INA219/INA226 (accurate at mA, but only counts while awake).
+5. Afterwards: ignore today's pack in/out totals and gauge (all phantom). The lamp's since-power-up totals reset on a power cycle.
+
+**Built today:** monitor page split (TEG 3/4, pack column 1/4 with gauge, in/out, measured rate, net, net-charge graph), smooth yellow TEG trace, LTC fuel gauge (localStorage, auto-full after 20 min lit with no pulse), serial console with pop-out, "sync now" and "test ltc" buttons; firmware edge counting + stuck flag + raw pins on `COUL,`, `LTC TEST`, 1 ms CLR pulse, `BAT,` on A1, updates install while the monitor holds the lamp awake. Lamp runs `61be939` (merged.bin = same). Worker version 6226ab63.
+
 ## Before shipping: remove prototype-only code
 
 Bench-measurement code that must not ship. Find every piece with:

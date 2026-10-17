@@ -396,12 +396,6 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
           ctx.bezierCurveTo(px[i] + h, py[i] + m[i] * h, px[i + 1] - h, py[i + 1] - m[i + 1] * h, px[i + 1], py[i + 1]);
         }
       };
-      ctx.globalCompositeOperation = "lighter";
-      // faint yellow wash under the trace, fading toward the floor
-      const wash = ctx.createLinearGradient(0, pad.t, 0, pad.t + ph);
-      wash.addColorStop(0, "rgba(255,220,80,.11)"); wash.addColorStop(.55, "rgba(255,210,60,.035)"); wash.addColorStop(1, "rgba(255,200,40,0)");
-      path(); ctx.lineTo(x(shown[shown.length - 1].t), pad.t + ph); ctx.lineTo(x(shown[0].t), pad.t + ph); ctx.closePath();
-      ctx.fillStyle = wash; ctx.fill();
       // one crisp yellow line, no glow. Along x the tail fades out, the head is solid
       const along = ctx.createLinearGradient(pad.l, 0, ex, 0);
       along.addColorStop(0, "rgba(255,225,90,.15)"); along.addColorStop(.55, "rgba(255,225,90,.75)"); along.addColorStop(1, "#ffe45c");
@@ -411,18 +405,8 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       ctx.stroke();
       ctx.restore();
 
-      // head: pulse, dot, value
+      // head: value label
       const eyRaw = y(liveMv), ey = Math.min(pad.t + ph, Math.max(pad.t, eyRaw));
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
-      if (!calm.matches) {
-        const p = (performance.now() % 1800) / 1800;
-        ctx.strokeStyle = `rgba(255,230,190,${(1 - p) * .45})`; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(ex, ey, 3 + p * 14, 0, Math.PI * 2); ctx.stroke();
-      }
-      ctx.fillStyle = "#ffe45c";
-      ctx.beginPath(); ctx.arc(ex, ey, 2.2, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
       ctx.fillStyle = "rgba(255,240,215,.85)"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
       const arrow = eyRaw < pad.t ? " ↑" : eyRaw > pad.t + ph ? " ↓" : "";
       ctx.fillText((liveMv / 1000).toFixed(3) + arrow, ex + 12, ey);

@@ -1467,6 +1467,8 @@ void saveSeenFlags() {
 // ---------- TEG voltage monitor (teg_monitor.html over USB serial) ----------
 //
 // TEG + on A0 (GPIO36, ADC1, so it reads fine with WiFi on), TEG - on GND.
+// Pack voltage on A1 (GPIO39, also ADC1) through a 100k/100k divider from
+// pack + to GND, printed as "BAT,<pack millivolts>" once a second.
 // The monitor page sends "TEG ON" every few seconds while it is connected;
 // while those keep coming the lamp prints "TEG,<millivolts>" 4 times a second
 // and stays awake instead of sleeping. "TEG OFF", or 10 s without a
@@ -1476,6 +1478,8 @@ const int TEG_PIN = A0;                     // GPIO36, input only
 const uint32_t TEG_SAMPLE_MS = 250;         // one printed reading per this (4 a second)
 const uint32_t TEG_HEARTBEAT_MS = 10000;    // monitoring ends this long after the page's last "TEG ON"
 volatile uint32_t tegLastHeartbeat = 0;     // millis() of the last "TEG ON" (0 = not monitoring)
+const int BAT_PIN = A1;                     // GPIO39, input only
+const float BAT_DIVIDER = 2.0f;             // pack volts per pin volt (100k/100k). Trim against a multimeter if it reads off
 
 bool tegMonitoring() {
   return tegLastHeartbeat && millis() - tegLastHeartbeat < TEG_HEARTBEAT_MS;
@@ -1489,10 +1493,19 @@ uint32_t readTegMv() {
   return sum / 3;
 }
 
+// pack millivolts: A1 averaged over 8 reads, scaled back up through the divider.
+// 4x NiMH tops out near 5.8 V while charging, 2.9 V at the pin
+uint32_t readBatMv() {
+  uint32_t sum = 0;
+  for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BAT_PIN);
+  return (uint32_t)(sum / 8 * BAT_DIVIDER);
+}
+
 void tegTask(void*) {
   analogSetPinAttenuation(TEG_PIN, ADC_11db);
+  analogSetPinAttenuation(BAT_PIN, ADC_11db);
   String cmd;
-  uint32_t lastSample = 0, lastCoul = 0;  // lastCoul: [PROTOTYPE-ONLY: LTC4150]
+  uint32_t lastSample = 0, lastBat = 0, lastCoul = 0;  // lastCoul: [PROTOTYPE-ONLY: LTC4150]
   for (;;) {
     while (Serial.available()) {
       char c = Serial.read();
@@ -1514,6 +1527,10 @@ void tegTask(void*) {
     if (tegMonitoring() && millis() - lastSample >= TEG_SAMPLE_MS) {
       lastSample = millis();
       Serial.printf("TEG,%u\n", (unsigned)readTegMv());
+      if (millis() - lastBat >= 1000) {
+        lastBat = millis();
+        Serial.printf("BAT,%u\n", (unsigned)readBatMv());
+      }
       if (millis() - lastCoul >= 1000) {  // [PROTOTYPE-ONLY: LTC4150] coulomb totals once a second: "COUL,<ticks in>,<ticks out>,<mAh per tick>"
         lastCoul = millis();
         coulombPoll();

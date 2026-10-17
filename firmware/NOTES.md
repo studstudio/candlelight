@@ -60,6 +60,7 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - `tegTask` (in `main.cpp`) listens on USB serial. The page sends `TEG ON` every 3 s while connected; while those keep coming the lamp prints `TEG,<mV>` every 250 ms (average of 3 calibrated `analogReadMilliVolts` reads, 11 dB attenuation: about 0.1 to 3.1 V, reads 0 below ~100 mV) and **does not sleep** (it stays in the idle window, buttons still work). `TEG OFF` (sent on Disconnect) or 10 s without a heartbeat ends it, and the lamp sleeps after the usual 30 s idle.
 - The page reads only `TEG,` lines and ignores the rest of the log. If the lamp is asleep when the page connects, tap NEXT to wake it.
 - Keep the TEG under 3.3 V at the pin (the page warns at 2.8 V).
+- Pack voltage: pack + -> 100k -> A1 (GPIO39) -> 100k -> GND (optional 100 nF from A1 to GND to steady the reading). The lamp prints `BAT,<pack mV>` once a second (8 reads averaged, times `BAT_DIVIDER` = 2). 4x NiMH reaches ~5.8 V while charging, 2.9 V at the pin. The divider draws ~25 uA from the pack all the time: fine on the bench; for a battery lamp use 1M/1M plus the 100 nF.
 
 ## Coulomb counter (LTC4150, untested on hardware)
 
@@ -82,7 +83,8 @@ grep -rn PROTOTYPE-ONLY firmware/ candlelight-worker/
 
 - **LTC4150 coulomb counter** (`[PROTOTYPE-ONLY: LTC4150]`):
   - `fw/src/main.cpp`: the whole "coulomb counter" section, the three ULP `#include`s, the `coulombBegin()` call in `setup()`, the `esp_sleep_pd_config(RTC_PERIPH)` line in `goToSleep()` (only the ULP needs it; the NEXT button's ext0 wake keeps those pins powered on its own), the `?cin=&cout=&mpt=` on the sync request (back to plain `/lamp/<id>/sync`), and the `COUL,` serial line plus `lastCoul` in `tegTask`.
-  - `candlelight-worker/src/index.js`: the `GET /teg/{lampId}/coulomb` route, the `cin/cout` block at the top of the sync handler, and the `coulomb` field in the `/teg` relay.
+  - `candlelight-worker/src/index.js`: the `GET /teg/{lampId}/coulomb` route, the `cin/cout` block at the top of the sync handler, and the `coulomb` and `gauge` fields in the `/teg` relay.
+  - `teg_monitor.html`: the pack in/out tiles, the "fuel gauge" section and its `gauge` relay field (the gauge is built on the counter).
   - Also delete the stored objects `teg/<lampId>/coulomb` in R2.
 - After removing: build, and check `grep -rn "coul\|ulp" firmware/fw/src` comes back empty.
 

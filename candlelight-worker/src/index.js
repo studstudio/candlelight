@@ -385,6 +385,10 @@ export default {
           settings: body.settings && typeof body.settings === 'object' ? body.settings : {},
           notes,
           lastT,
+          // [PROTOTYPE-ONLY: LTC4150] the laptop's fuel gauge for the phone: {pct, mah, cap, fullAt}
+          gauge: body.gauge && ['pct', 'mah', 'cap', 'fullAt'].every(k => Number.isFinite(body.gauge[k])) ? body.gauge : null,
+          // newest pack voltage from the lamp's "BAT," line, for the phone: {mv}
+          battery: body.battery && Number.isFinite(body.battery.mv) ? { mv: Math.round(body.battery.mv) } : null,
           // [PROTOTYPE-ONLY: LTC4150] live LTC4150 totals from the lamp's serial line, relayed for the phone: {in, out, baseIn, baseOut, mahPerTick}
           coulomb: body.coulomb && ['in', 'out', 'baseIn', 'baseOut', 'mahPerTick'].every(k => Number.isFinite(body.coulomb[k]))
             ? body.coulomb : null,

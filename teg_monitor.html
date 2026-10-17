@@ -104,6 +104,12 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
 .log { font-size: 11px; line-height: 1.7; max-height: 160px; overflow: auto; color: var(--muted); }
 .log b { color: var(--fg); font-weight: 400; }
 .note { font-size: 10px; color: var(--dim); max-width: 72ch; margin: 0; }
+.console { border: 1px solid var(--line); min-width: 0; }
+.clog { height: 260px; overflow: auto; padding: 8px 12px; font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.clog .t { color: var(--dim); margin-right: 10px; }
+.clog .hi { color: var(--fg); }
+.clog .err { color: var(--ember); }
+.clog .sys { color: var(--dim); font-style: italic; }
 .banner { border: 1px solid var(--ember); color: var(--ember); padding: 8px 12px; cursor: pointer; }
 .viewer .ctl { display: none !important; }
 </style>
@@ -196,6 +202,14 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       </div>
       <p class="note">Pack gauge: counts LTC4150 charge in and out from the last full. Full is marked by hand, or automatically when the candle is lit, charge was flowing, and then no charge pulse comes for 20 min (the BQ25504 has stopped at its limit). Charge is an estimate: V²/(4R) at the TEG's best point, times booster efficiency, over pack voltage. Break-even counts down what this session has already harvested against a day's use, at the current rate. Warning above 2.8 V (BQ25504 input limit 3 V).</p>
     </div>
+  </section>
+
+  <section class="console ctl" aria-label="Serial console">
+    <div class="trace-head">
+      <span class="label">serial console · lamp log, readings hidden</span>
+      <nav class="links"><button class="link" id="btnPop">pop out</button><button class="link" id="btnClr">clear</button></nav>
+    </div>
+    <div class="clog" id="clog"><div class="sys">connect to see what the lamp prints: syncs, updates, sleep and wake</div></div>
   </section>
 </div>
 
@@ -676,6 +690,61 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   }
   $("btnReset").onclick = resetSession;
 
+  // ---------- serial console: everything the lamp prints except the readings ----------
+  // TEG/BAT/COUL lines already drive the monitor, so they're left out. The pop-out
+  // window is an about:blank page this one writes into, so both stay in step.
+  const READING = /^(TEG|BAT|COUL),/;
+  const CONSOLE_MAX = 1000;
+  const conLines = [];  // {ts, text, cls}
+  let pop = null;
+  const conClass = text => /error|fail|can't|cannot|lost|timeout|abort|panic|brownout/i.test(text) ? "err"
+    : /sync|ota|update|firmware|download|image|wifi|connect|sleep|wake|boot|reset/i.test(text) ? "hi" : "";
+  function conRow(doc, l) {
+    const d = doc.createElement("div");
+    if (l.cls) d.className = l.cls;
+    const t = doc.createElement("span"); t.className = "t";
+    t.textContent = new Date(l.ts).toLocaleTimeString([], { hour12: false });
+    d.append(t, l.text);
+    return d;
+  }
+  function conAppend(box, l) {
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 30;  // follow the bottom unless scrolled up
+    box.append(conRow(box.ownerDocument, l));
+    while (box.childElementCount > CONSOLE_MAX) box.firstElementChild.remove();
+    if (stick) box.scrollTop = box.scrollHeight;
+  }
+  function conLog(text, cls = conClass(text)) {
+    const l = { ts: Date.now(), text, cls };
+    conLines.push(l); if (conLines.length > CONSOLE_MAX) conLines.shift();
+    const box = $("clog");
+    if (conLines.length === 1) box.textContent = "";
+    conAppend(box, l);
+    if (pop && !pop.closed) { const pb = pop.document.getElementById("clog"); if (pb) conAppend(pb, l); }
+  }
+  const sysLog = text => conLog(text, "sys");
+  $("btnClr").onclick = () => {
+    conLines.length = 0; $("clog").textContent = "";
+    if (pop && !pop.closed) pop.document.getElementById("clog").textContent = "";
+  };
+  $("btnPop").onclick = () => {
+    if (pop && !pop.closed) { pop.focus(); return; }
+    pop = window.open("", "firebeetle-console", "width=760,height=520");
+    if (!pop) { alertBanner("The browser blocked the pop-out window. Allow pop-ups for this page and try again."); return; }
+    const css = [...document.styleSheets[document.styleSheets.length - 1].cssRules].map(r => r.cssText).join("\n");
+    pop.document.open();
+    pop.document.write(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>FireBeetle Console</title><style>${css}
+      html, body { height: 100%; } body { padding: 0; display: flex; flex-direction: column; }
+      .bar { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .clog { height: auto; flex: 1; }</style></head>
+      <body><div class="bar"><span class="label">firebeetle · serial console</span><button class="link" id="pclr">clear</button></div><div class="clog" id="clog"></div></body></html>`);
+    pop.document.close();
+    const pb = pop.document.getElementById("clog");
+    conLines.forEach(l => conAppend(pb, l));
+    pb.scrollTop = pb.scrollHeight;
+    pop.document.getElementById("pclr").onclick = () => $("btnClr").click();
+  };
+  window.addEventListener("pagehide", () => { if (pop && !pop.closed) pop.close(); });
+
   // ---------- serial (the laptop the lamp is plugged into) ----------
   $("btnConnect").onclick = async () => {
     if (port) { await disconnect(); return; }
@@ -684,6 +753,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       port = await navigator.serial.requestPort();
       await port.open({ baudRate: 115200 });
       setConn("connected · tap NEXT to wake the lamp", "on");
+      sysLog("connected to the FireBeetle");
       $("btnConnect").textContent = "disconnect";
       gotSample = false;
       readLoop();
@@ -720,6 +790,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         let i;
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+          if (line && !READING.test(line)) conLog(line);
           // only "TEG,<mV>" lines; the lamp's other log lines are ignored
           const m = line.match(/TEG,(\d+(?:\.\d+)?)/);
           const mv = m ? parseFloat(m[1]) : NaN;
@@ -743,7 +814,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
           }
         }
       }
-    } catch (e) { alertBanner("Lost the connection to the FireBeetle. Check the USB cable and reconnect."); }
+    } catch (e) { sysLog("connection lost"); alertBanner("Lost the connection to the FireBeetle. Check the USB cable and reconnect."); }
     try { reader.releaseLock(); } catch (e) {}
     await closed;
   }
@@ -756,6 +827,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     try { await port?.close(); } catch (e) {}
     port = null; reader = null;
     setConn("not connected", "");
+    sysLog("disconnected");
     $("btnConnect").textContent = "connect";
   }
 

@@ -74,15 +74,18 @@ const char* TMP_PATH = "/tmp.png";
 // reads the counters whenever it's awake (the ULP keeps running) and keeps
 // 32-bit totals; they start at 0 on a real power-on.
 //
-// Wiring: INT -> D3 (GPIO26), POL -> D4 (GPIO27), CLR -> A4 (GPIO15),
-// VIO -> 3V3, GND -> common GND, SHDN high. INT and POL use the ESP32's pull-ups.
+// Wiring (SparkFun BOB-12052): pack + on IN, BQ25504 VBAT on OUT. INT -> D3
+// (GPIO26), POL -> A2 (GPIO34; the FireBeetle 2 has no D4 on its header),
+// CLR -> A4 (GPIO15), VIO -> 3V3, GND -> common GND, SHDN unconnected (pulled
+// up on the board). The board has 3.3k pull-ups to VIO on INT and POL; GPIO34
+// has no internal pull-up anyway. Close SJ2 + SJ3 for 3.3 V logic, open SJ1.
 
 const gpio_num_t COUL_INT = GPIO_NUM_26;    // D3
-const gpio_num_t COUL_POL = GPIO_NUM_27;    // D4
+const gpio_num_t COUL_POL = GPIO_NUM_34;    // A2, input only
 const gpio_num_t COUL_CLR = GPIO_NUM_15;    // A4
 const uint32_t COUL_POLL_US = 100000;       // the LTC4150 pulses at most ~1.6 times a second, so 10 polls a second catch every one
 const float COUL_MAH_PER_TICK = 0.1707f;    // 1 / (32.55 Hz/V * 0.05 ohm) = 0.6144 C. Other sense resistor: 0.008533 / ohms
-const bool COUL_POL_HIGH_IS_CHARGE = true;  // POL high = current into the pack (pack on the chip's SENSE+ side); flip if they come out swapped
+const bool COUL_POL_HIGH_IS_CHARGE = true;  // POL high = current OUT -> IN, into the pack on IN (SparkFun's convention); flip if they come out swapped
 const int COUL_SLOT_A = 0, COUL_SLOT_B = 1; // ULP counters: [0] POL high, [1] POL low (16 bits each)
 const int COUL_PROG = 8;                    // program loads here, after the counters (words)
 
@@ -104,9 +107,9 @@ void coulombBegin(bool wokeFromSleep) {
   for (gpio_num_t p : { COUL_INT, COUL_POL }) {
     rtc_gpio_init(p);
     rtc_gpio_set_direction(p, RTC_GPIO_MODE_INPUT_ONLY);
-    rtc_gpio_pullup_en(p);
-    rtc_gpio_pulldown_dis(p);
   }
+  rtc_gpio_pullup_en(COUL_INT);  // GPIO34 (POL) has no internal pulls; the board's 3.3k does it
+  rtc_gpio_pulldown_dis(COUL_INT);
   rtc_gpio_init(COUL_CLR);
   rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_OUTPUT_ONLY);
   rtc_gpio_set_level(COUL_CLR, 1);

@@ -161,6 +161,8 @@ void coulombBegin(bool wokeFromSleep) {
   Serial.printf("Coulomb counter: ULP %s\n", err == ESP_OK ? "running" : esp_err_to_name(err));
 }
 
+extern volatile uint32_t tegLastHeartbeat;  // TEG monitor section, below
+
 // "LTC TEST" from the monitor page: pauses the ULP, drives the pins by hand and
 // prints what INT, POL and CLR do, with a verdict, to find why INT sticks low
 void coulombTest() {
@@ -181,22 +183,42 @@ void coulombTest() {
   int intAfter = rd(COUL_INT);
   delay(300);
   int intLater = rd(COUL_INT);
+  // time the pulses: clear, then wait for INT to latch again (up to 1.5 s, 5 times, under the monitor's 10 s heartbeat)
+  uint32_t gaps[5]; int pols[5], nGaps = 0;
+  for (int k = 0; k < 5; k++) {
+    rtc_gpio_set_level(COUL_CLR, 0); delay(1); rtc_gpio_set_level(COUL_CLR, 1);
+    uint32_t t0 = millis();
+    while (rd(COUL_INT) && millis() - t0 < 1500) delayMicroseconds(200);
+    if (rd(COUL_INT)) break;  // no pulse within 1.5 s: normal below ~0.6 A
+    gaps[nGaps] = millis() - t0; pols[nGaps++] = rd(COUL_POL);
+  }
   rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_OUTPUT_ONLY);
-  RTC_SLOW_MEM[COUL_SLOT_PREV] = intLater;  // so the ULP doesn't count the test
+  RTC_SLOW_MEM[COUL_SLOT_PREV] = rd(COUL_INT);  // so the ULP doesn't count the test
   RTC_SLOW_MEM[COUL_SLOT_STUCK] = 0;
   SET_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // resume
+  if (tegLastHeartbeat) tegLastHeartbeat = millis() | 1;  // the page's heartbeats queued up while this ran
 
   Serial.println("LTC test: counter paused during the test");
   Serial.printf("LTC test: INT %d with ESP pull-up, %d with ESP pull-down; POL %d\n", intUp, intDown, pol);
   Serial.printf("LTC test: CLR pad reads %d driven high, %d driven low\n", clrHigh, clrLow);
   Serial.printf("LTC test: CLR held low 5 ms: INT %d, POL %d\n", intInClr, polInClr);
   Serial.printf("LTC test: CLR back high: INT %d after 2 ms, %d after 300 ms\n", intAfter, intLater);
+  if (nGaps) {
+    uint32_t sum = 0;
+    for (int k = 0; k < nGaps; k++) { sum += gaps[k]; Serial.printf("LTC test: pulse %d came %u ms after the clear, POL %d\n", k + 1, (unsigned)gaps[k], pols[k]); }
+    float gapS = max(0.001f, sum / 1000.0f / nGaps);
+    // f = 32.55 Hz per volt across the sense resistor
+    Serial.printf("LTC test: %.1f pulses/s = %.0f mV across the sense resistor = %.0f mA if it's 0.05 ohm (a healthy chip tops out at 1.6/s, 50 mV)\n",
+                  1 / gapS, 1000 / (32.55f * gapS), 1000 / (32.55f * gapS * 0.05f));
+  } else {
+    Serial.println("LTC test: no pulse within 1.5 s of a clear: the current is below ~0.6 A, as expected");
+  }
   const char* verdict;
   if (!clrHigh) verdict = "CLR (A4) can't go high: it's shorted to GND or something holds it down";
   else if (clrLow) verdict = "CLR (A4) can't go low: it's tied to 3V3 or to something that drives it high";
   else if (!intUp && !intDown && !intInClr) verdict = "INT is held low even while CLR is low, so it isn't the latch. Likely: VIO not at 3.3 V (the board pull-up then pulls INT to 0 V), INT shorted to GND, the chip unpowered (no pack voltage on the board), or in shutdown (tie SHDN to 3V3)";
   else if (intInClr && !intAfter) verdict = "CLR releases INT but it latches again at once: the chip sees pulses nonstop. Check the sense side: pack on IN, BQ on OUT, both GNDs common";
-  else if (intInClr && intAfter && !intLater) verdict = "CLR works; a new pulse came within 300 ms. That's only normal at very high current";
+  else if (intInClr && intAfter && !intLater) verdict = "CLR works, but the chip pulses far faster than a TEG could make it: it sees a large voltage across its sense resistor. Feel the board and pack for heat; check nothing from USB/VCC reaches the pack, BQ or LTC side, and read the sense resistor's marking";
   else if (intInClr && intLater) verdict = intUp ? "INT and CLR both behave: the counter should work now" : "CLR releases INT and it stays released: the old 50 us clear was too short for this board, fixed by the 1 ms clear";
   else verdict = "unexpected combination, send me these lines";
   Serial.printf("LTC test: %s\n", verdict);
@@ -1578,6 +1600,8 @@ void tegTask(void*) {
         if (cmd == "TEG ON") {
           if (!tegMonitoring()) Serial.println("TEG monitor on: staying awake while the page is connected");
           tegLastHeartbeat = millis() | 1;  // never 0
+        } else if (cmd == "SYNC") {  // the monitor page's "sync now": same as a 5 s NEXT hold
+          syncRequested = true;
         } else if (cmd == "LTC TEST") {  // [PROTOTYPE-ONLY: LTC4150]
           coulombTest();
         } else if (cmd == "TEG OFF") {
@@ -2137,18 +2161,38 @@ void manualSync() {
   else redrawCurrent(false);                                 // nothing new: just take the badge away
 }
 
+// the TEG monitor page holds the lamp awake, so it never reaches the sleep that
+// would install an update: keep this firmware (the cycle's sync and drawing are
+// done) and install a newer one the last sync reported right away (reboots)
+void installUpdateNow() {
+  if (!cycleOk) return;
+  waitForWriter();
+  otaguard::markValid();
+  saveSeenFlags();
+  updateBeforeSleep();
+}
+
 // stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
 // can step through the images; a 2 s hold replays an animation (on a still it
 // toggles the info box), a 5 s hold syncs
 void idleWindow() {
-  uint32_t last = millis();
+  uint32_t last = millis(), lastSync = millis();
   while (millis() - last < AWAKE_IDLE_MS || tegMonitoring()) {  // the TEG monitor page keeps the lamp up
+    if (tegMonitoring()) {
+      if (cycleOk) otaguard::markValid();  // a sleep would have done it by now (only acts once)
+      // held awake, it keeps the sync schedule it would have kept asleep
+      if (millis() - lastSync >= SYNC_INTERVAL_S * 1000UL) {
+        Serial.println("TEG monitor holds the lamp awake: scheduled sync");
+        syncRequested = true;
+      }
+    }
     uint32_t idle = millis() - last;
     bool pressed = waitForNext(idle < AWAKE_IDLE_MS ? AWAKE_IDLE_MS - idle : 1000);
     if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
     if (syncRequested) {
       manualSync();
-      last = millis();
+      last = lastSync = millis();
+      if (tegMonitoring()) installUpdateNow();  // otherwise it's installed before the sleep
     } else if (replayRequested) {
       replayRequested = false;
       if (!storedIds.empty()) {

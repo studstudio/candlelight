@@ -207,7 +207,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   <section class="console ctl" aria-label="Serial console">
     <div class="trace-head">
       <span class="label">serial console · lamp log, readings hidden</span>
-      <nav class="links"><button class="link" id="btnPop">pop out</button><button class="link" id="btnClr">clear</button></nav>
+      <nav class="links"><button class="link" id="btnSync">sync now</button><button class="link" id="btnPop">pop out</button><button class="link" id="btnClr">clear</button></nav>
     </div>
     <div class="clog" id="clog"><div class="sys">connect to see what the lamp prints: syncs, updates, sleep and wake</div></div>
   </section>
@@ -315,9 +315,9 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     if (!live) return;
     const lv = v => v ? "high" : "low";
     el.classList.toggle("bad", !!coulLive.stuck);
-    el.textContent = coulLive.stuck ? "INT stuck low: CLR isn't releasing it. Check the CLR wire, and that INT and CLR aren't bridged on the board"
+    el.textContent = coulLive.stuck ? "INT low at every check: CLR isn't releasing it, or the chip pulses nonstop. Press test ltc to see which"
       : `ltc pins · INT ${lv(coulLive.int)} · POL ${lv(coulLive.pol)} (${coulLive.pol ? "charging" : "discharging"})`;
-    if (coulLive.stuck && !stuckWarned && !viewer) { stuckWarned = true; alertBanner("LTC4150 INT is stuck low, so the counter can't see new pulses. Check the CLR wire (A4) and any INT-CLR jumper on the board."); }
+    if (coulLive.stuck && !stuckWarned && !viewer) { stuckWarned = true; alertBanner("LTC4150 INT reads low at every check, so the counts can't be trusted. Press test ltc (battery column) and check the serial console."); }
     if (!coulLive.stuck) stuckWarned = false;
   }
 
@@ -728,6 +728,12 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     if (pop && !pop.closed) { const pb = pop.document.getElementById("clog"); if (pb) conAppend(pb, l); }
   }
   const sysLog = text => conLog(text, "sys");
+  // a sync while connected also installs new firmware right away
+  $("btnSync").onclick = () => {
+    if (!port) { alertBanner("Connect to the lamp first."); return; }
+    sysLog("asked the lamp to sync (it installs new firmware right after)");
+    sendLine("SYNC");
+  };
   $("btnClr").onclick = () => {
     conLines.length = 0; $("clog").textContent = "";
     if (pop && !pop.closed) pop.document.getElementById("clog").textContent = "";

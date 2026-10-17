@@ -69,8 +69,11 @@ const char* TMP_PATH = "/tmp.png";
 // sense resistor, with the direction latched on POL, and holds them until CLR
 // is pulsed low. CLR must NOT be tied to INT (that makes ~1 us pulses the ULP
 // can't see). The ULP coprocessor polls INT every COUL_POLL_US, also in deep
-// sleep, so the main CPU never wakes for a pulse: when INT is low it reads POL,
-// bumps one of two counters in RTC slow memory and pulses CLR. The main CPU
+// sleep, so the main CPU never wakes for a pulse: when INT has gone low since
+// the last poll it reads POL, bumps one of two counters in RTC slow memory and
+// pulses CLR. Only that high -> low edge counts, so an INT stuck low (CLR not
+// reaching the chip) adds one tick, not one per poll; the ULP keeps pulsing CLR
+// while it's low and counts the polls, which the monitor page shows as "stuck". The main CPU
 // reads the counters whenever it's awake (the ULP keeps running) and keeps
 // 32-bit totals; they start at 0 on a real power-on.
 //
@@ -87,6 +90,9 @@ const uint32_t COUL_POLL_US = 100000;       // the LTC4150 pulses at most ~1.6 t
 const float COUL_MAH_PER_TICK = 0.1707f;    // 1 / (32.55 Hz/V * 0.05 ohm) = 0.6144 C. Other sense resistor: 0.008533 / ohms
 const bool COUL_POL_HIGH_IS_CHARGE = true;  // POL high = current OUT -> IN, into the pack on IN (SparkFun's convention); flip if they come out swapped
 const int COUL_SLOT_A = 0, COUL_SLOT_B = 1; // ULP counters: [0] POL high, [1] POL low (16 bits each)
+const int COUL_SLOT_PREV = 2;               // INT as of the last poll (1 high, 0 low): only a high -> low edge counts
+const int COUL_SLOT_STUCK = 3;              // polls in a row INT has read low; a cleared pulse is back high by the next poll
+const uint16_t COUL_STUCK_POLLS = 3;        // this many low polls in a row: CLR isn't releasing INT (wiring, or INT tied to CLR)
 const int COUL_PROG = 8;                    // program loads here, after the counters (words)
 
 RTC_DATA_ATTR uint32_t rtcCoulMagic = 0;
@@ -117,11 +123,15 @@ void coulombBegin(bool wokeFromSleep) {
   const int intBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_INT);
   const int polBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_POL);
   const int clrRtc = rtc_io_number_get(COUL_CLR);
-  enum { L_DONE, L_LOW, L_CLEAR };
+  enum { L_DONE, L_HIGH, L_LOW, L_CLEAR };
   const ulp_insn_t prog[] = {
     I_MOVI(R3, 0),                                   // R3 = the counters' base address
     I_RD_REG(RTC_GPIO_IN_REG, intBit, intBit),       // R0 = INT
-    M_BGE(L_DONE, 1),                                // high: nothing latched
+    M_BGE(L_HIGH, 1),                                // high: nothing latched
+    I_LD(R1, R3, COUL_SLOT_STUCK), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_STUCK),
+    I_LD(R0, R3, COUL_SLOT_PREV),                    // R0 = INT at the last poll
+    I_MOVI(R2, 0), I_ST(R2, R3, COUL_SLOT_PREV),
+    M_BL(L_CLEAR, 1),                                // was low already: counted then, just try the clear again
     I_RD_REG(RTC_GPIO_IN_REG, polBit, polBit),       // R0 = POL, latched with INT
     M_BL(L_LOW, 1),
     I_LD(R1, R3, COUL_SLOT_A), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_A),
@@ -132,11 +142,17 @@ void coulombBegin(bool wokeFromSleep) {
     I_WR_REG(RTC_GPIO_OUT_W1TC_REG, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, 1),
     I_DELAY(400),                                    // ~50 us at 8 MHz
     I_WR_REG(RTC_GPIO_OUT_W1TS_REG, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, 1),
+    M_BX(L_DONE),
+    M_LABEL(L_HIGH),
+    I_MOVI(R2, 1), I_ST(R2, R3, COUL_SLOT_PREV),
+    I_MOVI(R2, 0), I_ST(R2, R3, COUL_SLOT_STUCK),
     M_LABEL(L_DONE),
     I_HALT(),
   };
   size_t size = sizeof(prog) / sizeof(ulp_insn_t);
   CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // a soft reset can leave the old program ticking
+  RTC_SLOW_MEM[COUL_SLOT_PREV] = 1;  // a pulse already latched at boot still counts once
+  RTC_SLOW_MEM[COUL_SLOT_STUCK] = 0;
   esp_err_t err = ulp_process_macros_and_load(COUL_PROG, prog, &size);
   if (err == ESP_OK) {
     ulp_set_wakeup_period(0, COUL_POLL_US);
@@ -144,6 +160,9 @@ void coulombBegin(bool wokeFromSleep) {
   }
   Serial.printf("Coulomb counter: ULP %s\n", err == ESP_OK ? "running" : esp_err_to_name(err));
 }
+
+// INT has read low for several polls in a row: the LTC4150 isn't being cleared
+bool coulombStuck() { return (RTC_SLOW_MEM[COUL_SLOT_STUCK] & 0xFFFF) >= COUL_STUCK_POLLS; }
 
 // adds what the ULP counted since the last call to the totals
 void coulombPoll() {
@@ -1534,10 +1553,12 @@ void tegTask(void*) {
         lastBat = millis();
         Serial.printf("BAT,%u\n", (unsigned)readBatMv());
       }
-      if (millis() - lastCoul >= 1000) {  // [PROTOTYPE-ONLY: LTC4150] coulomb totals once a second: "COUL,<ticks in>,<ticks out>,<mAh per tick>"
+      if (millis() - lastCoul >= 1000) {  // [PROTOTYPE-ONLY: LTC4150] coulomb totals once a second: "COUL,<ticks in>,<ticks out>,<mAh per tick>,<INT>,<POL>,<stuck>"
         lastCoul = millis();
         coulombPoll();
-        Serial.printf("COUL,%u,%u,%.6f\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK);
+        // then the raw INT and POL levels and the stuck flag, for wiring checks: "...,<INT>,<POL>,<stuck>"
+        Serial.printf("COUL,%u,%u,%.6f,%d,%d,%d\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK,
+                      rtc_gpio_get_level(COUL_INT), rtc_gpio_get_level(COUL_POL), coulombStuck() ? 1 : 0);
       }
     }
     delay(20);

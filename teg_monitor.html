@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..400,100&display=swap">
 <style>
-/* One flat dark field, hairlines instead of boxes, everything monospace. The trace is the only thing that glows. */
+/* One flat dark field, hairlines instead of boxes, everything monospace. The trace is a single crisp yellow line. */
 @font-face { font-family: "JetBrains Mono Local"; src: url("fonts/JetBrainsMono-Regular.ttf") format("truetype"); font-display: swap; }
 :root {
   --bg: #050607;
@@ -359,10 +359,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       ctx.beginPath(); ctx.moveTo(xx, pad.t); ctx.lineTo(xx, pad.t + ph); ctx.stroke();
       ctx.fillStyle = "#4c5054"; ctx.fillText(fmtClock(t, ts < 1), xx, H - pad.b + 8);
     }
-    // now line
     const ex = x(tNow);
-    ctx.strokeStyle = "rgba(255,236,200,.07)";
-    ctx.beginPath(); ctx.moveTo(Math.round(ex) + .5, pad.t); ctx.lineTo(Math.round(ex) + .5, pad.t + ph); ctx.stroke();
     // limit and threshold, labelled where they end
     const hline = (mv, color, text) => {
       if (mv < yLo || mv > yHi) return;
@@ -405,34 +402,25 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       wash.addColorStop(0, "rgba(255,220,80,.11)"); wash.addColorStop(.55, "rgba(255,210,60,.035)"); wash.addColorStop(1, "rgba(255,200,40,0)");
       path(); ctx.lineTo(x(shown[shown.length - 1].t), pad.t + ph); ctx.lineTo(x(shown[0].t), pad.t + ph); ctx.closePath();
       ctx.fillStyle = wash; ctx.fill();
-      // three passes, wide and hazy to thin and hot, all yellow. Along x the tail fades out, the head is brightest
-      const along = stops => { const g = ctx.createLinearGradient(pad.l, 0, ex, 0); stops.forEach(([o, c]) => g.addColorStop(o, c)); return g; };
+      // one crisp yellow line, no glow. Along x the tail fades out, the head is solid
+      const along = ctx.createLinearGradient(pad.l, 0, ex, 0);
+      along.addColorStop(0, "rgba(255,225,90,.15)"); along.addColorStop(.55, "rgba(255,225,90,.75)"); along.addColorStop(1, "#ffe45c");
       ctx.lineJoin = "round"; ctx.lineCap = "round";
       path();
-      ctx.lineWidth = 5; ctx.shadowBlur = 22; ctx.shadowColor = "rgba(255,200,40,.55)";
-      ctx.strokeStyle = along([[0, "rgba(255,200,40,0)"], [.5, "rgba(255,200,40,.08)"], [1, "rgba(255,205,50,.22)"]]);
-      ctx.stroke();
-      ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = "rgba(255,215,60,.7)";
-      ctx.strokeStyle = along([[0, "rgba(255,215,60,0)"], [.4, "rgba(255,215,60,.16)"], [.8, "rgba(255,215,60,.32)"], [1, "rgba(255,220,80,.45)"]]);
-      ctx.stroke();
-      ctx.lineWidth = 1; ctx.shadowBlur = 3; ctx.shadowColor = "rgba(255,230,110,.9)";
-      ctx.strokeStyle = along([[0, "rgba(255,225,90,.14)"], [.55, "rgba(255,225,90,.7)"], [1, "#ffe45c"]]);
+      ctx.lineWidth = 1.5; ctx.strokeStyle = along;
       ctx.stroke();
       ctx.restore();
 
-      // head: bloom, pulse, dot, value
+      // head: pulse, dot, value
       const eyRaw = y(liveMv), ey = Math.min(pad.t + ph, Math.max(pad.t, eyRaw));
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
-      const bloom = ctx.createRadialGradient(ex, ey, 0, ex, ey, 70);
-      bloom.addColorStop(0, "rgba(255,238,200,.26)"); bloom.addColorStop(.25, "rgba(255,160,80,.10)"); bloom.addColorStop(.6, "rgba(80,200,190,.035)"); bloom.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = bloom; ctx.fillRect(ex - 70, ey - 70, 140, 140);
       if (!calm.matches) {
         const p = (performance.now() % 1800) / 1800;
         ctx.strokeStyle = `rgba(255,230,190,${(1 - p) * .45})`; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.arc(ex, ey, 3 + p * 14, 0, Math.PI * 2); ctx.stroke();
       }
-      ctx.shadowBlur = 8; ctx.shadowColor = "rgba(255,215,140,.9)"; ctx.fillStyle = "#fffaf0";
+      ctx.fillStyle = "#ffe45c";
       ctx.beginPath(); ctx.arc(ex, ey, 2.2, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
       ctx.fillStyle = "rgba(255,240,215,.85)"; ctx.textAlign = "left"; ctx.textBaseline = "middle";

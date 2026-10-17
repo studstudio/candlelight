@@ -162,7 +162,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       <div class="sub" id="fSub">not set · charge full, then mark full</div>
       <div class="sub" id="bSub" hidden></div>
       <div class="sub" id="pinSub" hidden></div>
-      <div class="row ctl"><button class="link" id="btnFull">mark full</button></div>
+      <div class="row ctl"><button class="link" id="btnFull">mark full</button><button class="link" id="btnLtc">test ltc</button></div>
     </div>
     <div class="bstats">
       <div class="s"><div class="label">pack in · ltc</div><div class="val" id="gCin">—</div><div class="hint" id="gCinHint">no counter data</div></div>
@@ -378,6 +378,12 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     addNote(auto ? "Pack full (BQ stopped charging)" : "Pack marked full");
   }
   $("btnFull").onclick = () => markFull(false);
+  // the lamp pauses its counter, wiggles INT/POL/CLR and prints the result to the serial console
+  $("btnLtc").onclick = () => {
+    if (!port) { alertBanner("Connect to the lamp first: the LTC test runs on the FireBeetle and prints to the serial console."); return; }
+    sysLog("asked the lamp to test the LTC4150 pins");
+    sendLine("LTC TEST");
+  };
   // auto full: the candle is lit and charge was flowing, then no pulse for FULL_QUIET_MS
   function checkFull(mv) {
     if (viewer || !(coulLive && Date.now() - coulLive.at < 10000)) return;

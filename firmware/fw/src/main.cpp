@@ -140,7 +140,7 @@ void coulombBegin(bool wokeFromSleep) {
     I_LD(R1, R3, COUL_SLOT_B), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_B),
     M_LABEL(L_CLEAR),                                // CLR low >= 20 us releases INT and POL
     I_WR_REG(RTC_GPIO_OUT_W1TC_REG, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, 1),
-    I_DELAY(400),                                    // ~50 us at 8 MHz
+    I_DELAY(8000),                                   // ~1 ms at 8 MHz: well over the 20 us minimum, for slower boards
     I_WR_REG(RTC_GPIO_OUT_W1TS_REG, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, 1),
     M_BX(L_DONE),
     M_LABEL(L_HIGH),
@@ -159,6 +159,47 @@ void coulombBegin(bool wokeFromSleep) {
     err = ulp_run(COUL_PROG);
   }
   Serial.printf("Coulomb counter: ULP %s\n", err == ESP_OK ? "running" : esp_err_to_name(err));
+}
+
+// "LTC TEST" from the monitor page: pauses the ULP, drives the pins by hand and
+// prints what INT, POL and CLR do, with a verdict, to find why INT sticks low
+void coulombTest() {
+  CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // pause the ULP
+  delay(5);
+  auto rd = [](gpio_num_t p) { return rtc_gpio_get_level(p); };
+  int intUp = rd(COUL_INT);
+  rtc_gpio_pullup_dis(COUL_INT); rtc_gpio_pulldown_en(COUL_INT); delay(1);
+  int intDown = rd(COUL_INT);  // high here = something on the board pulls INT up
+  rtc_gpio_pulldown_dis(COUL_INT); rtc_gpio_pullup_en(COUL_INT); delay(1);
+  int pol = rd(COUL_POL);
+  rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_INPUT_OUTPUT);  // so the pad's real level can be read back
+  rtc_gpio_set_level(COUL_CLR, 1); delay(1);
+  int clrHigh = rd(COUL_CLR);
+  rtc_gpio_set_level(COUL_CLR, 0); delay(5);
+  int clrLow = rd(COUL_CLR), intInClr = rd(COUL_INT), polInClr = rd(COUL_POL);
+  rtc_gpio_set_level(COUL_CLR, 1); delay(2);
+  int intAfter = rd(COUL_INT);
+  delay(300);
+  int intLater = rd(COUL_INT);
+  rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_OUTPUT_ONLY);
+  RTC_SLOW_MEM[COUL_SLOT_PREV] = intLater;  // so the ULP doesn't count the test
+  RTC_SLOW_MEM[COUL_SLOT_STUCK] = 0;
+  SET_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // resume
+
+  Serial.println("LTC test: counter paused during the test");
+  Serial.printf("LTC test: INT %d with ESP pull-up, %d with ESP pull-down; POL %d\n", intUp, intDown, pol);
+  Serial.printf("LTC test: CLR pad reads %d driven high, %d driven low\n", clrHigh, clrLow);
+  Serial.printf("LTC test: CLR held low 5 ms: INT %d, POL %d\n", intInClr, polInClr);
+  Serial.printf("LTC test: CLR back high: INT %d after 2 ms, %d after 300 ms\n", intAfter, intLater);
+  const char* verdict;
+  if (!clrHigh) verdict = "CLR (A4) can't go high: it's shorted to GND or something holds it down";
+  else if (clrLow) verdict = "CLR (A4) can't go low: it's tied to 3V3 or to something that drives it high";
+  else if (!intUp && !intDown && !intInClr) verdict = "INT is held low even while CLR is low, so it isn't the latch. Likely: VIO not at 3.3 V (the board pull-up then pulls INT to 0 V), INT shorted to GND, the chip unpowered (no pack voltage on the board), or in shutdown (tie SHDN to 3V3)";
+  else if (intInClr && !intAfter) verdict = "CLR releases INT but it latches again at once: the chip sees pulses nonstop. Check the sense side: pack on IN, BQ on OUT, both GNDs common";
+  else if (intInClr && intAfter && !intLater) verdict = "CLR works; a new pulse came within 300 ms. That's only normal at very high current";
+  else if (intInClr && intLater) verdict = intUp ? "INT and CLR both behave: the counter should work now" : "CLR releases INT and it stays released: the old 50 us clear was too short for this board, fixed by the 1 ms clear";
+  else verdict = "unexpected combination, send me these lines";
+  Serial.printf("LTC test: %s\n", verdict);
 }
 
 // INT has read low for several polls in a row: the LTC4150 isn't being cleared
@@ -1537,6 +1578,8 @@ void tegTask(void*) {
         if (cmd == "TEG ON") {
           if (!tegMonitoring()) Serial.println("TEG monitor on: staying awake while the page is connected");
           tegLastHeartbeat = millis() | 1;  // never 0
+        } else if (cmd == "LTC TEST") {  // [PROTOTYPE-ONLY: LTC4150]
+          coulombTest();
         } else if (cmd == "TEG OFF") {
           if (tegLastHeartbeat) Serial.println("TEG monitor off");
           tegLastHeartbeat = 0;

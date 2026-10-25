@@ -4383,7 +4383,7 @@ function syncVideoPanel() { // shows the panel for the layer being edited, if th
 }
 function clearVideo(idx) { // one layer's video, or all of them
   const list = idx === undefined ? [0, 1, 2] : [idx];
-  list.forEach(i => { const S = videoSrcs[i]; if (!S) return; if (S === videoSrc) videoLiveStop(false); try { S.v.pause(); } catch (e) {} URL.revokeObjectURL(S.url); S.v.remove(); videoSrcs[i] = null; if (S === videoSrc) videoSrc = null; });
+  list.forEach(i => { const S = videoSrcs[i]; if (!S) return; if (S === videoSrc) videoLiveStop(false); try { S.v.pause(); } catch (e) {} URL.revokeObjectURL(S.url); S.v.remove(); if (S.xv) { S.xv.remove(); S.xv = null; } videoSrcs[i] = null; if (S === videoSrc) videoSrc = null; });
   syncVideoPanel();
 }
 function videoSeek(v, t) {
@@ -4491,13 +4491,27 @@ async function openVideoFile(file, idx) {
     videoNote("couldn't read that video" + (err && err.message ? ' (' + err.message + ')' : ''), 6000);
   }
 }
+// frames are grabbed with a second, hidden copy of the clip, so the one that plays live is never seeked or stopped by a rebuild
+async function videoExtractor(S) {
+  if (S.xv) return S.xv;
+  if (S.xvFail) return null;
+  const v = document.createElement('video');
+  v.muted = true; v.defaultMuted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.preload = 'auto';
+  v.style.cssText = S.v.style.cssText; v.src = S.url; document.body.appendChild(v);
+  const ok = await videoReady(v, 6000);
+  if (!ok || !v.videoWidth) { v.remove(); S.xvFail = true; return null; }
+  if (videoSrcs[S.idx] !== S) { v.remove(); return null; }
+  S.xv = v; return v;
+}
 let videoBusy = false, videoQueued = false, videoTimer = 0, videoFirstLoad = false;
 async function rebuildVideoFrames(S, first) {
   S = S || videoSrc;
   if (!S) return;
   if (videoBusy) { videoQueued = true; return; }
   videoBusy = true; videoInfo.style.opacity = '.35';
-  const resumeLive = videoLive.on; if (resumeLive) videoLiveStop(false);
+  const xv = first ? null : await videoExtractor(S); // null = no second copy possible: fall back to using (and pausing) the live one
+  const resumeLive = videoLive.on && !xv; if (resumeLive) videoLiveStop(false);
+  const grab = xv || S.v;
   try {
     do {
       videoQueued = false;
@@ -4505,7 +4519,7 @@ async function rebuildVideoFrames(S, first) {
       const start = videoStartSec(S), stepSec = videoStepFrames(S) / S.fps;
       const count = Math.min(BAKE_FRAMES, Math.max(1, Math.floor((S.dur - start) / stepSec + 1e-6) + 1)); // frames that fit before the clip ends
       const imgs = [];
-      for (let i = 0; i < count && !videoQueued; i++) { const im = await videoFrameImage(S.v, Math.min(start + i * stepSec, Math.max(0, S.dur - 0.04))); if (im) imgs.push(im); }
+      for (let i = 0; i < count && !videoQueued; i++) { const im = await videoFrameImage(grab, Math.min(start + i * stepSec, Math.max(0, S.dur - 0.04))); if (im) imgs.push(im); }
       if (videoQueued || videoSrcs[S.idx] !== S) continue;
       if (imgs.length) { applyVideoFrames(imgs, S); if (S === videoSrc) videoLabels(imgs.length); else S.n = imgs.length; }
     } while (videoQueued);
@@ -4608,7 +4622,7 @@ function videoLiveTick() {
   if (!S || mode !== 'cycle' || !layer || !layer.img || photoWrap.classList.contains('collapsed')) { videoSrcCanvas.style.display = 'none'; return; }
   // end = the stretch of the clip the cycle's frames actually cover: playback loops only over that
   const v = S.v, start = videoStartSec(S), end = Math.min(S.dur - 0.04, start + Math.max(0.3, ((S.n || 1) - 1) * videoStepFrames(S) / S.fps)), now = performance.now(), dt = Math.min(0.2, (now - (videoLive.last || now)) / 1000); videoLive.last = now;
-  if (videoBusy) return;
+  if (videoBusy && !(S.xv)) return;
   const play = () => { try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} };
   if (videoLive.dir > 0) { // forward: the clip plays itself, and starts over at the start point when it ends
     if (v.ended || v.currentTime >= end) {
@@ -4624,7 +4638,7 @@ function videoLiveTick() {
 }
 function videoLoopStep() { // the preview box: the cycle's frames, round and round (boomerang order if it's on)
   if (!videoLive.on) return;
-  if (!animPlaying && !videoBusy && !videoHeld()) {
+  if (!animPlaying && (!videoBusy || (videoSrc && videoSrc.xv)) && !videoHeld()) {
     const filled = frames.map((f, i) => ({ f, i })).filter(x => frameIsFilled(x.f));
     if (filled.length > 1) { const seq = playOrder(filled.length); videoLive.loopPos = (videoLive.loopPos + 1) % seq.length; videoLive.curIdx = filled[seq[videoLive.loopPos]].i; renderFrameForPreview(videoLive.curIdx, true); refreshStaleFrames(); }
   }

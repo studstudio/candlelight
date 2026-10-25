@@ -173,6 +173,10 @@
   #shaderHead .play-tool { height: 24px; margin-left: 8px; padding: 0 2px 0 6px; flex: 0 0 auto; border: none; background: transparent; color: var(--cream-dim); }
   .play-tool.idle { opacity: 0.35; }
   #shaderHead .play-tool { order: 3; }
+  #videoHead .play-tool, #videoHead .vlive { height: 24px; margin-left: 8px; padding: 0 2px 0 6px; flex: 0 0 auto; border: none; background: transparent; color: var(--cream-dim); }
+  #videoHead .vlive { font-size: 12px; cursor: pointer; width: auto; }
+  #videoHead .play-tool.active, #videoHead .vlive.active { color: var(--ember); }
+  #videoHead .boom-btn { margin-left: 8px; }
   #shaderHead .play-tool.active { color: var(--ember); }
   .play-tool.idle { opacity: 0.35; }
   .play-tool.active { color: var(--ember); } /* far right, balancing the + on the left */
@@ -869,7 +873,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 /* round 40: the toolbar icons rest in ember orange and turn our ocean blue when highlighted */
 .crop-toolbar .tool-btn, .crop-toolbar .crop-toggle { color: var(--ember); }
-.crop-toolbar .tool-btn.active, .crop-toolbar .crop-toggle[aria-expanded="true"], .crop-toolbar .play-tool.active, #shaderHead .play-tool.active { color: var(--ocean); }
+.crop-toolbar .tool-btn.active, .crop-toolbar .crop-toggle[aria-expanded="true"], .crop-toolbar .play-tool.active, #shaderHead .play-tool.active, #videoHead .play-tool.active, #videoHead .vlive.active { color: var(--ocean); }
 
 /* round 41: shader cards, message box, position/font icons outline in ember; the caret underscore is ocean blue */
 .shader-card, .postcard-row input[type=text], .postcard-pos-btn, .font-dial-btn { border-color: var(--ember) !important; }
@@ -1085,7 +1089,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 </div>
 
 <div class="shader-panel" id="videoPanel" style="display:none;">
-  <div class="shader-head sec-head" id="videoHead" style="margin-top:0;cursor:default;"><span class="name"><span class="shader-name">video</span></span><span class="anim-interval-value" id="videoInfo" style="flex:0 1 auto;white-space:nowrap;"></span></div>
+  <div class="shader-head sec-head" id="videoHead" style="margin-top:0;cursor:default;"><span class="name"><span class="shader-name">video</span><button class="vlive" id="videoLiveBtn" type="button" aria-label="play or pause the live video" title="play or pause the live video">■</button></span><span class="anim-interval-value" id="videoInfo" style="flex:0 1 auto;white-space:nowrap;font-size:9px;letter-spacing:0;text-transform:none;opacity:.75;"></span></div>
   <div class="sec-body slider-grid">
   <div class="moire-row full"><span class="moire-label">time</span><input type="range" id="videoTime" min="0" max="1000" value="0"><span class="anim-interval-value" id="videoTimeVal" style="flex:0 0 auto;min-width:88px;white-space:nowrap;text-align:right;">0.0s</span></div>
   <div class="moire-row full"><span class="moire-label">step</span><input type="range" id="videoStep" min="0" max="13" value="7"><span class="anim-interval-value" id="videoStepVal" style="flex:0 0 auto;min-width:88px;text-align:right;white-space:nowrap;"></span></div>
@@ -1342,7 +1346,19 @@ function syncShaderCycleSettings() {
     const filled = frames.filter(frameIsFilled);
     if (filled.length < 2) return;
     const src = currentStack()[activeLayerIdx];
-    if (!src || !src.shader) return;
+    if (!src) return;
+    if (activeLayerIdx > 0 && src.img) { // an overlay is one thing across all frames (the same photo, or one video's pictures): its look and crop carry over
+      const idx = activeLayerIdx;
+      if (filled.every(st => st[idx] && st[idx].img && (st[idx].img === src.img || (st[idx].img.__vf && src.img.__vf)))) {
+        filled.forEach(st => { const l = st[idx]; if (l === src) return; SETTING_KEYS.forEach(k => { l[k] = src[k]; }); if (src.box && l.coverScale) l.box = mapCropBox(src, l); });
+        return;
+      }
+    }
+    if (src.img && src.img.__vf && activeLayerIdx === 0 && filled.every(st => st[0] && st[0].img && st[0].img.__vf)) { // frames cut from one video: look settings and the crop carry across all of them too
+      filled.forEach(st => { const l = st[0]; if (l === src) return; SETTING_KEYS.forEach(k => { l[k] = src[k]; }); if (src.box && l.coverScale) l.box = mapCropBox(src, l); });
+      return;
+    }
+    if (!src.shader) return;
     if (!filled.every(st => st[activeLayerIdx] && st[activeLayerIdx].shader)) return;
     filled.forEach(st => { const l = st[activeLayerIdx]; if (l !== src) SETTING_KEYS.forEach(k => { l[k] = src[k]; }); });
   } catch (e) {}
@@ -1374,7 +1390,7 @@ function loadLayerStateToGlobals(idx) {
   if (!layer) return;
   activeLayerIdx = idx;
   naturalW = layer.naturalW; naturalH = layer.naturalH;
-  sourceImg.src = layer.shader ? layer.img.toDataURL() : layer.img.src; // shader layers draw into a canvas, not an <img>
+  sourceImg.src = (layer.shader || layer.img.tagName === 'CANVAS') ? layer.img.toDataURL() : layer.img.src; // shader layers draw into a canvas, not an <img>
   sourceImg.style.display = 'block';
   emptyState.style.display = 'none';
   photoWrap.classList.add('has-photo');
@@ -1426,6 +1442,7 @@ function removeLayer(idx) {
   const stack = currentStack();
   if (idx === 0 || !stack[idx]) return; // base can't be removed
   stack[idx] = null;
+  if (mode === 'cycle') { frames.forEach(st => { if (st) st[idx] = null; }); clearVideo(idx); } // an overlay comes off every frame
   if (activeLayerIdx === idx) loadLayerStateToGlobals(0);
   updateLayerTabs();
   render();
@@ -1434,6 +1451,7 @@ function removeLayer(idx) {
 function updateLayerTabs() {
   updateToolbarBlank();
   updateShaderPanel();
+  try { syncVideoPanel(); } catch (e) {} // the video panel follows whichever layer is being edited
   layerTabs.innerHTML = '';
   const stack = currentStack();
   if (!stack[0]) return; // nothing to show until a base photo exists — the empty-state placeholder covers this
@@ -1702,9 +1720,13 @@ function updateAnimControlsVisibility() {
 }
 // the one play button lives beside the boomerang while a shader is being edited, and in the toolbar otherwise
 const playBtnHome = animPlayBtn.parentNode, playBtnNext = animPlayBtn.nextSibling;
+const boomHome = document.getElementById('frameBoomBtn').parentNode;
 function placePlayBtn() {
-  const inHead = !!activeShaderLayer();
-  const dest = inHead ? document.querySelector('#shaderHead .name') : playBtnHome;
+  const inVideo = !activeShaderLayer() && typeof videoSrc !== 'undefined' && !!videoSrc && mode === 'cycle'; // a video's frames: the same play + boomerang sit in the video header
+  const inHead = !!activeShaderLayer() || inVideo;
+  const dest = inVideo ? document.querySelector('#videoHead .name') : inHead ? document.querySelector('#shaderHead .name') : playBtnHome;
+  const boom = document.getElementById('frameBoomBtn');
+  if (inVideo) { if (boom.parentNode !== dest) dest.appendChild(boom); } else if (boom.parentNode !== boomHome) boomHome.appendChild(boom);
   if (!dest || animPlayBtn.parentNode === dest) return;
   if (inHead) dest.appendChild(animPlayBtn); else playBtnHome.insertBefore(animPlayBtn, playBtnNext && playBtnNext.parentNode === playBtnHome ? playBtnNext : null);
   animPlayBtn.classList.toggle('in-head', inHead);
@@ -1995,6 +2017,7 @@ function stopAnimPreview(noResume) {
     if (wasBaked) setBaked(true); // resuming the live motion doesn't un-bake what's already baked
   }
   resumeLiveAfterPreview = false;
+  if (!noResume && wasPlaying && typeof videoSrc !== 'undefined' && videoSrc && typeof videoLiveStart === 'function') videoLiveStart(); // the live clip carries on
 }
 
 // ----- editing tools while the cycle preview is running (see lockedHit) -----
@@ -2032,6 +2055,7 @@ animPlayBtn.onclick = () => {
   // remember whether the live shader was going (or has un-baked tweaks), so it picks up again when the preview stops
   resumeLiveAfterPreview = !!activeShaderLayer();
   animPlaying = true;
+  if (typeof videoLiveStop === 'function') videoLiveStop(false);
   if (typeof stopShaderPlay === 'function') stopShaderPlay();
   setEditLock(true);
   setPlayIcon(true);
@@ -3657,7 +3681,7 @@ function addShaderLayer(presetId) {
   if (!ensureGL()) { flashStatus("shaders need WebGL, which isn't available here", 'fail'); return; }
   if (animPlaying) stopAnimPreview(true);
   stopShaderPlay();
-  clearVideo();
+  clearVideo(0);
   snapshotActiveLayerState();
   const wantsPhoto = !!shaderPreset(presetId).photo;
   const photo = currentPhotoSource();
@@ -4073,6 +4097,18 @@ function flashStatus(msg, cls) {
 // each chosen photo becomes the next frame, in selection order. Every new frame
 // starts from the currently-active frame's crop + settings (or, for the very
 // first batch, the first new frame's defaults).
+// overlays go on every frame by default: a frame added later picks up the same overlays (an overlay video's pictures line up by position, holding the last one)
+function inheritOverlays(stack, pos) {
+  const from = frames.find(frameIsFilled);
+  if (!from) return stack;
+  for (const j of [1, 2]) {
+    if (!from[j] || !from[j].img) continue;
+    const l = cloneLayer(from[j]), O = videoSrcs[j];
+    if (O && O.imgs.length) l.img = O.imgs[Math.min(pos, O.imgs.length - 1)];
+    stack[j] = l;
+  }
+  return stack;
+}
 async function importFramesFromFiles(files) {
   if (animPlaying) stopAnimPreview(true);
   const filledCount = frames.filter(frameIsFilled).length;
@@ -4099,7 +4135,7 @@ async function importFramesFromFiles(files) {
       layer.box = computeFittedBox(vis, presetAspect);
       template = layer;
     }
-    frames.push([layer, null, null]);
+    frames.push(inheritOverlays([layer, null, null], frames.length));
   });
 
   hasPhoto = true;
@@ -4134,13 +4170,13 @@ async function replaceBaseAndExtend(files) {
   layer.img = imgs[0]; layer.naturalW = imgs[0].naturalWidth; layer.naturalH = imgs[0].naturalHeight;
   placeLayerImage(layer, cw, ch);
   layer.box = mapCropBox(old, layer);
-  const extra = imgs.slice(1).map(im => {
+  const extra = imgs.slice(1).map((im, i) => {
     const l = makeDefaultLayerParams();
     l.img = im; l.naturalW = im.naturalWidth; l.naturalH = im.naturalHeight;
     placeLayerImage(l, cw, ch);
     copyLayerSettings(old, l);
     l.box = mapCropBox(old, l);
-    return [l, null, null];
+    return inheritOverlays([l, null, null], activeFrameIdx + 1 + i);
   });
   frames.splice(activeFrameIdx + 1, 0, ...extra);
   activeLayerIdx = 0;
@@ -4225,23 +4261,37 @@ document.getElementById('resetSlidersBtn').onclick = resetActiveSliders;
 // ---------- video: pick a clip and take frames from it, right on the phone ----------
 // The clip is played by a hidden <video>; the app jumps to a time, draws that frame to a canvas and turns it into a photo.
 // "time" is where the first frame comes from, "step" is how many video frames sit between one cycle frame and the next.
+// A video can be the base or an overlay. Each layer with a video has its own time + step, and its frames sit on the base frames in order
+// (frame 1 of an overlay video over frame 1 of the base, and so on; a shorter one holds its last frame).
 // Nothing is uploaded: the clip stays in the browser until the page closes.
 const VIDEO_STEPS = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
 const VIDEO_MAX_SIDE = 1280;
-let videoSrc = null; // { v, url, dur, fps }
+const VIDEO_LAYER_NAMES = ['video', 'overlay 1 video', 'overlay 2 video'];
+var videoSrcs = [null, null, null]; // one source per layer slot: { v, url, dur, fps, idx, imgs, n, timeVal, stepIdx }
+var videoSrc = null;                // the source of the layer being edited (var: the play button placement checks it early)
 const videoPanel = document.getElementById('videoPanel'), videoTime = document.getElementById('videoTime'), videoStep = document.getElementById('videoStep');
 const videoTimeVal = document.getElementById('videoTimeVal'), videoStepVal = document.getElementById('videoStepVal'), videoInfo = document.getElementById('videoInfo');
-function videoStepFrames() { return VIDEO_STEPS[+videoStep.value] || 1; }
-function videoStartSec() { return videoSrc ? (+videoTime.value / 1000) * Math.max(0, videoSrc.dur - 1 / videoSrc.fps) : 0; }
+const videoNameEl = videoPanel.querySelector('.shader-name');
+function videoStepFrames(S) { return VIDEO_STEPS[S ? S.stepIdx : +videoStep.value] || 1; }
+function videoStartSec(S) { S = S || videoSrc; return S ? ((S === videoSrc ? +videoTime.value : S.timeVal) / 1000) * Math.max(0, S.dur - 1 / S.fps) : 0; }
 function videoLabels(n) {
-  const f = videoStepFrames(), fps = videoSrc ? videoSrc.fps : 30;
-  videoTimeVal.textContent = videoStartSec().toFixed(1) + 's';
+  const S = videoSrc;
+  if (S && n) S.n = n; else if (S) n = S.n;
+  const f = videoStepFrames(S);
+  videoTimeVal.textContent = videoStartSec(S).toFixed(1) + 's';
   videoStepVal.textContent = f === 1 ? 'every frame' : 'every ' + f + ' frames';
-  if (videoSrc) videoInfo.textContent = (n ? n + ' frames · ' : '') + videoSrc.dur.toFixed(1) + 's clip · ' + Math.round(videoSrc.fps) + ' fps';
+  if (S) videoInfo.textContent = (n ? n + 'f · ' : '') + S.dur.toFixed(1) + 's · ' + Math.round(S.fps) + 'fps';
 }
-function syncVideoPanel() { videoPanel.style.display = (videoSrc && mode === 'cycle') ? 'block' : 'none'; if (videoSrc) videoLabels(); }
-function clearVideo() {
-  if (videoSrc) { try { videoSrc.v.pause(); } catch (e) {} URL.revokeObjectURL(videoSrc.url); videoSrc.v.remove(); videoSrc = null; }
+function syncVideoPanel() { // shows the panel for the layer being edited, if that layer is a video
+  const S = (mode === 'cycle') ? videoSrcs[activeLayerIdx] : null;
+  if (S !== videoSrc) { videoLiveStop(false); videoSrc = S; if (S) { videoTime.value = S.timeVal; videoStep.value = S.stepIdx; } }
+  videoPanel.style.display = videoSrc ? 'block' : 'none';
+  if (videoSrc) { videoNameEl.textContent = VIDEO_LAYER_NAMES[videoSrc.idx]; videoLabels(); }
+  placePlayBtn();
+}
+function clearVideo(idx) { // one layer's video, or all of them
+  const list = idx === undefined ? [0, 1, 2] : [idx];
+  list.forEach(i => { const S = videoSrcs[i]; if (!S) return; if (S === videoSrc) videoLiveStop(false); try { S.v.pause(); } catch (e) {} URL.revokeObjectURL(S.url); S.v.remove(); videoSrcs[i] = null; if (S === videoSrc) videoSrc = null; });
   syncVideoPanel();
 }
 function videoSeek(v, t) {
@@ -4287,7 +4337,7 @@ function detectVideoFps(v) { // plays a moment and times the frames; falls back 
 }
 function videoNote(msg, hideAfter) { // visible feedback in the video panel itself (the send-status line is easy to miss)
   videoPanel.style.display = 'block'; videoInfo.textContent = msg;
-  if (hideAfter) setTimeout(() => { if (!videoSrc && videoInfo.textContent === msg) syncVideoPanel(); }, hideAfter);
+  if (hideAfter) setTimeout(() => { if (videoInfo.textContent === msg) syncVideoPanel(); }, hideAfter);
 }
 function videoReady(v, ms) { // resolves true once the video has a drawable frame; nudges iOS (which loads nothing until asked) with a muted play and a seek
   return new Promise(res => {
@@ -4301,9 +4351,12 @@ function videoReady(v, ms) { // resolves true once the video has a drawable fram
     setTimeout(() => fin(v.readyState >= 2), ms);
   });
 }
-async function openVideoFile(file) {
-  clearVideo();
+async function openVideoFile(file, idx) {
+  idx = idx || 0;
+  if (idx > 0 && !frameIsFilled(frames[activeFrameIdx]) && !frameIsFilled(currentStack())) { flashStatus('add a base photo or video first', 'fail'); return; }
+  clearVideo(idx);
   if (mode !== 'cycle') setMode('cycle');
+  videoLiveStop(false);
   videoNote('reading video…');
   const v = document.createElement('video');
   v.muted = true; v.defaultMuted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.preload = 'auto';
@@ -4319,74 +4372,134 @@ async function openVideoFile(file) {
     const ready = await videoReady(v, 15000);
     if (!ready || !v.videoWidth) throw new Error('data');
     const fps = await detectVideoFps(v);
-    videoSrc = { v, url, dur: v.duration, fps };
-    videoTime.value = 0;
+    const S = { v, url, dur: v.duration, fps, idx, imgs: [], n: 0, timeVal: 0, stepIdx: 0 };
     { // default step: 30, or the biggest one that still fits all 10 frames when the clip is short
-      const fit = (Math.floor(v.duration * fps) - 1) / (BAKE_FRAMES - 1); let idx = 0;
-      VIDEO_STEPS.forEach((st, i) => { if (st <= 30 && st <= fit) idx = i; });
-      videoStep.value = idx;
+      const fit = (Math.floor(v.duration * fps) - 1) / (BAKE_FRAMES - 1); let si = 0;
+      VIDEO_STEPS.forEach((st, i) => { if (st <= 30 && st <= fit) si = i; });
+      S.stepIdx = si;
     }
-    syncVideoPanel();
-    await rebuildVideoFrames();
-    if (!frames.some(frameIsFilled)) throw new Error('frames');
+    videoSrcs[idx] = S;
+    videoFirstLoad = true; // the clip starts playing live once its frames are in
+    await rebuildVideoFrames(S, true);
+    if (!frames.some(frameIsFilled) || !S.imgs.length) throw new Error('frames');
   } catch (err) {
-    URL.revokeObjectURL(url); v.remove(); videoSrc = null;
+    URL.revokeObjectURL(url); v.remove(); videoSrcs[idx] = null; videoSrc = videoSrcs[activeLayerIdx] || null; videoFirstLoad = false;
     videoNote("couldn't read that video" + (err && err.message ? ' (' + err.message + ')' : ''), 6000);
   }
 }
-let videoBusy = false, videoQueued = false, videoTimer = 0;
-async function rebuildVideoFrames() {
-  if (!videoSrc) return;
+let videoBusy = false, videoQueued = false, videoTimer = 0, videoFirstLoad = false;
+async function rebuildVideoFrames(S, first) {
+  S = S || videoSrc;
+  if (!S) return;
   if (videoBusy) { videoQueued = true; return; }
-  videoBusy = true; videoInfo.style.opacity = '.5';
+  videoBusy = true; videoInfo.style.opacity = '.35';
+  const resumeLive = videoLive.on; if (resumeLive) videoLiveStop(false);
   try {
     do {
       videoQueued = false;
-      const S = videoSrc; if (!S) break;
-      const start = videoStartSec(), stepSec = videoStepFrames() / S.fps;
+      if (videoSrcs[S.idx] !== S) break;
+      const start = videoStartSec(S), stepSec = videoStepFrames(S) / S.fps;
       const count = Math.min(BAKE_FRAMES, Math.max(1, Math.floor((S.dur - start) / stepSec + 1e-6) + 1)); // frames that fit before the clip ends
       const imgs = [];
       for (let i = 0; i < count && !videoQueued; i++) { const im = await videoFrameImage(S.v, Math.min(start + i * stepSec, Math.max(0, S.dur - 0.04))); if (im) imgs.push(im); }
-      if (videoQueued || !videoSrc) continue;
-      if (imgs.length) { applyVideoFrames(imgs); videoLabels(imgs.length); }
+      if (videoQueued || videoSrcs[S.idx] !== S) continue;
+      if (imgs.length) { applyVideoFrames(imgs, S); if (S === videoSrc) videoLabels(imgs.length); else S.n = imgs.length; }
     } while (videoQueued);
-  } finally { videoBusy = false; videoInfo.style.opacity = ''; }
+  } finally { videoBusy = false; videoInfo.style.opacity = '.75'; if ((resumeLive || videoFirstLoad) && videoSrc) { videoFirstLoad = false; try { videoSrc.v.currentTime = videoStartSec(videoSrc); } catch (e) {} videoLiveStart(); } }
 }
-function applyVideoFrames(imgs) { // replaces the cycle with these frames, like a bake: the frame you're on lends its crop, settings and overlays
+function videoMakeLayer(im, template, cw, ch) { // a photo layer for one video frame, taking crop + settings from the template layer
+  const layer = makeDefaultLayerParams();
+  layer.img = im; layer.naturalW = im.naturalWidth; layer.naturalH = im.naturalHeight;
+  placeLayerImage(layer, cw, ch);
+  if (template) { copyLayerSettings(template, layer); layer.box = mapCropBox(template, layer); }
+  else layer.box = computeFittedBox(computeVisibleBoundsFor(layer.coverScale, layer.coverX0, layer.coverY0, layer.naturalW, layer.naturalH), presetAspect);
+  return layer;
+}
+function applyVideoFrames(imgs, S) { // puts these frames into layer S.idx of every frame (a base video replaces the cycle; an overlay video rides on the base frames)
+  const k = S.idx;
   if (animPlaying) stopAnimPreview(true);
   snapshotActiveLayerState();
-  const old = frames.slice();
-  const src = frameIsFilled(frames[activeFrameIdx]) ? frames[activeFrameIdx] : null;
-  let template = src ? src[0] : null;
+  const old = frames.slice(), oldFilled = old.filter(frameIsFilled);
+  if (!oldFilled.length && k > 0) return;
+  const ref = frameIsFilled(old[activeFrameIdx]) ? old[activeFrameIdx] : (oldFilled[0] || null);
+  const template = ref ? (ref[k] || null) : null;
   if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false);
   const { cw, ch } = measureContainer();
-  const next = imgs.map(im => {
-    const layer = makeDefaultLayerParams();
-    layer.img = im; layer.naturalW = im.naturalWidth; layer.naturalH = im.naturalHeight;
-    placeLayerImage(layer, cw, ch);
-    if (template) { copyLayerSettings(template, layer); layer.box = mapCropBox(template, layer); }
-    else { layer.box = computeFittedBox(computeVisibleBoundsFor(layer.coverScale, layer.coverX0, layer.coverY0, layer.naturalW, layer.naturalH), presetAspect); template = layer; }
-    return [layer, src && src[1] ? cloneLayer(src[1]) : null, src && src[2] ? cloneLayer(src[2]) : null];
-  });
+  S.imgs = imgs;
+  let next;
+  if (k === 0) { // base: one frame per picture; the overlays come along (an overlay video's own pictures are lined up below)
+    next = imgs.map((im, i) => {
+      const from = oldFilled.length ? oldFilled[Math.min(i, oldFilled.length - 1)] : [null, null, null];
+      return [videoMakeLayer(im, template, cw, ch), from[1] ? cloneLayer(from[1]) : null, from[2] ? cloneLayer(from[2]) : null];
+    });
+  } else { // overlay: as many frames as the longer of the two; a shorter overlay holds its last picture
+    const n = Math.max(oldFilled.length, imgs.length);
+    next = [];
+    for (let i = 0; i < n; i++) {
+      const from = oldFilled[Math.min(i, oldFilled.length - 1)];
+      const st = from.map(l => l ? cloneLayer(l) : null);
+      st[k] = videoMakeLayer(imgs[Math.min(i, imgs.length - 1)], template, cw, ch);
+      next.push(st);
+    }
+  }
+  for (const j of [1, 2]) { // line up the other overlay videos with the new frame count
+    const O = videoSrcs[j]; if (!O || O === S || !O.imgs.length) continue;
+    next.forEach((st, i) => { if (st[j]) st[j].img = O.imgs[Math.min(i, O.imgs.length - 1)]; });
+  }
   const keep = Math.min(activeFrameIdx, next.length - 1);
   frames = next; activeFrameIdx = Math.max(0, keep); heldFrameIdx = null; cycleMirrorsStill = false;
-  old.forEach(st => st && st[0] && st[0].img && st[0].img.__vf && !next.some(n => n[0].img === st[0].img) && URL.revokeObjectURL(st[0].img.src)); // frees the old frames
-  hasPhoto = true; activeLayerIdx = 0;
-  loadLayerStateToGlobals(0);
+  const inUse = new Set(); next.forEach(st => st.forEach(l => l && l.img && inUse.add(l.img)));
+  old.forEach(st => st && st.forEach(l => { if (l && l.img && l.img.__vf && !inUse.has(l.img) && l.img.src && l.img.src.startsWith('blob:')) { inUse.add(l.img); URL.revokeObjectURL(l.img.src); } })); // frees the old pictures
+  hasPhoto = true; activeLayerIdx = k;
+  loadLayerStateToGlobals(k);
   updateLayerTabs(); updateFrameFilmstrip(); render();
   lastWrapW = photoWrap.clientWidth;
   updateSendState();
 }
-function scheduleVideoRebuild() { clearTimeout(videoTimer); videoTimer = setTimeout(rebuildVideoFrames, 220); }
-videoTime.oninput = () => { videoLabels(); scheduleVideoRebuild(); };
-videoStep.oninput = () => { videoLabels(); scheduleVideoRebuild(); };
+// ----- live playback: the clip plays continuously through the dither, and the time knob rides along -----
+// Each tick draws the video's current frame in place of the active frame's still for one render, then puts the still back,
+// so nothing that sends, saves or edits ever sees the live picture.
+const videoLive = { on: false, timer: 0, drag: false, canvas: document.createElement('canvas') };
+videoLive.canvas.__vf = true;
+const videoLiveBtn = document.getElementById('videoLiveBtn');
+function videoLiveTick() {
+  const S = videoSrc, st = frames[activeFrameIdx], layer = st && S && st[S.idx];
+  if (!S || mode !== 'cycle' || animPlaying || videoBusy || !layer || !layer.img || !layer.img.__vf) return;
+  const v = S.v;
+  if (v.ended || v.currentTime >= S.dur - 0.04) { try { v.currentTime = 0; const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} return; }
+  if (v.paused) { try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+  const c = videoLive.canvas, still = layer.img;
+  c.width = layer.naturalW; c.height = layer.naturalH;
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  layer.img = c;
+  try { render(); } finally { layer.img = still; }
+  if (!videoLive.drag) { videoTime.value = Math.round(Math.min(1, v.currentTime / Math.max(0.001, S.dur - 1 / S.fps)) * 1000); videoLabels(); }
+}
+function videoLiveStart() {
+  if (videoLive.on || !videoSrc || mode !== 'cycle' || animPlaying) return;
+  videoLive.on = true; videoLiveBtn.textContent = '■'; videoLiveBtn.classList.add('active');
+  try { const p = videoSrc.v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+  videoLive.timer = setInterval(videoLiveTick, 100);
+}
+function videoLiveStop(restore) {
+  if (!videoLive.on) return;
+  clearInterval(videoLive.timer); videoLive.on = false; videoLiveBtn.textContent = '▶'; videoLiveBtn.classList.remove('active');
+  try { if (videoSrc) videoSrc.v.pause(); } catch (e) {}
+  if (restore !== false) { try { render(); } catch (e) {} } // back to the frame's own still
+}
+videoLiveBtn.onclick = () => { if (videoLive.on) { videoLiveStop(); } else videoLiveStart(); };
+['pointerdown', 'touchstart'].forEach(ev => videoTime.addEventListener(ev, () => { videoLive.drag = true; }, { passive: true }));
+['pointerup', 'pointercancel', 'touchend', 'touchcancel', 'change'].forEach(ev => videoTime.addEventListener(ev, () => { videoLive.drag = false; }));
+function scheduleVideoRebuild() { clearTimeout(videoTimer); const S = videoSrc; videoTimer = setTimeout(() => rebuildVideoFrames(S), 220); }
+videoTime.oninput = () => { if (!videoSrc) return; videoSrc.timeVal = +videoTime.value; videoLabels(); if (videoLive.on) { try { videoSrc.v.currentTime = videoStartSec(videoSrc); } catch (e) {} } scheduleVideoRebuild(); };
+videoStep.oninput = () => { if (!videoSrc) return; videoSrc.stepIdx = +videoStep.value; videoLabels(); scheduleVideoRebuild(); };
 
 fileInput.onchange = (e) => {
   const files = Array.from(e.target.files || []);
   if (!files.length) return;
   const vf = files.find(f => /^video\//.test(f.type) || /\.(mov|mp4|m4v|webm)$/i.test(f.name));
-  if (vf) { pendingNewFrameIdx = null; openVideoFile(vf); return; }
-  clearVideo(); // photos replace a video's frames
+  if (vf) { const ti = pendingUploadTargetLayer; pendingNewFrameIdx = null; openVideoFile(vf, ti); return; }
+  clearVideo(pendingUploadTargetLayer); // a photo replaces that layer's video frames
   const targetIdx = pendingUploadTargetLayer;
   const newFrameFlag = pendingNewFrameIdx !== null;
   pendingNewFrameIdx = null;
@@ -4429,6 +4542,7 @@ fileInput.onchange = (e) => {
       updateCoverFit();
       layer.coverScale = coverScale; layer.coverX0 = coverX0; layer.coverY0 = coverY0;
       layer.box = computeFittedBox(visibleImageBounds(), presetAspect);
+      if (mode === 'cycle' && targetIdx > 0) frames.forEach(st => { if (st && st !== list && frameIsFilled(st)) st[targetIdx] = cloneLayer(layer); }); // an overlay goes on every frame by default
       activeLayerIdx = targetIdx;
       loadLayerStateToGlobals(targetIdx);
       updateLayerTabs();

@@ -1004,9 +1004,10 @@ html, body { background-color: #fdd48d; background-image: none; }
 #videoTime::-webkit-slider-runnable-track, #videoTime:not(.rail)::-webkit-slider-runnable-track {
   --pa: calc(8px + (100% - 16px) * var(--va, 0));
   --pb: calc(8px + (100% - 16px) * var(--vb, 0));
+  --pc: calc(8px + (100% - 16px) * var(--vc, 0));
   background:
     linear-gradient(to right, transparent 0, transparent var(--pa), rgba(255, 36, 24, 0.95) var(--pa), rgba(255, 36, 24, 0.95) var(--pb), transparent var(--pb), transparent 100%),
-    linear-gradient(rgba(255, 36, 24, 0.22), rgba(255, 36, 24, 0.22)) !important;
+    linear-gradient(to right, transparent 0, transparent var(--pa), rgba(255, 36, 24, 0.22) var(--pa), rgba(255, 36, 24, 0.22) var(--pc), transparent var(--pc), transparent 100%) !important;
   height: 2px; border-radius: 1px;
 }
 
@@ -1146,7 +1147,7 @@ html, body { background-color: #fdd48d; background-image: none; }
   <div class="shader-head sec-head" id="videoHead" style="margin-top:0;cursor:default;"><span class="name"><span class="shader-name">video</span><button class="vlive" id="videoLiveBtn" type="button" aria-label="play or pause the live video" title="play or pause the live video">■</button></span><span class="anim-interval-value" id="videoInfo" style="flex:0 1 auto;white-space:nowrap;font-size:9px;letter-spacing:0;text-transform:none;opacity:.75;"></span></div>
   <div class="sec-body slider-grid">
   <div class="moire-row full"><span class="moire-label">time</span><input type="range" id="videoTime" min="0" max="1000" value="0"><span class="anim-interval-value" id="videoTimeVal" style="flex:0 0 auto;min-width:88px;white-space:nowrap;text-align:right;">0.0s</span></div>
-  <div class="moire-row full"><span class="moire-label">step</span><input type="range" id="videoStep" min="0" max="13" value="7"><span class="anim-interval-value" id="videoStepVal" style="flex:0 0 auto;min-width:88px;text-align:right;white-space:nowrap;"></span></div>
+  <div class="moire-row full"><span class="moire-label">step</span><input type="range" id="videoStep" min="0" max="28" value="2"><span class="anim-interval-value" id="videoStepVal" style="flex:0 0 auto;min-width:88px;text-align:right;white-space:nowrap;"></span></div>
   </div>
 </div>
 
@@ -4354,7 +4355,7 @@ document.getElementById('resetSlidersBtn').onclick = resetActiveSliders;
 // A video can be the base or an overlay. Each layer with a video has its own time + step, and its frames sit on the base frames in order
 // (frame 1 of an overlay video over frame 1 of the base, and so on; a shorter one holds its last frame).
 // Nothing is uploaded: the clip stays in the browser until the page closes.
-const VIDEO_STEPS = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
+const VIDEO_STEPS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 18, 20, 22, 24, 27, 30, 34, 38, 42, 46, 50, 55, 60, 66, 72, 80, 90];
 const VIDEO_MAX_SIDE = 1280;
 const VIDEO_LAYER_NAMES = ['video', 'overlay 1 video', 'overlay 2 video'];
 var videoSrcs = [null, null, null]; // one source per layer slot: { v, url, dur, fps, idx, imgs, n, timeVal, stepIdx }
@@ -4368,7 +4369,7 @@ function videoLabels(n) {
   const S = videoSrc;
   if (S && n) S.n = n; else if (S) n = S.n;
   const f = videoStepFrames(S);
-  videoTimeVal.textContent = (S && !videoLive.drag ? S.v.currentTime : videoStartSec(S)).toFixed(1) + 's'; // the readout is where the clip is right now; the knob stays on the start point
+  videoTimeVal.textContent = videoStartSec(S).toFixed(1) + 's'; // the readout is the second the knob is set to
   videoRail();
   videoStepVal.textContent = f === 1 ? 'every frame' : 'every ' + f + ' frames';
   if (S) videoInfo.textContent = (n ? n + 'f · ' : '') + S.dur.toFixed(1) + 's · ' + Math.round(S.fps) + 'fps';
@@ -4477,9 +4478,9 @@ async function openVideoFile(file, idx) {
     if (!ready || !v.videoWidth) throw new Error('data');
     const fps = await detectVideoFps(v);
     const S = { v, url, dur: v.duration, fps, idx, imgs: [], n: 0, timeVal: 0, stepIdx: 0 };
-    { // default step: 30, or the biggest one that still fits all 10 frames when the clip is short
+    { // default step: 3, or the biggest one that still fits all 10 frames when the clip is short
       const fit = (Math.floor(v.duration * fps) - 1) / (BAKE_FRAMES - 1); let si = 0;
-      VIDEO_STEPS.forEach((st, i) => { if (st <= 30 && st <= fit) si = i; });
+      VIDEO_STEPS.forEach((st, i) => { if (st <= 3 && st <= fit) si = i; });
       S.stepIdx = si;
     }
     videoSrcs[idx] = S;
@@ -4606,6 +4607,7 @@ function videoRail() { // the red line fills from the knob (the start point) to 
   const S = videoSrc; if (!S) return;
   const span = Math.max(0.001, S.dur - 1 / S.fps);
   videoTime.style.setProperty('--va', (S.timeVal / 1000).toFixed(4));
+  videoTime.style.setProperty('--vc', Math.max(S.timeVal / 1000, Math.min(1, (videoStartSec(S) + Math.max(0, Math.min(BAKE_FRAMES, Math.floor((S.dur - videoStartSec(S)) * S.fps / videoStepFrames(S) + 1e-6) + 1) - 1) * videoStepFrames(S) / S.fps) / span)).toFixed(4)); // where the frames' stretch ends
   videoTime.style.setProperty('--vb', Math.max(S.timeVal / 1000, Math.min(1, (videoLive.drag ? videoStartSec(S) : S.v.currentTime) / span)).toFixed(4));
 }
 function videoDrawSrc(S, layer) { // the real-time clip, drawn where the crop box shows the photo

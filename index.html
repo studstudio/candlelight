@@ -4537,7 +4537,8 @@ function videoDrawSrc(S, layer) { // the real-time clip, drawn where the crop bo
 function videoLiveTick() {
   const S = videoSrc, st = frames[activeFrameIdx], layer = st && S && st[S.idx];
   if (!S || mode !== 'cycle' || !layer || !layer.img || photoWrap.classList.contains('collapsed')) { videoSrcCanvas.style.display = 'none'; return; }
-  const v = S.v, start = videoStartSec(S), end = S.dur - 0.04, now = performance.now(), dt = Math.min(0.2, (now - (videoLive.last || now)) / 1000); videoLive.last = now;
+  // end = the stretch of the clip the cycle's frames actually cover: playback loops only over that
+  const v = S.v, start = videoStartSec(S), end = Math.min(S.dur - 0.04, start + Math.max(0.3, ((S.n || 1) - 1) * videoStepFrames(S) / S.fps)), now = performance.now(), dt = Math.min(0.2, (now - (videoLive.last || now)) / 1000); videoLive.last = now;
   if (videoBusy) return;
   const play = () => { try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} };
   if (videoLive.dir > 0) { // forward: the clip plays itself, and starts over at the start point when it ends

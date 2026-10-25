@@ -1000,6 +1000,16 @@ html, body { background-color: #fdd48d; background-image: none; }
 #videoStep::-webkit-slider-thumb { margin-top: -5.5px; }
 #videoStep::-webkit-slider-runnable-track { background: transparent !important; }
 
+/* video time slider: the knob is the start point; a faint line runs the whole clip and the red fills from the knob to wherever the video is now */
+#videoTime::-webkit-slider-runnable-track, #videoTime:not(.rail)::-webkit-slider-runnable-track {
+  --pa: calc(8px + (100% - 16px) * var(--va, 0));
+  --pb: calc(8px + (100% - 16px) * var(--vb, 0));
+  background:
+    linear-gradient(to right, transparent 0, transparent var(--pa), rgba(255, 36, 24, 0.95) var(--pa), rgba(255, 36, 24, 0.95) var(--pb), transparent var(--pb), transparent 100%),
+    linear-gradient(rgba(255, 36, 24, 0.22), rgba(255, 36, 24, 0.22)) !important;
+  height: 2px; border-radius: 1px;
+}
+
 </style>
 </head>
 <body>
@@ -4322,7 +4332,8 @@ function videoLabels(n) {
   const S = videoSrc;
   if (S && n) S.n = n; else if (S) n = S.n;
   const f = videoStepFrames(S);
-  videoTimeVal.textContent = videoStartSec(S).toFixed(1) + 's';
+  videoTimeVal.textContent = (S && !videoLive.drag ? S.v.currentTime : videoStartSec(S)).toFixed(1) + 's'; // the readout is where the clip is right now; the knob stays on the start point
+  videoRail();
   videoStepVal.textContent = f === 1 ? 'every frame' : 'every ' + f + ' frames';
   if (S) videoInfo.textContent = (n ? n + 'f · ' : '') + S.dur.toFixed(1) + 's · ' + Math.round(S.fps) + 'fps';
 }
@@ -4504,25 +4515,42 @@ function applyVideoFrames(imgs, S) { // puts these frames into layer S.idx of ev
 // ----- live playback -----
 // Two views of the same clip: the crop box above plays the video itself in real time, while the preview box below loops the cycle's
 // own frames (the ones that get sent), at the cycle's speed, so you always see both the source and what the lamp will show.
-const videoLive = { on: false, timer: 0, drag: false, loopT: 0, loopPos: -1 };
+const videoLive = { on: false, timer: 0, drag: false, loopT: 0, loopPos: -1, dir: 1, last: 0, seeking: false };
 const videoSrcCanvas = document.createElement('canvas');
 videoSrcCanvas.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;display:none';
 photoWrap.insertBefore(videoSrcCanvas, document.getElementById('cropBox'));
 const videoLiveBtn = document.getElementById('videoLiveBtn');
-function videoLiveTick() { // the real-time clip, drawn where the crop box shows the photo
-  const S = videoSrc, st = frames[activeFrameIdx], layer = st && S && st[S.idx];
-  if (!S || mode !== 'cycle' || !layer || !layer.img || photoWrap.classList.contains('collapsed')) { videoSrcCanvas.style.display = 'none'; return; }
-  const v = S.v;
-  if (v.ended || v.currentTime >= S.dur - 0.04) { try { v.currentTime = 0; const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} return; }
-  if (v.paused && !videoBusy) { try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
-  if (videoBusy) return;
-  const dpr = window.devicePixelRatio || 1, w = Math.round(photoWrap.clientWidth * dpr), h = Math.round(photoWrap.clientHeight * dpr);
+function videoRail() { // the red line fills from the knob (the start point) to wherever the clip is now
+  const S = videoSrc; if (!S) return;
+  const span = Math.max(0.001, S.dur - 1 / S.fps);
+  videoTime.style.setProperty('--va', (S.timeVal / 1000).toFixed(4));
+  videoTime.style.setProperty('--vb', Math.max(S.timeVal / 1000, Math.min(1, (videoLive.drag ? videoStartSec(S) : S.v.currentTime) / span)).toFixed(4));
+}
+function videoDrawSrc(S, layer) { // the real-time clip, drawn where the crop box shows the photo
+  const v = S.v, dpr = window.devicePixelRatio || 1, w = Math.round(photoWrap.clientWidth * dpr), h = Math.round(photoWrap.clientHeight * dpr);
   if (videoSrcCanvas.width !== w || videoSrcCanvas.height !== h) { videoSrcCanvas.width = w; videoSrcCanvas.height = h; }
   const c = videoSrcCanvas.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
   c.fillStyle = '#000'; c.fillRect(0, 0, w / dpr, h / dpr);
   c.drawImage(v, layer.coverX0, layer.coverY0, layer.naturalW * layer.coverScale, layer.naturalH * layer.coverScale);
   videoSrcCanvas.style.display = 'block';
-  if (!videoLive.drag) { videoTime.value = Math.round(Math.min(1, v.currentTime / Math.max(0.001, S.dur - 1 / S.fps)) * 1000); videoLabels(); }
+}
+function videoLiveTick() {
+  const S = videoSrc, st = frames[activeFrameIdx], layer = st && S && st[S.idx];
+  if (!S || mode !== 'cycle' || !layer || !layer.img || photoWrap.classList.contains('collapsed')) { videoSrcCanvas.style.display = 'none'; return; }
+  const v = S.v, start = videoStartSec(S), end = S.dur - 0.04, now = performance.now(), dt = Math.min(0.2, (now - (videoLive.last || now)) / 1000); videoLive.last = now;
+  if (videoBusy) return;
+  const play = () => { try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} };
+  if (videoLive.dir > 0) { // forward: the clip plays itself, and starts over at the start point when it ends
+    if (v.ended || v.currentTime >= end) {
+      if (cycleBoomerang) { videoLive.dir = -1; try { v.pause(); } catch (e) {} } else { try { v.currentTime = start; } catch (e) {} play(); return; }
+    } else if (v.paused) play();
+  }
+  if (videoLive.dir < 0) { // boomerang: walk back to the start point at the same speed, then go forward again
+    if (v.currentTime <= start + 0.03) { videoLive.dir = 1; try { v.currentTime = start; } catch (e) {} play(); return; }
+    if (!videoLive.seeking) { videoLive.seeking = true; v.addEventListener('seeked', () => { videoLive.seeking = false; }, { once: true }); try { v.currentTime = Math.max(start, v.currentTime - dt); } catch (e) { videoLive.seeking = false; } }
+  }
+  videoDrawSrc(S, layer);
+  videoLabels();
 }
 function videoLoopStep() { // the preview box: the cycle's frames, round and round (boomerang order if it's on)
   if (!videoLive.on) return;
@@ -4534,7 +4562,7 @@ function videoLoopStep() { // the preview box: the cycle's frames, round and rou
 }
 function videoLiveStart() {
   if (videoLive.on || !videoSrc || mode !== 'cycle' || animPlaying) return;
-  videoLive.on = true; videoLiveBtn.textContent = '■'; videoLiveBtn.classList.add('active');
+  videoLive.on = true; videoLive.dir = 1; videoLive.last = 0; videoLive.seeking = false; videoLiveBtn.textContent = '■'; videoLiveBtn.classList.add('active');
   try { const p = videoSrc.v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
   videoLive.timer = setInterval(videoLiveTick, 60);
   videoLive.loopPos = -1; videoLive.loopT = setTimeout(videoLoopStep, 0);
@@ -4548,7 +4576,7 @@ function videoLiveStop(restore) {
 }
 videoLiveBtn.onclick = () => { if (videoLive.on) { videoLiveStop(); } else videoLiveStart(); };
 ['pointerdown', 'touchstart'].forEach(ev => videoTime.addEventListener(ev, () => { videoLive.drag = true; }, { passive: true }));
-['pointerup', 'pointercancel', 'touchend', 'touchcancel', 'change'].forEach(ev => videoTime.addEventListener(ev, () => { videoLive.drag = false; }));
+['pointerup', 'pointercancel', 'touchend', 'touchcancel', 'change'].forEach(ev => videoTime.addEventListener(ev, () => { videoLive.drag = false; videoLabels(); }));
 function scheduleVideoRebuild() { clearTimeout(videoTimer); const S = videoSrc; videoTimer = setTimeout(() => rebuildVideoFrames(S), 220); }
 videoTime.oninput = () => { if (!videoSrc) return; videoSrc.timeVal = +videoTime.value; videoLabels(); if (videoLive.on) { try { videoSrc.v.currentTime = videoStartSec(videoSrc); } catch (e) {} } scheduleVideoRebuild(); };
 videoStep.oninput = () => { if (!videoSrc) return; videoSrc.stepIdx = +videoStep.value; videoLabels(); scheduleVideoRebuild(); };

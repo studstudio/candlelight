@@ -2044,16 +2044,52 @@ animPlayBtn.title = 'preview · hold to change the speed';
 // composites and draws one whole frame (base + its overlays) straight to
 // the canvas without disturbing whichever frame is currently being edited
 // (crop box, sliders, etc.) — used only for the play/pause preview loop
-function renderFrameForPreview(idx) {
-  const stack = frames[idx];
-  if (!frameIsFilled(stack)) return;
+// a frame only gets dithered again when something about it changed; otherwise the finished picture is reused, so a looping preview costs almost nothing
+const frameImgIds = new WeakMap(); let frameImgNext = 1;
+function frameSignature(stack) {
+  let sig = targetW + 'x' + targetH + (typeof postcardText !== 'undefined' ? '|' + postcardText : '');
+  for (const l of stack) {
+    if (!l || !l.img) { sig += '|-'; continue; }
+    let id = frameImgIds.get(l.img); if (!id) { id = frameImgNext++; frameImgIds.set(l.img, id); }
+    sig += '|' + id + (l.shader ? 's' + (l.shader.phase) + JSON.stringify(l.shader.params || []) : '') + ':' + SETTING_KEYS.map(k => l[k]).join(',') + ':' + (l.box ? [l.box.left, l.box.top, l.box.width, l.box.height].join(',') : '') + ':' + [l.coverScale, l.coverX0, l.coverY0].join(',');
+  }
+  return sig;
+}
+const frameOutCache = new Map(); // frame stack -> { sig, data }
+function computeFrameOut(idx) { // dithers one frame into the cache (no drawing)
+  const stack = frames[idx]; if (!frameIsFilled(stack)) return null;
+  const sig = frameSignature(stack);
   const composite = compositeStack(stack, 2);
-  if (!composite) return;
+  if (!composite) return null;
   const W = targetW, H = targetH;
   const outData = lctx.createImageData(W, H);
   const od = outData.data;
   for (let i=0;i<W*H;i++){ const v=Math.max(0,Math.min(255,composite[i])); od[i*4]=v;od[i*4+1]=v;od[i*4+2]=v;od[i*4+3]=255; }
-  lctx.putImageData(outData,0,0);
+  if (frameOutCache.size > 40) frameOutCache.clear();
+  const ent = { sig, data: outData }; frameOutCache.set(stack, ent); return ent;
+}
+// lazy = keep showing the last finished picture of a frame while a fresh one is made in the background (so a looping preview never stalls on an edit)
+function renderFrameForPreview(idx, lazy) {
+  const stack = frames[idx];
+  if (!frameIsFilled(stack)) return;
+  const hit = frameOutCache.get(stack);
+  if (hit && (hit.sig === frameSignature(stack) || lazy)) { lctx.putImageData(hit.data, 0, 0); return; }
+  const ent = computeFrameOut(idx);
+  if (ent) lctx.putImageData(ent.data, 0, 0);
+}
+let swrLast = 0, swrT = 0, swrCost = 0;
+function refreshStaleFrames() { // one stale frame per slice, spaced out, so the loop timer and the slider keep their share of the thread
+  if (swrT) return;
+  swrT = setTimeout(() => {
+    swrT = 0;
+    const now = performance.now();
+    if (now - swrLast < Math.max(90, swrCost * 2)) { refreshStaleFrames(); return; }
+    for (let i = 0; i < frames.length; i++) {
+      const st = frames[i]; if (!frameIsFilled(st)) continue;
+      const hit = frameOutCache.get(st);
+      if (!hit || hit.sig !== frameSignature(st)) { const t0 = performance.now(); computeFrameOut(i); swrLast = performance.now(); swrCost = swrLast - t0; if (videoLive.on) refreshStaleFrames(); return; }
+    }
+  }, 30);
 }
 
 let resumeLiveAfterPreview = false;
@@ -4527,10 +4563,12 @@ function applyVideoFrames(imgs, S) { // puts these frames into layer S.idx of ev
 // ----- live playback -----
 // Two views of the same clip: the crop box above plays the video itself in real time, while the preview box below loops the cycle's
 // own frames (the ones that get sent), at the cycle's speed, so you always see both the source and what the lamp will show.
-const videoLive = { on: false, timer: 0, drag: false, loopT: 0, loopPos: -1, dir: 1, last: 0, seeking: false, held: false, holdUntil: 0, down: false };
+const VIDEO_PAUSE_ON_EDIT = false; // playback keeps cycling while sliders move (frames refresh in the background); flip to true to freeze it during edits instead
+const videoLive = { curIdx: -1, on: false, timer: 0, drag: false, loopT: 0, loopPos: -1, dir: 1, last: 0, seeking: false, held: false, holdUntil: 0, down: false };
 // Editing and playing both run on the same thread, so while a slider or the crop is being worked the playback steps aside (the clip and both views freeze)
 // and carries on the instant the adjustment stops, so the edit itself stays smooth.
 function videoHold(ms) {
+  if (!VIDEO_PAUSE_ON_EDIT) return;
   videoLive.holdUntil = Math.max(videoLive.holdUntil, performance.now() + ms);
   if (!videoLive.held && videoLive.on) { videoLive.held = true; try { if (videoSrc) videoSrc.v.pause(); } catch (e) {} }
 }
@@ -4541,7 +4579,7 @@ function videoHeld() { // true while playback should stay out of the way; resume
   try { const p = videoSrc && videoSrc.v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
   return false;
 }
-const videoEditTarget = t => !!(t && t.closest && t.closest('input[type=range], #photoWrap, #cropBox') && !t.closest('#videoPanel'));
+const videoEditTarget = t => !!(t && t.closest && t.closest('input[type=range], #photoWrap, #cropBox, #previewWrap') && !t.closest('#videoPanel'));
 document.addEventListener('input', e => { if (videoLive.on && e.target && e.target.type === 'range' && !e.target.closest('#videoPanel')) videoHold(300); }, true);
 ['pointerdown', 'touchstart'].forEach(ev => document.addEventListener(ev, e => { if (videoLive.on && videoEditTarget(e.target)) { videoLive.down = true; videoHold(300); } }, { capture: true, passive: true }));
 ['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => document.addEventListener(ev, () => { if (videoLive.down) { videoLive.down = false; videoHold(150); } }, { capture: true, passive: true }));
@@ -4588,7 +4626,7 @@ function videoLoopStep() { // the preview box: the cycle's frames, round and rou
   if (!videoLive.on) return;
   if (!animPlaying && !videoBusy && !videoHeld()) {
     const filled = frames.map((f, i) => ({ f, i })).filter(x => frameIsFilled(x.f));
-    if (filled.length > 1) { const seq = playOrder(filled.length); videoLive.loopPos = (videoLive.loopPos + 1) % seq.length; renderFrameForPreview(filled[seq[videoLive.loopPos]].i); }
+    if (filled.length > 1) { const seq = playOrder(filled.length); videoLive.loopPos = (videoLive.loopPos + 1) % seq.length; videoLive.curIdx = filled[seq[videoLive.loopPos]].i; renderFrameForPreview(videoLive.curIdx, true); refreshStaleFrames(); }
   }
   videoLive.loopT = setTimeout(videoLoopStep, animIntervalSec * 1000);
 }
@@ -4673,6 +4711,21 @@ fileInput.onchange = (e) => {
   };
   img.src = URL.createObjectURL(file);
 };
+
+// while a slider is being dragged, renders are coalesced to at most one per screen refresh, always the latest values: if one render takes longer than a frame
+// the extra ticks are skipped instead of queueing up (that queue is what made sliders feel laggy and sticky)
+(function () {
+  const heavy0 = render, heavy = function(){ const r = heavy0.apply(this, arguments); if (videoLive.on && !animPlaying && videoLive.curIdx >= 0 && videoLive.curIdx !== activeFrameIdx) { try { renderFrameForPreview(videoLive.curIdx, true); } catch (e) {} } return r; }; let dragging = false, queued = 0;
+  render = function () {
+    if (!dragging) return heavy.apply(this, arguments);
+    if (!queued) queued = requestAnimationFrame(() => { queued = 0; heavy(); });
+  };
+  const isSlider = t => !!(t && t.closest && t.closest('input[type=range]'));
+  const down = e => { if (isSlider(e.target)) dragging = true; };
+  const up = () => { if (!dragging) return; dragging = false; if (queued) { cancelAnimationFrame(queued); queued = 0; } heavy(); };
+  ['pointerdown', 'touchstart'].forEach(ev => document.addEventListener(ev, down, { capture: true, passive: true }));
+  ['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => document.addEventListener(ev, up, { capture: true, passive: true }));
+})();
 
 // the container has a FIXED height (30vh via CSS) and the photo displays via
 // object-fit: contain — the whole photo is always visible, letterboxed with
@@ -5607,6 +5660,8 @@ saveImageBtn.onclick = async () => {
   setTimeout(() => { saveImageBtn.textContent = originalLabel; saveImageBtn.disabled = false; }, 1500);
 };
 
+let renderSoonPending = false;
+function renderSoon() { if (renderSoonPending) return; renderSoonPending = true; requestAnimationFrame(() => { renderSoonPending = false; render(); }); }
 const EFFECT_SLIDERS = [
   { id: 'opacitySlider', setter: v => opacityAmount = v },
   { id: 'gridSlider', setter: v => gridAmount = v },
@@ -5623,7 +5678,7 @@ EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);
   el.oninput = () => {
     setter(el.value / 100);
-    if (naturalW) render();
+    if (naturalW) renderSoon(); // a drag can fire faster than the screen refreshes: draw at most once per frame, always the latest value
   };
 });
 

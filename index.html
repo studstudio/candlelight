@@ -956,6 +956,50 @@ html, body { background-color: #fdd48d; background-image: none; }
 /* round 63: gallery outline in ember when unselected */
 #privacyGalleryBtn:not(.active) { border-color: var(--ember) !important; }
 
+/* the video time slider is styled exactly like the shader time slider */
+#videoTime::-webkit-slider-thumb {
+  background-image: radial-gradient(circle closest-side at 50% 50%, rgba(255, 36, 24, 0.95) 0, rgba(255, 36, 24, 0.95) var(--knobr, -8%), rgba(255, 36, 24, 0) calc(var(--knobr, -8%) + 4%)) !important;
+}
+#videoTime::-webkit-slider-thumb { background-image: none !important; }
+#videoTime::-webkit-slider-runnable-track { background: rgba(255, 36, 24, 0.9) !important; height: 2px; border-radius: 1px; }
+#videoTime::-webkit-slider-thumb { background-color: transparent !important; background-image: none !important; box-shadow: none; }
+#videoTime::-webkit-slider-thumb {
+  background-color: transparent !important;
+  background-image: radial-gradient(circle closest-side at 50% 50%, rgba(0,0,0,0) 0, rgba(0,0,0,0) 24%, #fdd48d 30%) !important;
+}
+#videoTime:not(.rail)::-webkit-slider-runnable-track { background: transparent !important; }
+#videoTime:disabled { opacity: 0.5; }
+#videoTime::-webkit-slider-thumb {
+  background-color: #fdd48d !important; background-image: none !important;
+  width: 10px; height: 20px; border-radius: 0; margin-top: -9px;
+}
+#videoTime::-webkit-slider-thumb { width: 22px; height: 10px; margin-top: -4px; }
+#videoTime::-webkit-slider-thumb { width: 16px; height: 16px; margin-top: -7px; }
+#videoTime::-webkit-slider-thumb { width: 16px; height: 13px; margin-top: -5.5px; }
+#videoTime::-webkit-slider-runnable-track { background: rgba(255, 36, 24, 0.9) !important; height: 2px; border-radius: 1px; }
+#videoTime:not(.rail)::-webkit-slider-runnable-track { background: transparent !important; }
+#videoTime::-webkit-slider-thumb { margin-top: -5.5px; }
+#videoTime { --railp: 0%; transition: --railp .9s cubic-bezier(.3, .1, .2, 1); }
+#videoTime.rail { --railp: 100%; }
+#videoTime::-webkit-slider-runnable-track,
+#videoTime:not(.rail)::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, rgba(255, 36, 24, 0.9) 0, rgba(255, 36, 24, 0.9) var(--railp), transparent var(--railp)) !important;
+}
+
+/* the video step slider is styled exactly like the shader step slider */
+#videoStep::-webkit-slider-thumb {
+  background-color: #fdd48d !important; background-image: none !important;
+  width: 16px; height: 13px; border-radius: 0; margin-top: -5.5px; border: 0.75px solid #b27c4e; box-shadow: none;
+}
+#videoStep::-webkit-slider-runnable-track { background: rgba(255, 36, 24, 0.9) !important; height: 2px; border-radius: 1px; }
+#videoStep::-webkit-slider-runnable-track {
+  --period: calc((100% - 16px) * var(--stepfrac, 0.03));
+  background: repeating-linear-gradient(to right, rgba(255, 36, 24, 0.9) 0, rgba(255, 36, 24, 0.9) calc(var(--period) * 0.5), transparent calc(var(--period) * 0.5), transparent var(--period)) !important;
+  height: 2px; border-radius: 0;
+}
+#videoStep::-webkit-slider-thumb { margin-top: -5.5px; }
+#videoStep::-webkit-slider-runnable-track { background: transparent !important; }
+
 </style>
 </head>
 <body>
@@ -4286,6 +4330,7 @@ function syncVideoPanel() { // shows the panel for the layer being edited, if th
   const S = (mode === 'cycle') ? videoSrcs[activeLayerIdx] : null;
   if (S !== videoSrc) { videoLiveStop(false); videoSrc = S; if (S) { videoTime.value = S.timeVal; videoStep.value = S.stepIdx; } }
   videoPanel.style.display = videoSrc ? 'block' : 'none';
+  videoTime.classList.toggle('rail', !!videoSrc); // the red rail, like the shader time slider
   if (videoSrc) { videoNameEl.textContent = VIDEO_LAYER_NAMES[videoSrc.idx]; videoLabels(); }
   placePlayBtn();
 }
@@ -4456,36 +4501,50 @@ function applyVideoFrames(imgs, S) { // puts these frames into layer S.idx of ev
   lastWrapW = photoWrap.clientWidth;
   updateSendState();
 }
-// ----- live playback: the clip plays continuously through the dither, and the time knob rides along -----
-// Each tick draws the video's current frame in place of the active frame's still for one render, then puts the still back,
-// so nothing that sends, saves or edits ever sees the live picture.
-const videoLive = { on: false, timer: 0, drag: false, canvas: document.createElement('canvas') };
-videoLive.canvas.__vf = true;
+// ----- live playback -----
+// Two views of the same clip: the crop box above plays the video itself in real time, while the preview box below loops the cycle's
+// own frames (the ones that get sent), at the cycle's speed, so you always see both the source and what the lamp will show.
+const videoLive = { on: false, timer: 0, drag: false, loopT: 0, loopPos: -1 };
+const videoSrcCanvas = document.createElement('canvas');
+videoSrcCanvas.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;display:none';
+photoWrap.insertBefore(videoSrcCanvas, document.getElementById('cropBox'));
 const videoLiveBtn = document.getElementById('videoLiveBtn');
-function videoLiveTick() {
+function videoLiveTick() { // the real-time clip, drawn where the crop box shows the photo
   const S = videoSrc, st = frames[activeFrameIdx], layer = st && S && st[S.idx];
-  if (!S || mode !== 'cycle' || animPlaying || videoBusy || !layer || !layer.img || !layer.img.__vf) return;
+  if (!S || mode !== 'cycle' || !layer || !layer.img || photoWrap.classList.contains('collapsed')) { videoSrcCanvas.style.display = 'none'; return; }
   const v = S.v;
   if (v.ended || v.currentTime >= S.dur - 0.04) { try { v.currentTime = 0; const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} return; }
-  if (v.paused) { try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
-  const c = videoLive.canvas, still = layer.img;
-  c.width = layer.naturalW; c.height = layer.naturalH;
-  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-  layer.img = c;
-  try { render(); } finally { layer.img = still; }
+  if (v.paused && !videoBusy) { try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+  if (videoBusy) return;
+  const dpr = window.devicePixelRatio || 1, w = Math.round(photoWrap.clientWidth * dpr), h = Math.round(photoWrap.clientHeight * dpr);
+  if (videoSrcCanvas.width !== w || videoSrcCanvas.height !== h) { videoSrcCanvas.width = w; videoSrcCanvas.height = h; }
+  const c = videoSrcCanvas.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.fillStyle = '#000'; c.fillRect(0, 0, w / dpr, h / dpr);
+  c.drawImage(v, layer.coverX0, layer.coverY0, layer.naturalW * layer.coverScale, layer.naturalH * layer.coverScale);
+  videoSrcCanvas.style.display = 'block';
   if (!videoLive.drag) { videoTime.value = Math.round(Math.min(1, v.currentTime / Math.max(0.001, S.dur - 1 / S.fps)) * 1000); videoLabels(); }
+}
+function videoLoopStep() { // the preview box: the cycle's frames, round and round (boomerang order if it's on)
+  if (!videoLive.on) return;
+  if (!animPlaying && !videoBusy) {
+    const filled = frames.map((f, i) => ({ f, i })).filter(x => frameIsFilled(x.f));
+    if (filled.length > 1) { const seq = playOrder(filled.length); videoLive.loopPos = (videoLive.loopPos + 1) % seq.length; renderFrameForPreview(filled[seq[videoLive.loopPos]].i); }
+  }
+  videoLive.loopT = setTimeout(videoLoopStep, animIntervalSec * 1000);
 }
 function videoLiveStart() {
   if (videoLive.on || !videoSrc || mode !== 'cycle' || animPlaying) return;
   videoLive.on = true; videoLiveBtn.textContent = '■'; videoLiveBtn.classList.add('active');
   try { const p = videoSrc.v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
-  videoLive.timer = setInterval(videoLiveTick, 100);
+  videoLive.timer = setInterval(videoLiveTick, 60);
+  videoLive.loopPos = -1; videoLive.loopT = setTimeout(videoLoopStep, 0);
 }
 function videoLiveStop(restore) {
   if (!videoLive.on) return;
-  clearInterval(videoLive.timer); videoLive.on = false; videoLiveBtn.textContent = '▶'; videoLiveBtn.classList.remove('active');
+  clearInterval(videoLive.timer); clearTimeout(videoLive.loopT); videoLive.on = false; videoLiveBtn.textContent = '▶'; videoLiveBtn.classList.remove('active');
+  videoSrcCanvas.style.display = 'none';
   try { if (videoSrc) videoSrc.v.pause(); } catch (e) {}
-  if (restore !== false) { try { render(); } catch (e) {} } // back to the frame's own still
+  if (restore !== false) { try { render(); } catch (e) {} } // back to the frame being edited
 }
 videoLiveBtn.onclick = () => { if (videoLive.on) { videoLiveStop(); } else videoLiveStart(); };
 ['pointerdown', 'touchstart'].forEach(ev => videoTime.addEventListener(ev, () => { videoLive.drag = true; }, { passive: true }));

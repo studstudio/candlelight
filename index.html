@@ -4285,31 +4285,54 @@ function detectVideoFps(v) { // plays a moment and times the frames; falls back 
     setTimeout(fin, 1500);
   });
 }
+function videoNote(msg, hideAfter) { // visible feedback in the video panel itself (the send-status line is easy to miss)
+  videoPanel.style.display = 'block'; videoInfo.textContent = msg;
+  if (hideAfter) setTimeout(() => { if (!videoSrc && videoInfo.textContent === msg) syncVideoPanel(); }, hideAfter);
+}
+function videoReady(v, ms) { // resolves true once the video has a drawable frame; nudges iOS (which loads nothing until asked) with a muted play and a seek
+  return new Promise(res => {
+    let done = false; const fin = x => { if (done) return; done = true; ['loadeddata', 'canplay', 'seeked'].forEach(n => v.removeEventListener(n, chk)); res(x); };
+    const chk = () => { if (v.readyState >= 2) fin(true); };
+    ['loadeddata', 'canplay', 'seeked'].forEach(n => v.addEventListener(n, chk));
+    chk();
+    try { const p = v.play(); if (p && p.then) p.then(() => { try { v.pause(); } catch (e) {} chk(); }, () => {}); } catch (e) {}
+    try { v.load(); } catch (e) {}
+    setTimeout(() => { if (!done && v.readyState < 2) { try { v.currentTime = 0.05; } catch (e) {} } }, 1500);
+    setTimeout(() => fin(v.readyState >= 2), ms);
+  });
+}
 async function openVideoFile(file) {
   clearVideo();
-  flashStatus('reading video…', '');
-  const v = document.createElement('video');
-  v.muted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.preload = 'auto';
-  v.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none';
-  const url = URL.createObjectURL(file); v.src = url; document.body.appendChild(v);
-  const ok = await new Promise(res => {
-    const fin = x => { v.removeEventListener('loadeddata', onl); v.removeEventListener('error', one); res(x); };
-    const onl = () => fin(true), one = () => fin(false);
-    v.addEventListener('loadeddata', onl); v.addEventListener('error', one); setTimeout(() => fin(v.readyState >= 2), 20000);
-  });
-  if (!ok || !isFinite(v.duration) || v.duration <= 0 || !v.videoWidth) { URL.revokeObjectURL(url); v.remove(); flashStatus("couldn't read that video", 'fail'); return; }
-  const fps = await detectVideoFps(v);
-  if (sendStatus.textContent === 'reading video…') { sendStatus.textContent = ''; sendStatus.className = 'send-status'; }
-  videoSrc = { v, url, dur: v.duration, fps };
-  videoTime.value = 0;
-  { // default step: 30, or the biggest one that still fits all 10 frames when the clip is short
-    const fit = (Math.floor(v.duration * fps) - 1) / (BAKE_FRAMES - 1); let idx = 0;
-    VIDEO_STEPS.forEach((st, i) => { if (st <= 30 && st <= fit) idx = i; });
-    videoStep.value = idx;
-  }
   if (mode !== 'cycle') setMode('cycle');
-  syncVideoPanel();
-  await rebuildVideoFrames();
+  videoNote('reading video…');
+  const v = document.createElement('video');
+  v.muted = true; v.defaultMuted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.preload = 'auto';
+  v.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.02;pointer-events:none;z-index:-1';
+  const url = URL.createObjectURL(file); v.src = url; document.body.appendChild(v);
+  try {
+    const meta = await new Promise(res => {
+      const fin = x => { v.removeEventListener('loadedmetadata', onm); v.removeEventListener('error', one); res(x); };
+      const onm = () => fin(true), one = () => fin(false);
+      v.addEventListener('loadedmetadata', onm); v.addEventListener('error', one); if (v.readyState >= 1) fin(true); setTimeout(() => fin(v.readyState >= 1), 20000);
+    });
+    if (!meta || !isFinite(v.duration) || v.duration <= 0) throw new Error('meta');
+    const ready = await videoReady(v, 15000);
+    if (!ready || !v.videoWidth) throw new Error('data');
+    const fps = await detectVideoFps(v);
+    videoSrc = { v, url, dur: v.duration, fps };
+    videoTime.value = 0;
+    { // default step: 30, or the biggest one that still fits all 10 frames when the clip is short
+      const fit = (Math.floor(v.duration * fps) - 1) / (BAKE_FRAMES - 1); let idx = 0;
+      VIDEO_STEPS.forEach((st, i) => { if (st <= 30 && st <= fit) idx = i; });
+      videoStep.value = idx;
+    }
+    syncVideoPanel();
+    await rebuildVideoFrames();
+    if (!frames.some(frameIsFilled)) throw new Error('frames');
+  } catch (err) {
+    URL.revokeObjectURL(url); v.remove(); videoSrc = null;
+    videoNote("couldn't read that video" + (err && err.message ? ' (' + err.message + ')' : ''), 6000);
+  }
 }
 let videoBusy = false, videoQueued = false, videoTimer = 0;
 async function rebuildVideoFrames() {

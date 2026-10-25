@@ -1146,7 +1146,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 <div class="shader-panel" id="videoPanel" style="display:none;">
   <div class="shader-head sec-head" id="videoHead" style="margin-top:0;cursor:default;"><span class="name"><span class="shader-name">video</span><button class="vlive" id="videoLiveBtn" type="button" aria-label="play or pause the live video" title="play or pause the live video">■</button></span><span class="anim-interval-value" id="videoInfo" style="flex:0 1 auto;white-space:nowrap;font-size:9px;letter-spacing:0;text-transform:none;opacity:.75;"></span></div>
   <div class="sec-body slider-grid">
-  <div class="moire-row full"><span class="moire-label">time</span><input type="range" id="videoTime" min="0" max="1000" value="0"><span class="anim-interval-value" id="videoTimeVal" style="flex:0 0 auto;min-width:88px;white-space:nowrap;text-align:right;">0.0s</span></div>
+  <div class="moire-row full"><span class="moire-label">time</span><div id="videoTimeWrap" style="position:relative;flex:1;display:flex;align-items:center;min-width:0"><input type="range" id="videoTime" min="0" max="1000" value="0" style="flex:1;margin:0 36px;min-width:0;width:auto"><span class="anim-interval-value" id="videoTimeVal" style="position:absolute;top:50%;left:0;transform:translate(-100%,-50%);white-space:nowrap;font-size:11px;pointer-events:none">0.0s</span><span class="anim-interval-value" id="videoEndVal" style="position:absolute;top:50%;left:0;transform:translateY(-50%);white-space:nowrap;font-size:11px;pointer-events:none">0.0s</span></div></div>
   <div class="moire-row full"><span class="moire-label">step</span><input type="range" id="videoStep" min="0" max="28" value="2"><span class="anim-interval-value" id="videoStepVal" style="flex:0 0 auto;min-width:88px;text-align:right;white-space:nowrap;"></span></div>
   </div>
 </div>
@@ -2079,18 +2079,22 @@ function renderFrameForPreview(idx, lazy) {
   if (ent) lctx.putImageData(ent.data, 0, 0);
 }
 let swrLast = 0, swrT = 0, swrCost = 0;
-function refreshStaleFrames() { // one stale frame per slice, spaced out, so the loop timer and the slider keep their share of the thread
+function refreshStaleFrames() { // re-dithers stale frames, the ones about to be shown first. While a slider is held it goes one at a time, spaced out; otherwise flat out (a slice per frame, so the loop still ticks between them)
   if (swrT) return;
+  const held = false; // playback and fresh frames come first; the slider's own redraw is the one that waits
   swrT = setTimeout(() => {
     swrT = 0;
     const now = performance.now();
-    if (now - swrLast < Math.max(90, swrCost * 2)) { refreshStaleFrames(); return; }
-    for (let i = 0; i < frames.length; i++) {
-      const st = frames[i]; if (!frameIsFilled(st)) continue;
+    if (held && now - swrLast < Math.max(90, swrCost * 2)) { refreshStaleFrames(); return; }
+    const filled = []; for (let i = 0; i < frames.length; i++) if (frameIsFilled(frames[i])) filled.push(i);
+    if (!filled.length) return;
+    const seq = filled.length > 1 ? playOrder(filled.length) : [0], at = Math.max(0, videoLive.loopPos);
+    for (let k = 1; k <= seq.length; k++) {
+      const i = filled[seq[(at + k) % seq.length]], st = frames[i];
       const hit = frameOutCache.get(st);
       if (!hit || hit.sig !== frameSignature(st)) { const t0 = performance.now(); computeFrameOut(i); swrLast = performance.now(); swrCost = swrLast - t0; if (videoLive.on) refreshStaleFrames(); return; }
     }
-  }, 30);
+  }, held ? 30 : 0);
 }
 
 let resumeLiveAfterPreview = false;
@@ -4361,7 +4365,7 @@ const VIDEO_LAYER_NAMES = ['video', 'overlay 1 video', 'overlay 2 video'];
 var videoSrcs = [null, null, null]; // one source per layer slot: { v, url, dur, fps, idx, imgs, n, timeVal, stepIdx }
 var videoSrc = null;                // the source of the layer being edited (var: the play button placement checks it early)
 const videoPanel = document.getElementById('videoPanel'), videoTime = document.getElementById('videoTime'), videoStep = document.getElementById('videoStep');
-const videoTimeVal = document.getElementById('videoTimeVal'), videoStepVal = document.getElementById('videoStepVal'), videoInfo = document.getElementById('videoInfo');
+const videoEndVal = document.getElementById('videoEndVal'), videoTimeVal = document.getElementById('videoTimeVal'), videoStepVal = document.getElementById('videoStepVal'), videoInfo = document.getElementById('videoInfo');
 const videoNameEl = videoPanel.querySelector('.shader-name');
 function videoStepFrames(S) { return VIDEO_STEPS[S ? S.stepIdx : +videoStep.value] || 1; }
 function videoStartSec(S) { S = S || videoSrc; return S ? ((S === videoSrc ? +videoTime.value : S.timeVal) / 1000) * Math.max(0, S.dur - 1 / S.fps) : 0; }
@@ -4369,7 +4373,7 @@ function videoLabels(n) {
   const S = videoSrc;
   if (S && n) S.n = n; else if (S) n = S.n;
   const f = videoStepFrames(S);
-  videoTimeVal.textContent = videoStartSec(S).toFixed(1) + 's'; // the readout is the second the knob is set to
+  videoTimeVal.textContent = videoStartSec(S).toFixed(1) + 's'; // sits just left of the knob: the start second
   videoRail();
   videoStepVal.textContent = f === 1 ? 'every frame' : 'every ' + f + ' frames';
   if (S) videoInfo.textContent = (n ? n + 'f · ' : '') + S.dur.toFixed(1) + 's · ' + Math.round(S.fps) + 'fps';
@@ -4608,6 +4612,14 @@ function videoRail() { // the red line fills from the knob (the start point) to 
   const span = Math.max(0.001, S.dur - 1 / S.fps);
   videoTime.style.setProperty('--va', (S.timeVal / 1000).toFixed(4));
   videoTime.style.setProperty('--vc', Math.max(S.timeVal / 1000, Math.min(1, (videoStartSec(S) + Math.max(0, Math.min(BAKE_FRAMES, Math.floor((S.dur - videoStartSec(S)) * S.fps / videoStepFrames(S) + 1e-6) + 1) - 1) * videoStepFrames(S) / S.fps) / span)).toFixed(4)); // where the frames' stretch ends
+  { // the start second sits just left of the knob; the end second just past where the red line ends
+    const sp = videoStartSec(S), cnt = Math.max(1, Math.min(BAKE_FRAMES, Math.floor((S.dur - sp) * S.fps / videoStepFrames(S) + 1e-6) + 1));
+    const endSec = Math.min(S.dur, sp + (cnt - 1) * videoStepFrames(S) / S.fps), iw = videoTime.clientWidth || 1, gx = videoTime.offsetLeft;
+    const cx = f => gx + 8 + (iw - 16) * f;
+    videoTimeVal.style.left = (cx(S.timeVal / 1000) - 12) + 'px';
+    videoEndVal.style.left = (cx(Math.max(S.timeVal / 1000, Math.min(1, endSec / span))) + 6) + 'px';
+    videoEndVal.textContent = endSec.toFixed(1) + 's';
+  }
   videoTime.style.setProperty('--vb', Math.max(S.timeVal / 1000, Math.min(1, (videoLive.drag ? videoStartSec(S) : S.v.currentTime) / span)).toFixed(4));
 }
 function videoDrawSrc(S, layer) { // the real-time clip, drawn where the crop box shows the photo
@@ -4731,14 +4743,14 @@ fileInput.onchange = (e) => {
 // while a slider is being dragged, renders are coalesced to at most one per screen refresh, always the latest values: if one render takes longer than a frame
 // the extra ticks are skipped instead of queueing up (that queue is what made sliders feel laggy and sticky)
 (function () {
-  const heavy0 = render, heavy = function(){ const r = heavy0.apply(this, arguments); if (videoLive.on && !animPlaying && videoLive.curIdx >= 0 && videoLive.curIdx !== activeFrameIdx) { try { renderFrameForPreview(videoLive.curIdx, true); } catch (e) {} } return r; }; let dragging = false, queued = 0;
+  const heavy0 = render, heavy = function(){ const r = heavy0.apply(this, arguments); if (videoLive.on && !animPlaying && videoLive.curIdx >= 0 && videoLive.curIdx !== activeFrameIdx) { try { renderFrameForPreview(videoLive.curIdx, true); } catch (e) {} } if (videoLive.on) refreshStaleFrames(); return r; }; let dragging = false, queued = 0;
   render = function () {
     if (!dragging) return heavy.apply(this, arguments);
-    if (!queued) queued = requestAnimationFrame(() => { queued = 0; heavy(); });
+    if (!queued) queued = videoLive.on ? setTimeout(() => { queued = 0; heavy(); }, 120) : requestAnimationFrame(() => { queued = 0; heavy(); });
   };
   const isSlider = t => !!(t && t.closest && t.closest('input[type=range]'));
   const down = e => { if (isSlider(e.target)) dragging = true; };
-  const up = () => { if (!dragging) return; dragging = false; if (queued) { cancelAnimationFrame(queued); queued = 0; } heavy(); };
+  const up = () => { if (!dragging) return; dragging = false; if (queued) { cancelAnimationFrame(queued); clearTimeout(queued); queued = 0; } heavy(); };
   ['pointerdown', 'touchstart'].forEach(ev => document.addEventListener(ev, down, { capture: true, passive: true }));
   ['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => document.addEventListener(ev, up, { capture: true, passive: true }));
 })();

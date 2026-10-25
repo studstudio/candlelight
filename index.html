@@ -4362,8 +4362,20 @@ function videoSettle(v) { // iOS can report "seeked" a beat before the new frame
   return new Promise(res => { let d = false; const fin = () => { if (!d) { d = true; res(); } }; if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(fin); setTimeout(fin, 90); });
 }
 const videoCanvas = document.createElement('canvas');
+const videoProbe = document.createElement('canvas'); videoProbe.width = videoProbe.height = 24;
+async function videoStable(v) { // after a jump, some phones show a half-decoded frame (blocky patches) for a moment: wait until two looks a beat apart agree
+  const ctx = videoProbe.getContext('2d', { willReadFrequently: true });
+  const look = () => { ctx.drawImage(v, 0, 0, 24, 24); return ctx.getImageData(0, 0, 24, 24).data; };
+  let prev; try { prev = look(); } catch (e) { return; }
+  for (let i = 0; i < 6; i++) {
+    await new Promise(r => setTimeout(r, i ? 100 : 70));
+    let cur; try { cur = look(); } catch (e) { return; }
+    let d = 0; for (let k = 0; k < cur.length; k++) d += Math.abs(cur[k] - prev[k]);
+    prev = cur; if (d / cur.length < 1.2) return;
+  }
+}
 async function videoFrameImage(v, t) {
-  await videoSeek(v, t); await videoSettle(v);
+  await videoSeek(v, t); await videoSettle(v); await videoStable(v);
   const s = Math.min(1, VIDEO_MAX_SIDE / Math.max(v.videoWidth, v.videoHeight));
   videoCanvas.width = Math.max(1, Math.round(v.videoWidth * s)); videoCanvas.height = Math.max(1, Math.round(v.videoHeight * s));
   videoCanvas.getContext('2d').drawImage(v, 0, 0, videoCanvas.width, videoCanvas.height);
@@ -4515,7 +4527,25 @@ function applyVideoFrames(imgs, S) { // puts these frames into layer S.idx of ev
 // ----- live playback -----
 // Two views of the same clip: the crop box above plays the video itself in real time, while the preview box below loops the cycle's
 // own frames (the ones that get sent), at the cycle's speed, so you always see both the source and what the lamp will show.
-const videoLive = { on: false, timer: 0, drag: false, loopT: 0, loopPos: -1, dir: 1, last: 0, seeking: false };
+const videoLive = { on: false, timer: 0, drag: false, loopT: 0, loopPos: -1, dir: 1, last: 0, seeking: false, held: false, holdUntil: 0, down: false };
+// Editing and playing both run on the same thread, so while a slider or the crop is being worked the playback steps aside (the clip and both views freeze)
+// and carries on the instant the adjustment stops, so the edit itself stays smooth.
+function videoHold(ms) {
+  videoLive.holdUntil = Math.max(videoLive.holdUntil, performance.now() + ms);
+  if (!videoLive.held && videoLive.on) { videoLive.held = true; try { if (videoSrc) videoSrc.v.pause(); } catch (e) {} }
+}
+function videoHeld() { // true while playback should stay out of the way; resumes the clip once the hold ends
+  if (!videoLive.held) return false;
+  if (videoLive.down || performance.now() < videoLive.holdUntil) return true;
+  videoLive.held = false; videoLive.last = 0;
+  try { const p = videoSrc && videoSrc.v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+  return false;
+}
+const videoEditTarget = t => !!(t && t.closest && t.closest('input[type=range], #photoWrap, #cropBox') && !t.closest('#videoPanel'));
+document.addEventListener('input', e => { if (videoLive.on && e.target && e.target.type === 'range' && !e.target.closest('#videoPanel')) videoHold(300); }, true);
+['pointerdown', 'touchstart'].forEach(ev => document.addEventListener(ev, e => { if (videoLive.on && videoEditTarget(e.target)) { videoLive.down = true; videoHold(300); } }, { capture: true, passive: true }));
+['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => document.addEventListener(ev, () => { if (videoLive.down) { videoLive.down = false; videoHold(150); } }, { capture: true, passive: true }));
+document.addEventListener('click', e => { if (videoLive.on && e.target && e.target.closest && e.target.closest('button') && !e.target.closest('#videoPanel, #animPlayBtn, #frameBoomBtn')) videoHold(350); }, true);
 const videoSrcCanvas = document.createElement('canvas');
 videoSrcCanvas.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;display:none';
 photoWrap.insertBefore(videoSrcCanvas, document.getElementById('cropBox'));
@@ -4530,11 +4560,12 @@ function videoDrawSrc(S, layer) { // the real-time clip, drawn where the crop bo
   const v = S.v, dpr = window.devicePixelRatio || 1, w = Math.round(photoWrap.clientWidth * dpr), h = Math.round(photoWrap.clientHeight * dpr);
   if (videoSrcCanvas.width !== w || videoSrcCanvas.height !== h) { videoSrcCanvas.width = w; videoSrcCanvas.height = h; }
   const c = videoSrcCanvas.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
-  c.fillStyle = '#000'; c.fillRect(0, 0, w / dpr, h / dpr);
+  c.clearRect(0, 0, w / dpr, h / dpr); // transparent around the picture, so the crop view's own background shows (no dark bars)
   c.drawImage(v, layer.coverX0, layer.coverY0, layer.naturalW * layer.coverScale, layer.naturalH * layer.coverScale);
   videoSrcCanvas.style.display = 'block';
 }
 function videoLiveTick() {
+  if (videoHeld()) return;
   const S = videoSrc, st = frames[activeFrameIdx], layer = st && S && st[S.idx];
   if (!S || mode !== 'cycle' || !layer || !layer.img || photoWrap.classList.contains('collapsed')) { videoSrcCanvas.style.display = 'none'; return; }
   // end = the stretch of the clip the cycle's frames actually cover: playback loops only over that
@@ -4555,7 +4586,7 @@ function videoLiveTick() {
 }
 function videoLoopStep() { // the preview box: the cycle's frames, round and round (boomerang order if it's on)
   if (!videoLive.on) return;
-  if (!animPlaying && !videoBusy) {
+  if (!animPlaying && !videoBusy && !videoHeld()) {
     const filled = frames.map((f, i) => ({ f, i })).filter(x => frameIsFilled(x.f));
     if (filled.length > 1) { const seq = playOrder(filled.length); videoLive.loopPos = (videoLive.loopPos + 1) % seq.length; renderFrameForPreview(filled[seq[videoLive.loopPos]].i); }
   }

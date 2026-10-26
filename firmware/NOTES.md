@@ -113,6 +113,22 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **2026-10-26 update:** the first LTC board was faulty. With the pack on it read 5.13 V on OUT (supply fine), SHDN 3.3 V and **0 mV across IN -> OUT**, yet `LTC TEST` pulsed every 154 ms (7.2/s, "221 mV"), well over a healthy chip's 1.6/s limit. Replaced by a new board: **no phantom pulses, "out" counts look right** (one 0.17 mAh out tick from the chip's own draw). No "in" counted with the TEG lit because the pack (5.11 V) is above the BQ's stop voltage (**OV now ~4.89 V**), so the BQ doesn't charge; the page's "harvested est." comes from the TEG voltage alone and can't know that. Next: run the pack down with **drain mode** (below) until it rests ~4.7-4.8 V, then light the candle and watch "pack in".
 
+### 2026-10-26 evening bookmark (resume here)
+
+- **Drain mode is live** (commit `02a9b92`, worker `bcb11cdb`): lamp on `02a9b92`, running from the pack (VCC jumper -> BQ BAT / LTC OUT row, USB out), drain started at 800 mAh target. It reports every 2 min as planned.
+- **Current is flowing:** ~7 mV across IN -> OUT = **~140 mA** (one 30 mV reading was a sync burst or a bad probe contact). 800 mAh at that rate is ~6 h.
+- **But the LTC counts nothing:** every report says `in 0, out 0` since power-up. Header pins all read 3.3 V on the 20 V range: 3V3, INT, CLR, SHDN (earlier "INT 0 / OL" and "CLR 2.5" were the meter on 200 mV). INT high = the chip never latches a pulse.
+- **Suspect: the new board's SJ2/SJ3 are open** (factory default). Then CLR and SHDN reach the chip through the 47k/75k dividers, ~2 V at the chip: SHDN near threshold (chip in shutdown) or CLR read as low (held in clear). Either gives INT high + 0 counts. The header pins read 3.3 V either way because the ESP32 drives them.
+- **Because nothing is counted, drain won't stop by itself.** Press stop on the page (or pull the VCC jumper) after ~6 h at most.
+
+**Next:**
+1. Pull the VCC jumper (lamp off) before soldering.
+2. Look at SJ2 and SJ3 on the new LTC board; bridge both if open. Or first measure at the chip's legs (20 V range): pin 5 SHDN and pin 9 CLR should read 3.3 V; ~2 V = jumpers open.
+3. Reconnect: the lamp boots from the pack and carries on draining (the worker keeps the session; the counter restarting at 0 is handled). Within a report or two the panel should show mAh rising, ~4 s per tick at 140 mA.
+4. If the count still stays 0: add INT/POL/stuck + raw ULP counters to the sync report so the drain panel shows them (offered, not built).
+
+**Open bug: unseen badge comes back.** User flipped through 4 new images (badge 4 -> gone), then a sync happened and the badge was back to 4 on the same images, twice. The worker is NOT re-sending them (queue empty, last deliveries days ago), so the lamp is losing its seen flags locally: the flash manifest still has `seen: false` after the sync. Not found yet. Places to look: `saveSeenFlags()` (matches by id against `storedIds`; skipped unless `seenDirty`), the background writer's `job->manifest` copy (saved after the flags were?), `memManifest`/`memManifestLive` in `loadManifest()`, and whether the "sync" was the monitor page's held-awake scheduled sync (`manualSync()` -> quick pass when `countUnseen() > 0`). Ask the user whether USB/the monitor page was connected, and get a serial log of it happening.
+
 **Reconnect plan once the BQ is fixed (done):**
 1. LTC loose, continuity from its GND to every pin: only GND pins may beep. Also check the power-side GNDs beep to the signal-side GND.
 2. Seat the LTC across the centre gap, every pin in its own row.

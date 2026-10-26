@@ -266,7 +266,7 @@
      scale instead of being squeezed smaller than its real 400x300 resolution,
      which was smoothing away the actual blockiness of the real panel */
   .preview-wrap {
-    position: relative; touch-action: none;
+    position: relative; touch-action: auto;
     width: 100%;
     border-radius: 0; overflow: hidden;
     border: 1px solid var(--line); border-top: 1px solid rgba(156,154,148,0.2); /* faint grey seam under the crop view */
@@ -1105,6 +1105,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 <div class="preview-wrap" id="previewWrap">
   <canvas id="liveCanvas"></canvas>
+  <div id="previewPad" style="position:absolute;top:0;bottom:0;left:30px;right:30px;touch-action:none;z-index:2"></div>
 </div>
 
 <div id="editPillRow" style="display:flex; align-items:center; gap:10px; margin-top:14px;">
@@ -1152,7 +1153,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 </div>
 
 <div class="tex-section" id="texSection">
-<div class="sec-head" id="texHead"><span class="name">sliders<svg class="chev" viewBox="0 0 12 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 6.2 6 1.8l4.5 4.4"/></svg></span></div>
+<div class="sec-head" id="texHead" style="display:none"><span class="name">sliders<svg class="chev" viewBox="0 0 12 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 6.2 6 1.8l4.5 4.4"/></svg></span></div>
 <div class="sec-body slider-grid">
 <div class="moire-row opacity-row"><span class="moire-label">opacity</span><input type="range" id="opacitySlider" min="0" max="100" value="100"></div>
 <div class="moire-row"><span class="moire-label">grid</span><input type="range" id="gridSlider" min="0" max="100" value="0"></div>
@@ -1161,23 +1162,30 @@ html, body { background-color: #fdd48d; background-image: none; }
 <div class="moire-row"><span class="moire-label">grain</span><input type="range" id="grainSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">chroma</span><input type="range" id="chromaSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">relief</span><input type="range" id="reliefSlider" min="0" max="100" value="0"></div>
-<div class="moire-row"><span class="moire-label">organic</span><input type="range" id="organicSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">outline</span><input type="range" id="outlineSlider" min="0" max="100" value="0"></div>
 <div class="moire-row"><span class="moire-label">dot stipple</span><input type="range" id="dotStippleSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">halation</span><input type="range" id="halationSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">echo</span><input type="range" id="echoSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">engrave</span><input type="range" id="engraveSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">tilt shift</span><input type="range" id="tiltshiftSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">facets</span><input type="range" id="facetsSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">solarize</span><input type="range" id="solarizeSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">kuwahara</span><input type="range" id="kuwaharaSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">slice</span><input type="range" id="sliceSlider" min="0" max="100" value="0"></div>
+<div class="moire-row"><span class="moire-label">pixel sort</span><input type="range" id="pixelsortSlider" min="0" max="100" value="0"></div>
 </div>
 </div>
-<div id="resetSlidersBtn" role="button" tabindex="0" style="margin:8px 0 0; text-align:center; font-size:12px; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">reset sliders</div>
-<p id="activeFontLabel" style="font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
+<div id="resetSlidersBtn" role="button" tabindex="0" style="margin:8px 0 0; text-align:right; font-size:10px; opacity:.55; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">reset sliders</div>
+<p id="activeFontLabel" style="display:none;font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading · tap preview to cycle filter</p>
 
 <hr class="divider">
 
-<div class="section-label">send to</div>
 <div class="contacts-row" id="contactsRow"><div class="contacts-track" id="contactsTrack">
   <div class="contact-chip add-chip" id="addContactBtn">
     <div class="contact-avatar">+</div>
-    <div class="contact-name">add lamp</div>
+    <div class="contact-name">send to</div>
   </div>
 </div></div>
 
@@ -1367,8 +1375,9 @@ function makeDefaultLayerParams() {
     invert: false,
     filterStepIndex: 0,
     gridAmount: 0, hatchAmount: 0, scanAmount: 0, grainAmount: 0, chromaAmount: 0, reliefAmount: 0,
-    organicAmount: 0, outlineAmount: 0,
+    outlineAmount: 0,
     dotStippleAmount: 0,
+    halationAmount: 0, echoAmount: 0, engraveAmount: 0, tiltshiftAmount: 0, facetsAmount: 0, solarizeAmount: 0, kuwaharaAmount: 0, sliceAmount: 0, pixelsortAmount: 0,
     opacityAmount: 1 // 0..1 — only meaningful for overlay layers (1 and 2); base is always fully opaque
   };
 }
@@ -1431,9 +1440,17 @@ function snapshotActiveLayerState() {
   layer.gridAmount = gridAmount; layer.hatchAmount = hatchAmount;
   layer.scanAmount = scanAmount; layer.grainAmount = grainAmount; layer.chromaAmount = chromaAmount;
   layer.reliefAmount = reliefAmount;
-  layer.organicAmount = organicAmount;
   layer.outlineAmount = outlineAmount;
   layer.dotStippleAmount = dotStippleAmount;
+  layer.halationAmount = halationAmount;
+  layer.echoAmount = echoAmount;
+  layer.engraveAmount = engraveAmount;
+  layer.tiltshiftAmount = tiltshiftAmount;
+  layer.facetsAmount = facetsAmount;
+  layer.solarizeAmount = solarizeAmount;
+  layer.kuwaharaAmount = kuwaharaAmount;
+  layer.sliceAmount = sliceAmount;
+  layer.pixelsortAmount = pixelsortAmount;
   layer.opacityAmount = opacityAmount;
 }
 
@@ -1460,9 +1477,17 @@ function loadLayerStateToGlobals(idx) {
   gridAmount = layer.gridAmount; hatchAmount = layer.hatchAmount;
   scanAmount = layer.scanAmount; grainAmount = layer.grainAmount; chromaAmount = layer.chromaAmount;
   reliefAmount = layer.reliefAmount;
-  organicAmount = layer.organicAmount;
   outlineAmount = layer.outlineAmount;
   dotStippleAmount = layer.dotStippleAmount;
+  halationAmount = layer.halationAmount || 0;
+  echoAmount = layer.echoAmount || 0;
+  engraveAmount = layer.engraveAmount || 0;
+  tiltshiftAmount = layer.tiltshiftAmount || 0;
+  facetsAmount = layer.facetsAmount || 0;
+  solarizeAmount = layer.solarizeAmount || 0;
+  kuwaharaAmount = layer.kuwaharaAmount || 0;
+  sliceAmount = layer.sliceAmount || 0;
+  pixelsortAmount = layer.pixelsortAmount || 0;
   opacityAmount = layer.opacityAmount;
 
   applyBoxStyle();
@@ -1475,9 +1500,17 @@ function loadLayerStateToGlobals(idx) {
   document.getElementById('grainSlider').value = Math.round(grainAmount * 100);
   document.getElementById('chromaSlider').value = Math.round(chromaAmount * 100);
   document.getElementById('reliefSlider').value = Math.round(reliefAmount * 100);
-  document.getElementById('organicSlider').value = Math.round(organicAmount * 100);
   document.getElementById('outlineSlider').value = Math.round(outlineAmount * 100);
   document.getElementById('dotStippleSlider').value = Math.round(dotStippleAmount * 100);
+  document.getElementById('halationSlider').value = Math.round(halationAmount * 100);
+  document.getElementById('echoSlider').value = Math.round(echoAmount * 100);
+  document.getElementById('engraveSlider').value = Math.round(engraveAmount * 100);
+  document.getElementById('tiltshiftSlider').value = Math.round(tiltshiftAmount * 100);
+  document.getElementById('facetsSlider').value = Math.round(facetsAmount * 100);
+  document.getElementById('solarizeSlider').value = Math.round(solarizeAmount * 100);
+  document.getElementById('kuwaharaSlider').value = Math.round(kuwaharaAmount * 100);
+  document.getElementById('sliceSlider').value = Math.round(sliceAmount * 100);
+  document.getElementById('pixelsortSlider').value = Math.round(pixelsortAmount * 100);
   invertBtn.classList.toggle('active', invert);
   patternBtn.textContent = PATTERN_LABELS[ditherPattern];
   filterButtons.forEach(b => b.classList.toggle('active', b.dataset.filter === FILTER_STEPS[filterStepIndex].label));
@@ -4139,7 +4172,7 @@ shaderBakeBtn.onclick = () => bakeShaderFrames();
 // ---------- cycle mode: multi-photo import + settings inheritance ----------
 const SETTING_KEYS = ['stepIndex', 'ditherPattern', 'invert', 'filterStepIndex',
   'gridAmount', 'hatchAmount', 'scanAmount', 'grainAmount', 'chromaAmount', 'reliefAmount',
-  'organicAmount', 'outlineAmount', 'dotStippleAmount', 'opacityAmount'];
+  'outlineAmount', 'dotStippleAmount', 'halationAmount', 'echoAmount', 'engraveAmount', 'tiltshiftAmount', 'facetsAmount', 'solarizeAmount', 'kuwaharaAmount', 'sliceAmount', 'pixelsortAmount', 'opacityAmount'];
 function copyLayerSettings(src, dst) { SETTING_KEYS.forEach(k => { dst[k] = src[k]; }); }
 
 // crop-area size, measured even while the section is collapsed to its strip
@@ -4333,7 +4366,7 @@ function resetActiveSliders() {
   const layer = currentStack()[activeLayerIdx];
   if (!layer) return;
   snapshotActiveLayerState();
-  ['gridAmount','hatchAmount','scanAmount','grainAmount','chromaAmount','reliefAmount','organicAmount','outlineAmount','dotStippleAmount'].forEach(k => { layer[k] = 0; });
+  ['gridAmount','hatchAmount','scanAmount','grainAmount','chromaAmount','reliefAmount','outlineAmount','dotStippleAmount','halationAmount','echoAmount','engraveAmount','tiltshiftAmount','facetsAmount','solarizeAmount','kuwaharaAmount','sliceAmount','pixelsortAmount'].forEach(k => { layer[k] = 0; });
   layer.opacityAmount = 1;
   if (layer.shader) {
     const preset = shaderPreset(layer.shader.id);
@@ -4905,7 +4938,119 @@ window.addEventListener('resize', () => {
 // + tone curve + dither, run entirely against ONE layer's own stored settings.
 // Draws into the shared offscreen scratch canvas and returns a quantized,
 // dithered Float32Array of gray values (0-255) at panel resolution.
-function computeLayerGray(layer, W, H) {
+// ---------- the eight extra look effects (all work on the grayscale just before the tone curve + dither) ----------
+function fxBlur(src, W, H, r) { // separable box blur, edge-clamped
+  r = Math.max(1, Math.round(r)); const out = new Float32Array(W * H), tmp = new Float32Array(W * H), n = 2 * r + 1;
+  for (let y = 0; y < H; y++) {
+    const row = y * W; let sum = 0;
+    for (let k = -r; k <= r; k++) sum += src[row + Math.min(W - 1, Math.max(0, k))];
+    for (let x = 0; x < W; x++) { tmp[row + x] = sum / n; sum += src[row + Math.min(W - 1, x + r + 1)] - src[row + Math.max(0, x - r)]; }
+  }
+  for (let x = 0; x < W; x++) {
+    let sum = 0;
+    for (let k = -r; k <= r; k++) sum += tmp[Math.min(H - 1, Math.max(0, k)) * W + x];
+    for (let y = 0; y < H; y++) { out[y * W + x] = sum / n; sum += tmp[Math.min(H - 1, y + r + 1) * W + x] - tmp[Math.max(0, y - r) * W + x]; }
+  }
+  return out;
+}
+function fxRng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function fxFrameOf(layer) { for (let i = 0; i < frames.length; i++) { const li = frames[i] ? frames[i].indexOf(layer) : -1; if (li >= 0) return { fi: i, li }; } return { fi: -1, li: -1 }; }
+
+// echo: ghosts of the frames just before this one in the cycle, double-exposed into it
+function fxEcho(gray, layer, W, H) {
+  const a = layer.echoAmount, at = fxFrameOf(layer); if (at.fi < 0) return;
+  const n = frames.length, K = 1 + Math.round(a * 3); let wsum = 1; const acc = gray.slice();
+  const done = new Set([at.fi]);
+  for (let k = 1, j = at.fi; k <= K; k++) {
+    let tries = 0; do { j = (j - 1 + n) % n; tries++; } while (tries <= n && (!frameIsFilled(frames[j]) || done.has(j)));
+    if (tries > n || done.has(j)) break; done.add(j);
+    const pl = frames[j][at.li]; if (!pl || !pl.img || !pl.box) continue;
+    const g = baseGrayOf(pl, W, H), w = a * Math.pow(0.65, k - 1);
+    for (let i = 0; i < W * H; i++) acc[i] += g[i] * w; wsum += w;
+  }
+  for (let i = 0; i < W * H; i++) gray[i] = acc[i] / wsum;
+}
+// slice: horizontal bands torn sideways (a different tear on each frame, so it jitters in playback)
+function fxSlice(gray, layer, W, H) {
+  const a = layer.sliceAmount, at = fxFrameOf(layer), rnd = fxRng(7919 * (at.fi + 3) + 13 * (at.li + 1));
+  const src = gray.slice(); let y = 0; const maxShift = Math.round(W * (0.03 + a * 0.2));
+  while (y < H) {
+    const bh = Math.max(2, Math.round(H * (0.015 + rnd() * 0.07))), hit = rnd() < 0.25 + a * 0.55, dx = hit ? Math.round((rnd() * 2 - 1) * maxShift) : 0;
+    if (dx) for (let yy = y; yy < Math.min(H, y + bh); yy++) for (let x = 0; x < W; x++) gray[yy * W + x] = src[yy * W + (((x - dx) % W) + W) % W];
+    y += bh;
+  }
+}
+// tilt shift: sharp in a band across the middle, blurring more the farther a row is from it
+function fxTilt(gray, layer, W, H) {
+  const a = layer.tiltshiftAmount, base = [2, 4, 7, 11], lv = [gray]; for (const r of base) lv.push(fxBlur(gray, W, H, Math.max(1, r * (0.35 + 0.9 * a))));
+  const cy = H * 0.5, band = H * (0.2 - 0.12 * a), out = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const t = Math.min(1, Math.max(0, (Math.abs(y - cy) - band) / (H * 0.5 - band))), f = t * 4, i0 = Math.min(3, Math.floor(f)), fr = f - i0, A = lv[i0], B = lv[i0 + 1];
+    for (let x = 0; x < W; x++) { const i = y * W + x; out[i] = A[i] + (B[i] - A[i]) * fr; }
+  }
+  gray.set(out);
+}
+// kuwahara: painterly — each pixel takes the average of whichever of its four neighbouring patches is the smoothest
+function fxKuwahara(gray, layer, W, H) {
+  const a = layer.kuwaharaAmount, r = 1 + Math.round(a * 4), S = new Float64Array((W + 1) * (H + 1)), Q = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) { let rs = 0, rq = 0; for (let x = 0; x < W; x++) { const v = gray[y * W + x]; rs += v; rq += v * v; S[(y + 1) * (W + 1) + x + 1] = S[y * (W + 1) + x + 1] + rs; Q[(y + 1) * (W + 1) + x + 1] = Q[y * (W + 1) + x + 1] + rq; } }
+  const box = (x0, y0, x1, y1) => { x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W - 1, x1); y1 = Math.min(H - 1, y1); const n = (x1 - x0 + 1) * (y1 - y0 + 1), W1 = W + 1;
+    const s = S[(y1 + 1) * W1 + x1 + 1] - S[y0 * W1 + x1 + 1] - S[(y1 + 1) * W1 + x0] + S[y0 * W1 + x0], q = Q[(y1 + 1) * W1 + x1 + 1] - Q[y0 * W1 + x1 + 1] - Q[(y1 + 1) * W1 + x0] + Q[y0 * W1 + x0], m = s / n; return [m, q / n - m * m]; };
+  const out = new Float32Array(W * H), mix = Math.min(1, a * 2.2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let bm = 0, bv = 1e18; for (const [dx, dy] of [[-r, -r], [0, -r], [-r, 0], [0, 0]]) { const [m, v] = box(x + dx, y + dy, x + dx + r, y + dy + r); if (v < bv) { bv = v; bm = m; } }
+    const i = y * W + x; out[i] = gray[i] + (bm - gray[i]) * mix;
+  }
+  gray.set(out);
+}
+// facets: stained-glass cells, each flattened to its own average tone, with dark lead lines between them
+function fxFacets(gray, layer, W, H) {
+  const a = layer.facetsAmount, cs = Math.round(44 - 30 * a), gx = Math.ceil(W / cs) + 2, gy = Math.ceil(H / cs) + 2, rnd = fxRng(4242), sx = new Float32Array(gx * gy), sy = new Float32Array(gx * gy);
+  for (let j = 0; j < gy; j++) for (let i = 0; i < gx; i++) { sx[j * gx + i] = (i - 1 + 0.15 + rnd() * 0.7) * cs; sy[j * gx + i] = (j - 1 + 0.15 + rnd() * 0.7) * cs; }
+  const id = new Int32Array(W * H), edge = new Uint8Array(W * H), sum = new Float64Array(gx * gy), cnt = new Int32Array(gx * gy);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const ci = Math.floor(x / cs) + 1, cj = Math.floor(y / cs) + 1; let d1 = 1e18, d2 = 1e18, b = 0;
+    for (let j = cj - 1; j <= cj + 1; j++) for (let i = ci - 1; i <= ci + 1; i++) { if (i < 0 || j < 0 || i >= gx || j >= gy) continue; const k = j * gx + i, d = Math.hypot(x - sx[k], y - sy[k]); if (d < d1) { d2 = d1; d1 = d; b = k; } else if (d < d2) d2 = d; }
+    const p = y * W + x; id[p] = b; sum[b] += gray[p]; cnt[b]++; if (d2 - d1 < 1.1) edge[p] = 1;
+  }
+  const mix = Math.min(1, a * 2.5);
+  for (let p = 0; p < W * H; p++) { const k = id[p], avg = sum[k] / cnt[k], tint = (((k * 2654435761) >>> 0) % 1000 / 1000 - 0.5) * 36 * a; let v = avg + tint; if (edge[p]) v *= 1 - 0.75 * a; gray[p] = gray[p] + (v - gray[p]) * mix; }
+}
+// halation: bright areas bleed a soft glow into their surroundings
+function fxHalation(gray, layer, W, H) {
+  const a = layer.halationAmount, hl = new Float32Array(W * H); for (let i = 0; i < W * H; i++) hl[i] = Math.max(0, gray[i] - 130) / 125;
+  const b = fxBlur(fxBlur(hl, W, H, 3 + a * 8), W, H, 2 + a * 5);
+  for (let i = 0; i < W * H; i++) gray[i] = Math.min(255, gray[i] + b[i] * a * 190);
+}
+// solarize: tones above a fold point flip back down (Sabattier look)
+function fxSolarize(gray, layer, W, H) {
+  const th = 255 - layer.solarizeAmount * 128, k = th / Math.max(1, 255 - th);
+  for (let i = 0; i < W * H; i++) { const v = gray[i]; if (v > th) gray[i] = Math.max(0, th - (v - th) * k); }
+}
+// engrave: the picture redrawn as banknote-style lines — dark tone = thick line, and the lines bend with the tone
+function fxEngrave(gray, layer, W, H) {
+  const a = layer.engraveAmount, p = 4.2, ang = -0.52, ca = Math.cos(ang), sa = Math.sin(ang), blur = fxBlur(gray, W, H, 2), out = new Float32Array(W * H), m = Math.min(1, a * 1.7);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, g = gray[i] / 255, u = (x * sa + y * ca) + (blur[i] / 255) * p * 2.2 + Math.sin(x * 0.045 + y * 0.02) * 1.2, f = u / p - Math.floor(u / p), d = Math.abs(f - 0.5) * p, thick = (1 - g) * p * 0.58;
+    const ink = Math.min(1, Math.max(0, thick - d + 0.5)); out[i] = gray[i] + (255 * (1 - ink) - gray[i]) * m;
+  }
+  gray.set(out);
+}
+// pixel sort: runs of bright pixels along each row get sorted dark to light, smearing highlights into streaks (glitch-art look)
+function fxPixelSort(gray, layer, W, H) {
+  const a = layer.pixelsortAmount, T = 205 - a * 125, maxRun = Math.max(6, Math.round(W * (0.08 + a * 0.55)));
+  for (let y = 0; y < H; y++) {
+    const row = y * W; let x = 0;
+    while (x < W) {
+      if (gray[row + x] < T) { x++; continue; }
+      let e = x; while (e < W && e - x < maxRun && gray[row + e] >= T) e++;
+      if (e - x > 2) { const seg = Array.from(gray.subarray(row + x, row + e)).sort((p, q) => p - q); for (let i = 0; i < seg.length; i++) gray[row + x + i] = seg[i]; }
+      x = e;
+    }
+  }
+}
+// the layer's photo, cropped and turned to grayscale (with the chroma fringe) — the starting point for every effect, and what echo reads from neighbouring frames
+function baseGrayOf(layer, W, H) {
   // map crop box (container coordinates) back to natural image pixel coordinates
   // using the same cover-fit math the browser used to render the photo
   const sx = (layer.box.left - layer.coverX0) / layer.coverScale;
@@ -4943,91 +5088,17 @@ function computeLayerGray(layer, W, H) {
   } else {
     for (let i=0;i<W*H;i++){ gray[i]=fw.r*data[i*4]+fw.g*data[i*4+1]+fw.b*data[i*4+2]; }
   }
+  return gray;
+}
+function computeLayerGray(layer, W, H) {
+  const gray = baseGrayOf(layer, W, H);
 
-  // organic: a real 2-buffer wave simulation, not a fixed pattern. Ripples
-  // are dropped at points where the PHOTO ITSELF has strong local contrast —
-  // one source per block, picking only the single strongest edge in each
-  // block (rather than every point above a threshold), so sources are sparse
-  // and well-separated. That spacing matters: it gives waves real room to
-  // expand into big, visible arcs BEFORE they start colliding, instead of
-  // interfering immediately at a fine scale that just reads as noise. Waves
-  // from different source points run into each other, and where two
-  // wavefronts overlap the heights genuinely add and cancel — real
-  // constructive/destructive interference, not a pattern that just looks
-  // like it. The resulting height field is normalized (so the effect's
-  // visible strength depends only on the slider, not on how much contrast
-  // the source photo happened to have) and then used to both warp the image
-  // (like light refracting through the ripples) and shade it (brighter/
-  // darker where the water's "surface" tilts) — the photo is actually being
-  // transformed by what the simulation computed, not overlaid with something
-  // unrelated to it.
-  if (layer.organicAmount > 0) {
-    let buf1 = new Float32Array(W * H);
-    let buf2 = new Float32Array(W * H);
-    let next = new Float32Array(W * H);
-
-    const blockSize = 34;
-    for (let by = blockSize; by < H - blockSize; by += blockSize) {
-      for (let bx = blockSize; bx < W - blockSize; bx += blockSize) {
-        let bestStrength = 0, bestX = -1, bestY = -1;
-        for (let y = by; y < by + blockSize; y++) {
-          for (let x = bx; x < bx + blockSize; x++) {
-            const idx = y * W + x;
-            const gx = gray[idx + 1] - gray[idx - 1];
-            const gy = gray[idx + W] - gray[idx - W];
-            const strength = Math.hypot(gx, gy);
-            if (strength > bestStrength) { bestStrength = strength; bestX = x; bestY = y; }
-          }
-        }
-        // fixed impulse regardless of exact edge strength — since the result
-        // gets normalized below, this only decides WHERE ripples originate,
-        // not how strong the final effect looks
-        if (bestStrength > 25) buf1[bestY * W + bestX] += 300;
-      }
-    }
-
-    const iterations = Math.round(15 + layer.organicAmount * 45); // more amount = more time to travel and collide into broad arcs
-    const damping = 0.99;
-    for (let k = 0; k < iterations; k++) {
-      for (let y = 1; y < H - 1; y++) {
-        for (let x = 1; x < W - 1; x++) {
-          const idx = y * W + x;
-          next[idx] = ((buf1[idx-1] + buf1[idx+1] + buf1[idx-W] + buf1[idx+W]) * 0.5 - buf2[idx]) * damping;
-        }
-      }
-      const tmp = buf2; buf2 = buf1; buf1 = next; next = tmp;
-    }
-
-    let maxAbs = 0;
-    for (let i = 0; i < W*H; i++) { const a = Math.abs(buf1[i]); if (a > maxAbs) maxAbs = a; }
-    const norm = maxAbs > 0 ? 1 / maxAbs : 0;
-
-    const warped = new Float32Array(W * H);
-    const warpStrength = layer.organicAmount * 22;  // px of displacement at full normalized height
-    const shadeStrength = layer.organicAmount * 130; // tone units at full normalized height
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const idx = y * W + x;
-        const xL = x > 0 ? x - 1 : 0, xR = x < W - 1 ? x + 1 : W - 1;
-        const yU = y > 0 ? y - 1 : 0, yD = y < H - 1 ? y + 1 : H - 1;
-        // slope of the ripple surface at this point — this IS the refraction direction
-        const hgx = (buf1[y * W + xR] - buf1[y * W + xL]) * norm;
-        const hgy = (buf1[yD * W + x] - buf1[yU * W + x]) * norm;
-        const sx = Math.max(0, Math.min(W - 1, x + hgx * warpStrength));
-        const sy = Math.max(0, Math.min(H - 1, y + hgy * warpStrength));
-        const x0 = Math.floor(sx), x1 = Math.min(W - 1, x0 + 1);
-        const y0 = Math.floor(sy), y1 = Math.min(H - 1, y0 + 1);
-        const fx = sx - x0, fy = sy - y0;
-        const v00 = gray[y0 * W + x0], v10 = gray[y0 * W + x1];
-        const v01 = gray[y1 * W + x0], v11 = gray[y1 * W + x1];
-        const vTop = v00 + (v10 - v00) * fx, vBot = v01 + (v11 - v01) * fx;
-        let val = vTop + (vBot - vTop) * fy;
-        val += buf1[idx] * norm * shadeStrength; // caustic-like brightening/darkening from the wave height itself
-        warped[idx] = Math.max(0, Math.min(255, val));
-      }
-    }
-    gray.set(warped);
-  }
+  if (layer.echoAmount > 0) fxEcho(gray, layer, W, H);
+  if (layer.sliceAmount > 0) fxSlice(gray, layer, W, H);
+  if (layer.pixelsortAmount > 0) fxPixelSort(gray, layer, W, H);
+  if (layer.tiltshiftAmount > 0) fxTilt(gray, layer, W, H);
+  if (layer.kuwaharaAmount > 0) fxKuwahara(gray, layer, W, H);
+  if (layer.facetsAmount > 0) fxFacets(gray, layer, W, H);
 
   // outline: edge-detected contour extraction. A Sobel-style gradient
   // magnitude is computed at every pixel, then the frame is rebuilt as
@@ -5049,6 +5120,10 @@ function computeLayerGray(layer, W, H) {
       }
     }
   }
+
+  if (layer.halationAmount > 0) fxHalation(gray, layer, W, H);
+  if (layer.solarizeAmount > 0) fxSolarize(gray, layer, W, H);
+  if (layer.engraveAmount > 0) fxEngrave(gray, layer, W, H);
 
   // pre-dither texture effects: each overlays a pattern onto the luminance
   // data BEFORE quantizing. The periodic ones (grid/hatch/scan) interfere
@@ -5405,8 +5480,8 @@ let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
 let grainAmount = 0;   // 0..1 — random noise, breaks up flat gradients organically
 let chromaAmount = 0;  // 0..1 — R/G/B channel offset before grayscale, ghostly fringing
 let reliefAmount = 0;  // 0..1 — bump-map style emboss, simulates a raking light for a "3D" carved look
-let organicAmount = 0; // 0..1 — smooth wavy domain warp applied before outline extraction, for a hand-drawn wobble instead of a computer-precise trace
 let outlineAmount = 0; // 0..1 — edge-detected contour extraction; suppresses interior tone, keeps only the line work
+let halationAmount = 0, echoAmount = 0, engraveAmount = 0, tiltshiftAmount = 0, facetsAmount = 0, solarizeAmount = 0, kuwaharaAmount = 0, sliceAmount = 0, pixelsortAmount = 0; // 0..1 — the eight extra look sliders (halation, echo, engrave, tilt shift, facets, solarize, kuwahara, slice)
 let dotStippleAmount = 0;    // 0..1 — dot-screen halftone: cells become circular dots sized by darkness
 let opacityAmount = 1; // 0..1 — overlay blend strength; base ignores this (nothing beneath it to blend with)
 
@@ -5692,9 +5767,17 @@ const EFFECT_SLIDERS = [
   { id: 'grainSlider', setter: v => grainAmount = v },
   { id: 'chromaSlider', setter: v => chromaAmount = v },
   { id: 'reliefSlider', setter: v => reliefAmount = v },
-  { id: 'organicSlider', setter: v => organicAmount = v },
   { id: 'outlineSlider', setter: v => outlineAmount = v },
-  { id: 'dotStippleSlider', setter: v => dotStippleAmount = v }
+  { id: 'dotStippleSlider', setter: v => dotStippleAmount = v },
+  { id: 'halationSlider', setter: v => halationAmount = v },
+  { id: 'echoSlider', setter: v => echoAmount = v },
+  { id: 'engraveSlider', setter: v => engraveAmount = v },
+  { id: 'tiltshiftSlider', setter: v => tiltshiftAmount = v },
+  { id: 'facetsSlider', setter: v => facetsAmount = v },
+  { id: 'solarizeSlider', setter: v => solarizeAmount = v },
+  { id: 'kuwaharaSlider', setter: v => kuwaharaAmount = v },
+  { id: 'sliceSlider', setter: v => sliceAmount = v },
+  { id: 'pixelsortSlider', setter: v => pixelsortAmount = v }
 ];
 EFFECT_SLIDERS.forEach(({ id, setter }) => {
   const el = document.getElementById(id);
@@ -6024,6 +6107,17 @@ updateToolbarBlank();
 // instead of whatever fallback was showing during the brief load window
 document.fonts.ready.then(() => { if (naturalW) render(); });
 
+
+
+// the outer strips of the preview pass touches straight to page scrolling; only the inner pad takes the tone drag / frame scrub
+(function () {
+  let edge = false;
+  const pad = document.getElementById('previewPad');
+  document.addEventListener('touchstart', e => { edge = !!(e.target === previewWrap || e.target === liveCanvas) && e.touches.length === 1; if (edge) e.stopImmediatePropagation(); }, { capture: true, passive: true });
+  document.addEventListener('touchmove', e => { if (edge && e.target && previewWrap.contains(e.target)) e.stopImmediatePropagation(); }, { capture: true, passive: true });
+  document.addEventListener('touchend', e => { if (edge && e.target && previewWrap.contains(e.target)) { e.stopImmediatePropagation(); } edge = false; }, { capture: true, passive: true });
+  document.addEventListener('touchcancel', () => { edge = false; }, { capture: true, passive: true });
+})();
 
 // ---------- generous slider grab zone ----------
 // A range knob is only ~15px wide, so a thumb that lands a little off needs a second try. Any touch that lands

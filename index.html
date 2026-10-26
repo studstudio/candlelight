@@ -129,10 +129,10 @@
 
   /* --- full photo + crop box --- */
   .photo-wrap {
-    position: relative; width: 100%; overflow: hidden;
+    position: relative; width: calc(100% + 30px); margin-left: -15px; margin-right: -15px; overflow: hidden;
     background: #000; border: 1px solid var(--line); border-bottom: none;
     border-radius: 14px 14px 0 0;
-    height: 30vh; min-height: 160px;
+    aspect-ratio: 4 / 3; min-height: 160px;
   }
   .photo-wrap img {
     display: block; width: 100%; height: 100%; object-fit: contain;
@@ -267,7 +267,7 @@
      which was smoothing away the actual blockiness of the real panel */
   .preview-wrap {
     position: relative; touch-action: auto;
-    width: 100%;
+    width: calc(100% + 30px); margin-left: -15px; margin-right: -15px;
     border-radius: 0; overflow: hidden;
     border: 1px solid var(--line); border-top: 1px solid rgba(156,154,148,0.2); /* faint grey seam under the crop view */
     background: var(--bg);
@@ -2004,12 +2004,11 @@ modeCycleBtn.onclick = () => setMode('cycle');
 // pixel that fits, so each panel pixel is a crisp block instead of being
 // blended with its neighbours (which made the dither look like smooth gray).
 // Falls back to plain fit-to-width on a screen too small for even 1:1.
-function sizePreviewCanvas() {
-  const dpr = window.devicePixelRatio || 1;
-  const k = Math.floor(previewWrap.clientWidth * dpr / targetW);
-  if (k < 1) { liveCanvas.style.width = ''; liveCanvas.style.height = ''; return; }
-  liveCanvas.style.width = (k * targetW / dpr) + 'px';
-  liveCanvas.style.height = (k * targetH / dpr) + 'px';
+function sizePreviewCanvas() { // fills the box edge to edge; on a 3x screen that is ~2.9 device pixels per dither pixel, so nearly every one is a clean 3
+  const w = previewWrap.clientWidth;
+  if (w < 1) { liveCanvas.style.width = ''; liveCanvas.style.height = ''; return; }
+  liveCanvas.style.width = w + 'px';
+  liveCanvas.style.height = (w * targetH / targetW) + 'px';
 }
 
 // speed wheel: 0.5s..2.0s in 0.1 steps; drag right and the numbers roll up (slower), left rolls them back

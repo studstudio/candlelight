@@ -100,6 +100,18 @@ RTC_DATA_ATTR uint16_t rtcCoulSeenA = 0, rtcCoulSeenB = 0;  // ULP counter value
 RTC_DATA_ATTR uint32_t rtcCoulIn = 0, rtcCoulOut = 0;       // ticks into / out of the pack since power-on
 portMUX_TYPE coulMux = portMUX_INITIALIZER_UNLOCKED;
 
+// Drain mode [PROTOTYPE-ONLY: LTC4150]: runs the pack down for a charge test. Started
+// and stopped from the TEG monitor page (POST teg/<id>/drain on the worker); each sync's
+// header says whether to keep going. While it's on the lamp doesn't sleep: it keeps
+// WiFi connected with no power save (~100 mA from the pack) and syncs every
+// DRAIN_REPORT_S, which reports its LTC4150 totals. The worker adds up what left the
+// pack and turns drain off at the target. A "Draining" badge sits top-left meanwhile
+const uint32_t DRAIN_REPORT_S = 120;  // a sync (status report) this often while draining
+const uint32_t DRAIN_LOST_S = 3600;   // no word from the worker for this long: stop draining and sleep as usual
+bool drainOn = false;                 // set by every sync header; deep sleep resets it
+uint32_t drainHeardAt = 0;            // millis() of the last header that said so
+RTC_DATA_ATTR bool rtcDrainShown = false;  // the screen shows the "Draining" badge
+
 void coulombBegin(bool wokeFromSleep) {
   if (rtcCoulMagic != 0xC0170150 || esp_reset_reason() == ESP_RST_POWERON) {
     RTC_SLOW_MEM[COUL_SLOT_A] = 0;
@@ -958,6 +970,13 @@ SyncResult syncBundle(int& added) {
   }
   workerFwVersion = head["firmware"]["version"] | "";
   workerFwSize = head["firmware"]["size"] | 0;
+  // [PROTOTYPE-ONLY: LTC4150] drain mode: the worker says whether to keep going (no "drain": off)
+  bool wasDraining = drainOn;
+  drainOn = head["drain"]["on"] | false;
+  drainHeardAt = millis();
+  if (drainOn || wasDraining)
+    Serial.printf("Drain mode %s: %.0f of %.0f mAh out of the pack\n", drainOn ? "on" : "finished",
+                  head["drain"]["mah"] | 0.0f, head["drain"]["target"] | 0.0f);
   int count = head["count"] | 0;
   Serial.printf("Bundle: %d item(s) waiting (header after %u ms)\n", count, (unsigned)(millis() - tStart));
   passMoreComing = count > 0;
@@ -1217,9 +1236,10 @@ void drawBadge(Adafruit_GFX& g, int n) {
   drawBoxedText(g, txt, 6, -6);
 }
 
-// top-left corner: feedback that the 5 s sync hold registered
-void drawSyncBadge(Adafruit_GFX& g) {
-  drawBoxedText(g, "Syncing...", 6, 6);
+// top-left corner: feedback that the 5 s sync hold registered, otherwise
+// "Draining" while drain mode is on ([PROTOTYPE-ONLY: LTC4150])
+void drawSyncBadge(Adafruit_GFX& g, bool syncing) {
+  drawBoxedText(g, syncing ? "Syncing..." : "Draining", 6, 6);
 }
 
 // bottom-left corner: where and when the image on screen was sent (the 2 s
@@ -1323,7 +1343,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
   if (img.bpp == 2) {
     ditherToMono(img, frameBuf, monoBuf);
     bitmap = monoBuf;
-  } else if (img.bpp == 1 && badge <= 0 && !syncBadge && !info) {
+  } else if (img.bpp == 1 && badge <= 0 && !syncBadge && !drainOn && !info) {
     bitmap = frameBuf;
   } else if (img.bpp == 1) {
     memcpy(monoBuf, frameBuf, sizeof(monoBuf));  // a badge goes on a copy, the frame stays as read
@@ -1331,10 +1351,10 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
   } else {
     return false;
   }
-  if (badge > 0 || syncBadge || info) {
+  if (badge > 0 || syncBadge || drainOn || info) {
     MonoCanvas canvas(monoBuf, W, H);
     if (badge > 0) drawBadge(canvas, badge);
-    if (syncBadge) drawSyncBadge(canvas);
+    if (syncBadge || drainOn) drawSyncBadge(canvas, syncBadge);
     if (info) drawInfoBox(canvas, info, badge > 0);
   }
   lastBuildMs = millis() - t0;
@@ -1380,7 +1400,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
       }
     }
     if (badge > 0) drawBadge(display, badge);
-    if (syncBadge) drawSyncBadge(display);
+    if (syncBadge || drainOn) drawSyncBadge(display, syncBadge);
     if (info) drawInfoBox(display, info, badge > 0);
     tBuild += millis() - t0;
     uint32_t t1 = millis();
@@ -2172,12 +2192,46 @@ void installUpdateNow() {
   updateBeforeSleep();
 }
 
+// [PROTOTYPE-ONLY: LTC4150] drain mode's report: a quiet sync (no "Syncing..."
+// badge), and a quick pass only if it brought new images
+void drainReport() {
+  Serial.println("Drain mode: reporting to the worker");
+  int added = 0;
+  doSync(false, added);
+  loadStoredIds();
+  if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
+  if (added > 0 && !storedIds.empty()) quickPass();
+}
+
+// [PROTOTYPE-ONLY: LTC4150] keeps WiFi connected between drain reports (a sync turns it off)
+void drainKeepWiFi() {
+  if (WiFi.status() != WL_CONNECTED) connectForSync(false);  // connects with power save off
+}
+
 // stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
 // can step through the images; a 2 s hold replays an animation (on a still it
 // toggles the info box), a 5 s hold syncs
 void idleWindow() {
   uint32_t last = millis(), lastSync = millis();
-  while (millis() - last < AWAKE_IDLE_MS || tegMonitoring()) {  // the TEG monitor page keeps the lamp up
+  while (millis() - last < AWAKE_IDLE_MS || tegMonitoring() || drainOn) {  // the TEG monitor page and drain mode keep the lamp up
+    if (drainOn) {  // [PROTOTYPE-ONLY: LTC4150]
+      if (cycleOk) otaguard::markValid();
+      if (millis() - drainHeardAt >= DRAIN_LOST_S * 1000UL) {
+        Serial.printf("Drain mode: no word from the worker for %u min, stopping\n", (unsigned)(DRAIN_LOST_S / 60));
+        drainOn = false;
+      } else if (millis() - lastSync >= DRAIN_REPORT_S * 1000UL) {
+        drainReport();
+        last = lastSync = millis();
+        installUpdateNow();  // a newer firmware the report found goes in now (reboots), as with the monitor page
+      } else {
+        drainKeepWiFi();
+      }
+    }
+    if (drainOn != rtcDrainShown) {  // [PROTOTYPE-ONLY: LTC4150] put up or take down the "Draining" badge
+      rtcDrainShown = drainOn;
+      if (drainOn) Serial.printf("Drain mode on: staying awake with WiFi up, reporting every %u min\n", (unsigned)(DRAIN_REPORT_S / 60));
+      redrawCurrent(false);
+    }
     if (tegMonitoring()) {
       if (cycleOk) otaguard::markValid();  // a sleep would have done it by now (only acts once)
       // held awake, it keeps the sync schedule it would have kept asleep
@@ -2213,7 +2267,7 @@ void idleWindow() {
 }
 
 [[noreturn]] void goToSleep() {
-  if (tegMonitoring()) idleWindow();   // the TEG monitor is connected: stay up (buttons work) until it goes away
+  if (tegMonitoring() || drainOn) idleWindow();  // the TEG monitor is connected, or drain mode is on: stay up (buttons work)
   waitForWriter();                     // the images must be on flash (and acked) before sleep wipes PSRAM
   if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it

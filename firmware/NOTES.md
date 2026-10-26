@@ -104,6 +104,30 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **Built today:** monitor page split (TEG 3/4, pack column 1/4 with gauge, in/out, measured rate, net, net-charge graph), smooth yellow TEG trace, LTC fuel gauge (localStorage, auto-full after 20 min lit with no pulse), serial console with pop-out, "sync now" and "test ltc" buttons; firmware edge counting + stuck flag + raw pins on `COUL,`, `LTC TEST`, 1 ms CLR pulse, `BAT,` on A1, updates install while the monitor holds the lamp awake. Lamp runs `61be939` (merged.bin = same). Worker version 6226ab63.
 
+### 2026-10-25 bookmark (resume here)
+
+- **The LTC got hot with only the FireBeetle on USB**: no pack connected, TEG not running. The LTC's only supply was then the 3V3 row (VIO, SHDN) and the GPIO lines, so the likely cause is **3V3 shorted to GND through the LTC board**: a mislabeled pin (this board already had a GND pin we took for OUT), or the header seated along one breadboard strip. Not yet found. Unknown whether the USB step-down was still on BQ VIN at the time, or which part got hot (chip, sense resistor, whole board).
+- **LTC power pins mapped (continuity to signal-side GND):** each side has two holes, both labelled just IN or OUT. One of each pair is GND, and the GNDs sit **diagonally**: the OUT hole across from the IN-side GND is the **real OUT**; the OUT hole across from the real IN is GND (the 10-18 "first OUT"). Rule: **real IN and real OUT are the holes that don't beep to GND** (and they beep to each other through the 0.05 ohm sense resistor). Board is fine, no resolder.
+- Everything is unplugged. The FireBeetle GND jumper stays: it goes to the common GND rail.
+- **A resistor has come off the BQ25504 module.** Which one isn't recorded yet. It may be the added 3.9 Mohm OV resistor (pin 6 to GND), but that's unconfirmed. If it's one of the board's own SMD parts, look up its value before resoldering. Fix this first.
+
+**2026-10-26 update:** the first LTC board was faulty. With the pack on it read 5.13 V on OUT (supply fine), SHDN 3.3 V and **0 mV across IN -> OUT**, yet `LTC TEST` pulsed every 154 ms (7.2/s, "221 mV"), well over a healthy chip's 1.6/s limit. Replaced by a new board: **no phantom pulses, "out" counts look right** (one 0.17 mAh out tick from the chip's own draw). No "in" counted with the TEG lit because the pack (5.11 V) is above the BQ's stop voltage (**OV now ~4.89 V**), so the BQ doesn't charge; the page's "harvested est." comes from the TEG voltage alone and can't know that. Next: run the pack down with **drain mode** (below) until it rests ~4.7-4.8 V, then light the candle and watch "pack in".
+
+**Reconnect plan once the BQ is fixed (done):**
+1. LTC loose, continuity from its GND to every pin: only GND pins may beep. Also check the power-side GNDs beep to the signal-side GND.
+2. Seat the LTC across the centre gap, every pin in its own row.
+3. Stage 1, signal side only: GND -> GND rail, VIO + SHDN -> 3V3 row, INT -> D3, POL -> A2, CLR -> A4. USB on, wait 30 s, feel the LTC. Cool -> `LTC TEST`.
+4. Stage 2: real LTC OUT -> BQ BAT row; LTC IN in its own row. The GNDs beside IN/OUT stay empty (tied to GND on the board). Measure IN row and BAT row to GND in ohms (neither near 0), then pack + (red) -> IN row, pack - -> GND rail.
+5. Pack holders: confirm ~5 V across red/black before connecting (they read 0 V on 10-18).
+
+### Drain mode (runs the pack down for a charge test) [PROTOTYPE-ONLY: LTC4150]
+
+- Started and stopped from the **drain mode** panel on `teg_monitor.html` (works from a phone): `POST teg/<lampId>/drain {targetMah}` / `{stop: true}`, `GET` reads it. State lives in R2 at `teg/<lampId>/drain`.
+- Every `/sync` header carries `drain: {on, mah, target}`. While `on`, the lamp doesn't sleep: WiFi stays connected with power save off (~100 mA from the pack) and it syncs every `DRAIN_REPORT_S` (2 min), which reports the LTC totals on the query string. The worker adds `(out - in)` ticks since the last report (a total lower than last time = the lamp lost power and restarted from 0) and sets `on: false` at the target; the lamp then sleeps as usual. Firmware updates install at a report, as with the monitor page holding it awake.
+- A **"Draining"** badge sits top-left on the screen while it runs. The lamp gives up on its own after `DRAIN_LOST_S` (1 h) without a header from the worker.
+- Wiring: pack + -> LTC IN, LTC OUT row -> BQ BAT **and FireBeetle VCC** (5 V input; not the BAT/JST LiPo socket), GND common, **USB unplugged** (on USB the board runs from USB and nothing drains). The lamp picks up a start at its next sync (within 10 min), or at once with a 5 s NEXT hold. The first report only sets the baseline.
+- No pack-voltage reading (no A1 divider resistors yet), so it stops by charge, not voltage: start with ~600-800 mAh, rest the pack 10 min, measure, and run again if it's still above ~4.8 V. Don't let it go below ~4.0 V under load.
+
 ## Before shipping: remove prototype-only code
 
 Bench-measurement code that must not ship. Find every piece with:
@@ -116,7 +140,8 @@ grep -rn PROTOTYPE-ONLY firmware/ candlelight-worker/
   - `fw/src/main.cpp`: the whole "coulomb counter" section, the three ULP `#include`s, the `coulombBegin()` call in `setup()`, the `esp_sleep_pd_config(RTC_PERIPH)` line in `goToSleep()` (only the ULP needs it; the NEXT button's ext0 wake keeps those pins powered on its own), the `?cin=&cout=&mpt=` on the sync request (back to plain `/lamp/<id>/sync`), and the `COUL,` serial line plus `lastCoul` in `tegTask`.
   - `candlelight-worker/src/index.js`: the `GET /teg/{lampId}/coulomb` route, the `cin/cout` block at the top of the sync handler, and the `coulomb` and `gauge` fields in the `/teg` relay.
   - `teg_monitor.html`: the pack in/out tiles, the "fuel gauge" section and its `gauge` relay field (the gauge is built on the counter).
-  - Also delete the stored objects `teg/<lampId>/coulomb` in R2.
+  - Drain mode: in `main.cpp` the drain globals after `coulMux`, the `drain` read in `syncBundle()`, `drainReport()`/`drainKeepWiFi()`, the drain block in `idleWindow()`, the `|| drainOn` in `goToSleep()`, and the "Draining" badge (`drainOn` in `drawDirect()`/`drawFrame()`, back to `drawSyncBadge(g)`); in the worker the `teg/{lampId}/drain` route, the drain block in the sync handler and the header's `drain` field; in the page the drain section.
+  - Also delete the stored objects `teg/<lampId>/coulomb` and `teg/<lampId>/drain` in R2.
 - After removing: build, and check `grep -rn "coul\|ulp" firmware/fw/src` comes back empty.
 
 ## Timing reference (everything here is a prototype placeholder)

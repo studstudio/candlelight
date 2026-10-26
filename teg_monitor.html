@@ -112,6 +112,14 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
 .clog .sys { color: var(--dim); font-style: italic; }
 .banner { border: 1px solid var(--ember); color: var(--ember); padding: 8px 12px; cursor: pointer; }
 .viewer .ctl { display: none !important; }
+.drain { border: 1px solid var(--line); display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); gap: 1px; background: var(--line); }
+@media (max-width: 760px) { .drain { grid-template-columns: 1fr; } }
+.drain > div { background: var(--bg); padding: 10px 14px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.drain .big .v { font-size: 34px; }
+.drain .sub { white-space: normal; }
+.drain .sub.bad { color: var(--ember); }
+.drain .sub.ok { color: var(--teal); }
+.drain input[type=number] { width: 80px; }
 </style>
 </head>
 <body>
@@ -201,6 +209,24 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         <label>lit threshold mV<input type="number" id="lit" step="10" value="150"></label>
       </div>
       <p class="note">Pack gauge: counts LTC4150 charge in and out from the last full. Full is marked by hand, or automatically when the candle is lit, charge was flowing, and then no charge pulse comes for 20 min (the BQ25504 has stopped at its limit). Charge is an estimate: V²/(4R) at the TEG's best point, times booster efficiency, over pack voltage. Break-even counts down what this session has already harvested against a day's use, at the current rate. Warning above 2.8 V (BQ25504 input limit 3 V).</p>
+    </div>
+  </section>
+
+  <!-- [PROTOTYPE-ONLY: LTC4150] drain mode: works from a phone too, it only talks to the worker -->
+  <section class="drain" aria-label="Drain mode">
+    <div>
+      <div class="label">drain mode · run the pack down</div>
+      <div class="big"><span class="v" id="dNow">—</span><span class="u" id="dUnit">mAh out</span></div>
+      <div class="sub" id="dSub">loading…</div>
+      <div class="row">
+        <label class="label">target mAh <input type="number" id="dTarget" step="50" min="50" value="800"></label>
+        <button class="link" id="btnDrain">start</button><button class="link" id="btnDrainStop">stop</button>
+      </div>
+    </div>
+    <div>
+      <div class="label">reports · every 2 min while draining</div>
+      <div class="log" id="dLog"><span>no reports yet</span></div>
+      <p class="note">The lamp stays awake with WiFi on (~100 mA) and reports its LTC4150 count with a sync every 2 min; the worker adds up what left the pack (out − in) and switches drain off at the target, then the lamp sleeps as usual. Wiring: pack + → LTC IN, LTC OUT row → BQ BAT and FireBeetle <b>VCC</b> (not its BAT/JST socket), GND common, <b>USB unplugged</b> (on USB nothing drains). The lamp picks up a start at its next scheduled sync (up to 10 min while it sleeps), or at once with a 5 s NEXT hold; "Draining" shows top-left while it runs. It stops by itself after an hour without reaching the worker. Afterwards let the pack rest 10 min before reading its voltage.</p>
     </div>
   </section>
 
@@ -957,6 +983,73 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     a.download = "teg-burn-" + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-") + ".csv";
     a.click();
   };
+
+  // [PROTOTYPE-ONLY: LTC4150] drain mode, kept on the worker (teg/<lamp>/drain)
+  let drain = null;
+  const drainUrl = `${API}/teg/${encodeURIComponent(LAMP_ID)}/drain`;
+  const clock = t => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const hm = h => h >= 1 ? `${Math.floor(h)} h ${Math.round(h % 1 * 60)} min` : `${Math.max(1, Math.round(h * 60))} min`;
+  function drainRate(pts) {  // mA over the last ~hour of reports
+    if (!pts || pts.length < 2) return null;
+    const b = pts[pts.length - 1];
+    const a = pts.slice().reverse().find(p => b[0] - p[0] >= 3600e3) || pts[0];
+    return b[0] - a[0] >= 5 * 60e3 ? (b[1] - a[1]) / ((b[0] - a[0]) / 3600e3) : null;
+  }
+  function renderDrain() {
+    const sub = $("dSub");
+    sub.className = "sub";
+    $("btnDrainStop").hidden = !drain?.on;
+    $("btnDrain").textContent = drain?.on ? "restart" : "start";
+    if (!drain) { $("dNow").textContent = "—"; sub.textContent = "off · set a target and press start"; $("dLog").innerHTML = "<span>no reports yet</span>"; return; }
+    $("dNow").textContent = `${Math.round(drain.mah)} / ${drain.targetMah}`;
+    const rate = drainRate(drain.points), now = Date.now();
+    if (drain.on) {
+      const since = drain.lastAt ? (now - drain.lastAt) / 60e3 : null;
+      if (since === null) {
+        sub.textContent = `started ${clock(drain.startedAt)} · waiting for the lamp's first report (its next sync, up to 10 min, or hold NEXT 5 s); the count starts at the second`;
+      } else if (since > 8) {
+        sub.textContent = `on · no report for ${hm(since / 60)}: is the lamp powered and on WiFi? It gives up after an hour`;
+        sub.classList.add("bad");
+      } else if (rate !== null && rate < 5) {
+        sub.textContent = `on · last report ${Math.round(since)} min ago · only ${rate.toFixed(1)} mA leaving the pack: is USB still plugged in?`;
+        sub.classList.add("bad");
+      } else {
+        const eta = rate > 0 ? ` · done in ~${hm((drain.targetMah - drain.mah) / rate)} (${clock(now + (drain.targetMah - drain.mah) / rate * 3600e3)})` : "";
+        sub.textContent = `on · last report ${Math.round(since)} min ago${rate !== null ? ` · ${Math.round(rate)} mA` : ""}${eta}`;
+      }
+    } else {
+      sub.textContent = drain.endReason === "target"
+        ? `done ${clock(drain.doneAt)}: target reached, the lamp sleeps again. Rest the pack 10 min, then measure it`
+        : `stopped ${clock(drain.doneAt)}`;
+      if (drain.endReason === "target") sub.classList.add("ok");
+    }
+    const pts = drain.points || [];
+    $("dLog").innerHTML = pts.length ? pts.slice(-12).reverse().map((p, i, arr) => {
+      const prev = arr[i + 1], ma = prev ? (p[1] - prev[1]) / ((p[0] - prev[0]) / 3600e3) : null;
+      return `<div><b>${clock(p[0])}</b> · ${p[1].toFixed(1)} mAh${ma !== null ? ` · ${Math.round(ma)} mA` : ""}</div>`;
+    }).join("") : "<span>no reports yet</span>";
+  }
+  async function fetchDrain() {
+    try { drain = await (await fetch(drainUrl, { cache: "no-store" })).json(); renderDrain(); } catch (e) { $("dSub").textContent = "couldn't reach the worker"; }
+  }
+  async function postDrain(body) {
+    try {
+      const r = await fetch(drainUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const j = await r.json();
+      if (!r.ok) { alertBanner(j.error || `drain: HTTP ${r.status}`); return; }
+      drain = j; renderDrain();
+    } catch (e) { alertBanner("Couldn't reach the worker"); }
+  }
+  $("btnDrain").onclick = () => {
+    const target = num("dTarget");
+    if (!(target > 0)) { alertBanner("Set a target in mAh first"); return; }
+    if (drain?.on && !confirm(`Restart drain at 0 of ${target} mAh? The ${Math.round(drain.mah)} mAh so far are dropped.`)) return;
+    postDrain({ targetMah: target });
+  };
+  $("btnDrainStop").onclick = () => postDrain({ stop: true });
+  fetchDrain();
+  setInterval(fetchDrain, 30000);
+  setInterval(renderDrain, 60000);  // "N min ago" keeps moving between fetches
 
   fetchLampCoulomb();
   setInterval(fetchLampCoulomb, 30000);

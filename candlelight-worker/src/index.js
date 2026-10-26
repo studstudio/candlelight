@@ -335,6 +335,38 @@ export default {
       });
     }
 
+    // ---- teg/{lampId}/drain: drain mode, to run the pack down for a charge test. [PROTOTYPE-ONLY: LTC4150]
+    // POST {targetMah} starts it, POST {stop: true} ends it, GET reads it. The lamp learns
+    // whether to keep draining from each sync's header and reports its LTC4150 totals on
+    // the sync request (every 2 min while draining); /sync below adds up what left the
+    // pack and turns drain off once the target is reached ----
+    if (parts[0] === 'teg' && parts[1] && parts[2] === 'drain' && parts.length === 3) {
+      const key = `teg/${parts[1]}/drain`;
+      const headers = { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+      if (request.method === 'GET') {
+        const obj = await env.LAMP_IMAGES.get(key);
+        return new Response(obj ? await obj.text() : 'null', { headers });
+      }
+      if (request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const now = Date.now();
+        let state;
+        if (body.stop) {
+          const obj = await env.LAMP_IMAGES.get(key);
+          state = obj ? await obj.json().catch(() => null) : null;
+          if (!state) return json({ error: 'no drain to stop' }, 404);
+          if (state.on) Object.assign(state, { on: false, doneAt: now, endReason: 'stopped' });
+        } else {
+          const targetMah = Number(body.targetMah);
+          if (!(targetMah > 0 && targetMah <= 5000)) return json({ error: 'targetMah must be 1-5000' }, 400);
+          state = { on: true, targetMah, mah: 0, startedAt: now, lastAt: null, doneAt: null, endReason: null,
+                    lastIn: null, lastOut: null, points: [] };
+        }
+        await env.LAMP_IMAGES.put(key, JSON.stringify(state));
+        return new Response(JSON.stringify(state), { headers });
+      }
+    }
+
     if (parts[0] === 'teg' && parts[1] && parts.length === 2) {
       const lampId = parts[1];
       const headKey = `teg/${lampId}/head`;
@@ -670,18 +702,39 @@ export default {
       // [PROTOTYPE-ONLY: LTC4150] coulomb counter totals (ticks into / out of the pack since the lamp's
       // power-on) ride along on the query string; stored for the TEG monitor page
       const cin = parseInt(url.searchParams.get('cin'), 10), cout = parseInt(url.searchParams.get('cout'), 10);
-      if (Number.isFinite(cin) && Number.isFinite(cout)) {
-        const mpt = parseFloat(url.searchParams.get('mpt'));
+      const haveCoul = Number.isFinite(cin) && Number.isFinite(cout);
+      const mptRaw = parseFloat(url.searchParams.get('mpt'));
+      const mpt = Number.isFinite(mptRaw) ? mptRaw : 0.1707;
+      if (haveCoul) {
         ctx.waitUntil(env.LAMP_IMAGES.put(`teg/${lampId}/coulomb`, JSON.stringify({
-          in: cin, out: cout, mahPerTick: Number.isFinite(mpt) ? mpt : 0.1707, at: Date.now(),
+          in: cin, out: cout, mahPerTick: mpt, at: Date.now(),
         })));
       }
       const prefix = `queue/${lampId}/`;
       const t0 = Date.now();
-      const [listed, fw] = await Promise.all([
+      const drainKey = `teg/${lampId}/drain`;  // [PROTOTYPE-ONLY: LTC4150]
+      const [listed, fw, drainObj] = await Promise.all([
         getQueueItems(env, lampId, { include: ['customMetadata'] }),
         env.LAMP_IMAGES.head('firmware/latest.bin'),
+        env.LAMP_IMAGES.get(drainKey),
       ]);
+      // [PROTOTYPE-ONLY: LTC4150] drain mode: add what left the pack since the last report
+      // (out - in, so a lit candle counts against it). The totals restart at 0 when the lamp
+      // loses power; a total lower than last time means that happened
+      const drain = drainObj ? await drainObj.json().catch(() => null) : null;
+      if (drain?.on && haveCoul) {
+        const now = Date.now();
+        if (drain.lastIn !== null) {
+          const restarted = cin < drain.lastIn || cout < drain.lastOut;
+          const dIn = restarted ? cin : cin - drain.lastIn, dOut = restarted ? cout : cout - drain.lastOut;
+          drain.mah += (dOut - dIn) * mpt;
+        }
+        drain.lastIn = cin; drain.lastOut = cout; drain.lastAt = now;
+        drain.points.push([now, Math.round(drain.mah * 100) / 100]);
+        if (drain.points.length > 1500) drain.points.splice(0, drain.points.length - 1500);  // 2 days at one report every 2 min
+        if (drain.mah >= drain.targetMah) Object.assign(drain, { on: false, doneAt: now, endReason: 'target' });
+        ctx.waitUntil(env.LAMP_IMAGES.put(drainKey, JSON.stringify(drain)));
+      }
       const timing = [`list+head ${Date.now() - t0}ms`];
       const enc = new TextEncoder();
       const itemHead = (it, size) => {
@@ -697,6 +750,7 @@ export default {
         v: 1,
         count,
         firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
+        drain: drain ? { on: !!drain.on, mah: drain.mah, target: drain.targetMah } : null,  // [PROTOTYPE-ONLY: LTC4150]
       }) + '\n');
       // all the images are fetched at once rather than one after another
       const fetched = listed.map(async (it, i) => {

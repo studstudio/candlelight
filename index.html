@@ -6170,20 +6170,30 @@ document.fonts.ready.then(() => { if (naturalW) render(); });
 </script>
 
 <script>
-/* slider fill: paint each range track in translucent ocean up to the knob */
+/* slider fill: paint each range track in translucent ocean up to the knob.
+   Reads for every slider happen first and writes only happen where something actually changed, so a slider that is just sitting there is never restyled (restyling repaints it, which made scrolling past them stutter). */
 (function () {
-  function sync(el) {
-    const min = +el.min || 0, max = +el.max || 100, v = +el.value;
-    const pct = max > min ? (v - min) / (max - min) : 0;
-    const thumb = 15, px = thumb / 2 + (el.clientWidth - thumb) * pct;
-    el.style.setProperty('--fillpx', px + 'px');
-    el.style.setProperty('--knobr', pct > 0 ? (pct * 70).toFixed(1) + '%' : '-8%');
-    el.style.setProperty('--knobc', v > min ? 'rgba(105, 206, 241, 0.55)' : '#6b767f');
+  const knobOn = 'rgba(105, 206, 241, 0.55)', knobOff = '#6b767f';
+  function calc(el) {
+    const min = +el.min || 0, max = +el.max || 100, v = +el.value, pct = max > min ? (v - min) / (max - min) : 0, thumb = 15;
+    return { px: (thumb / 2 + (el.clientWidth - thumb) * pct).toFixed(1) + 'px', r: pct > 0 ? (pct * 70).toFixed(1) + '%' : '-8%', c: v > min ? knobOn : knobOff };
   }
-  function all() { document.querySelectorAll('input[type=range]').forEach(sync); }
-  document.addEventListener('input', e => { if (e.target && e.target.type === 'range') sync(e.target); }, true);
-  setInterval(all, 200);
+  function apply(el, n) {
+    const o = el.__fill || (el.__fill = {});
+    if (o.px !== n.px) { o.px = n.px; el.style.setProperty('--fillpx', n.px); }
+    if (o.r !== n.r) { o.r = n.r; el.style.setProperty('--knobr', n.r); }
+    if (o.c !== n.c) { o.c = n.c; el.style.setProperty('--knobc', n.c); }
+  }
+  function all() {
+    if (document.hidden) return;
+    const list = Array.from(document.querySelectorAll('input[type=range]')).filter(el => el.offsetParent);
+    const vals = list.map(calc);
+    list.forEach((el, i) => apply(el, vals[i]));
+  }
+  document.addEventListener('input', e => { if (e.target && e.target.type === 'range') apply(e.target, calc(e.target)); }, true);
+  setInterval(all, 500);
   window.addEventListener('load', all);
+  window.addEventListener('resize', all);
   all();
 })();
 

@@ -104,7 +104,7 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **Built today:** monitor page split (TEG 3/4, pack column 1/4 with gauge, in/out, measured rate, net, net-charge graph), smooth yellow TEG trace, LTC fuel gauge (localStorage, auto-full after 20 min lit with no pulse), serial console with pop-out, "sync now" and "test ltc" buttons; firmware edge counting + stuck flag + raw pins on `COUL,`, `LTC TEST`, 1 ms CLR pulse, `BAT,` on A1, updates install while the monitor holds the lamp awake. Lamp runs `61be939` (merged.bin = same). Worker version 6226ab63.
 
-### 2026-10-25 bookmark (resume here)
+### 2026-10-25 bookmark
 
 - **The LTC got hot with only the FireBeetle on USB**: no pack connected, TEG not running. The LTC's only supply was then the 3V3 row (VIO, SHDN) and the GPIO lines, so the likely cause is **3V3 shorted to GND through the LTC board**: a mislabeled pin (this board already had a GND pin we took for OUT), or the header seated along one breadboard strip. Not yet found. Unknown whether the USB step-down was still on BQ VIN at the time, or which part got hot (chip, sense resistor, whole board).
 - **LTC power pins mapped (continuity to signal-side GND):** each side has two holes, both labelled just IN or OUT. One of each pair is GND, and the GNDs sit **diagonally**: the OUT hole across from the IN-side GND is the **real OUT**; the OUT hole across from the real IN is GND (the 10-18 "first OUT"). Rule: **real IN and real OUT are the holes that don't beep to GND** (and they beep to each other through the 0.05 ohm sense resistor). Board is fine, no resolder.
@@ -113,7 +113,23 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **2026-10-26 update:** the first LTC board was faulty. With the pack on it read 5.13 V on OUT (supply fine), SHDN 3.3 V and **0 mV across IN -> OUT**, yet `LTC TEST` pulsed every 154 ms (7.2/s, "221 mV"), well over a healthy chip's 1.6/s limit. Replaced by a new board: **no phantom pulses, "out" counts look right** (one 0.17 mAh out tick from the chip's own draw). No "in" counted with the TEG lit because the pack (5.11 V) is above the BQ's stop voltage (**OV now ~4.89 V**), so the BQ doesn't charge; the page's "harvested est." comes from the TEG voltage alone and can't know that. Next: run the pack down with **drain mode** (below) until it rests ~4.7-4.8 V, then light the candle and watch "pack in".
 
-### 2026-10-26 evening bookmark (resume here)
+### 2026-10-27 bookmark (resume here)
+
+**Today's fixes (all pushed, firmware on the lamp):** the lamp stays awake with the monitor page in the background (`736d422`); the same picture is never redrawn, a reboot doesn't flash, automatic syncs are quiet, the seen flags are saved early (`a4b7c5e`); the page smooths the TEG reading with a 2 s median and shows the BQ's open-circuit samples as text (`c0c6531`). The user wants **as few full refreshes as possible** (the pass ends with a partial; only the wrap to image 1 is full).
+
+**LTC4150: still not counting properly. The user thinks the board isn't working.**
+- Fixed: CLR was tied to 3V3 through the SHDN wire (see "2026-10-27, CLR fault found" below). The SHDN wire is off; LTC TEST passes.
+- Since then: **one** tick, showing as in AND out at once (+0.17 each), around when the user touched the chip. Then an update reboot reset the counts to 0 (the totals don't survive a reboot, only deep sleep). After that, **no pulses** while the page's estimate reached ~2.1 mAh in. That estimate is a model (rInt/eff settings), not a measurement.
+- Charging is real: BAT = VSTOR = 4.77 V (BQ connected, charging), VCC jumper out, lamp on USB. Pack + -> LTC IN, LTC OUT -> BQ BAT.
+- Not yet checked: the real charging current (meter in series, mA) and the sense resistor marking (R050 = 0.05 ohm assumed; R010 would mean 5x fewer pulses). The user doubts either is the cause.
+- Suspects: (1) the CLR+SHDN join on this purple clone (likely SJ3): every 1 ms clear also resets the chip. That may cause the in+out double tick. It may also be worse than thought: if the chip comes out of each reset in a bad state, the next pulse never comes. (2) the chip isn't powered properly or isn't seeing the sense voltage: read every leg to GND with the pack at 4.77 V (the pin numbering is unverified, so get the datasheet pinout first), (3) a bad chip or board.
+
+**Next options:**
+- **Cleanest:** wick SJ3 (and SJ2) open so CLR and SHDN separate; check on continuity that CLR to SHDN doesn't beep; LTC TEST. Then CLR/SHDN go through the board's dividers. The thresholds may be marginal at 3.3 V, so check with LTC TEST.
+- **Bypass the question:** a quick bench test with a known load: a resistor from the OUT row to GND (e.g. 100 ohm = ~48 mA at 4.8 V, ~0.23 W) should give ~1 tick every 13 s on "out". If it doesn't count that, the board is bad.
+- **Firmware (offered, not built):** ignore an INT edge within ~0.3 s of our own clear (kills the phantom double tick); keep the totals through reboots (`RTC_NOINIT_ATTR` + magic). Probably also: `RTC_DATA_ATTR` is re-initialised on a software reset, contrary to the comment in `setup()`.
+
+### 2026-10-26 evening bookmark
 
 - **Drain mode is live** (commit `02a9b92`, worker `bcb11cdb`): lamp on `02a9b92`, running from the pack (VCC jumper -> BQ BAT / LTC OUT row, USB out), drain started at 800 mAh target. It reports every 2 min as planned.
 - **Current is flowing:** ~7 mV across IN -> OUT = **~140 mA** (one 30 mV reading was a sync burst or a bad probe contact). 800 mAh at that rate is ~6 h.

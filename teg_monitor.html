@@ -248,7 +248,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   const viewer = new URLSearchParams(location.search).has("view") || !("serial" in navigator);
   if (viewer) document.body.classList.add("viewer");
 
-  const data = [];   // {t: seconds since session start, mv}
+  const data = [];   // {t: seconds since session start, mv: smoothed, raw: as read}
   let notes = [];    // {t, text}
   let t0 = performance.now();
   let demoTimer = null, port = null, reader = null, keepReading = false, beatTimer = null, gotSample = false;
@@ -281,10 +281,22 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     return p / Math.max(0.5, num("vPack")) * 1000;
   }
 
-  function addSample(mv, t = now()) {
+  // Loaded by the BQ25504 the TEG reading is jumpy: the boost converter draws in
+  // bursts, and every 16 s it lets go for a moment to sample the open-circuit
+  // voltage (a spike). Everything shown and computed uses mv, the median of the
+  // last SMOOTH_N readings, which drops both; raw is kept for the relay and the CSV.
+  // A raw reading well above the median is that open-circuit sample
+  const SMOOTH_N = 9;  // ~2 s at 4 readings a second
+  let voc = null;      // newest open-circuit sample: {mv, t}
+  function addSample(raw, t = now()) {
     const prev = data[data.length - 1];
     if (prev && t <= prev.t) return;
-    data.push({ t, mv });
+    const win = data.slice(1 - SMOOTH_N).map(d => d.raw);
+    win.push(raw);
+    win.sort((a, b) => a - b);
+    const mv = win[win.length >> 1];
+    if (raw - mv > 40 && raw > mv * 1.1) voc = { mv: raw, t };
+    data.push({ t, mv, raw });
     if (prev) {
       const dt = t - prev.t;
       if (dt > 0 && dt < 30) {
@@ -310,7 +322,8 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     const last = data[data.length - 1];
     const mv = last ? last.mv : 0;
     const slope = slopePerMin();
-    $("vSub").textContent = last ? `${Math.round(mv)} mV · ${data.length} pts · ${fmtTime(now())}` : "waiting for data";
+    const vocNote = voc && now() - voc.t < 60 ? ` · open circuit ${(voc.mv / 1000).toFixed(3)} V` : "";
+    $("vSub").textContent = last ? `${Math.round(mv)} mV smoothed${vocNote} · ${data.length} pts · ${fmtTime(now())}` : "waiting for data";
     const ma = chargeMa(mv);
     $("gMa").textContent = ma.toFixed(1) + " mA";
     // break-even: what's still missing from a day's use after this session's harvest, at the current rate
@@ -665,7 +678,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       ctx.strokeStyle = "rgba(255,255,255,.12)";
       ctx.beginPath(); ctx.moveTo(hx, pad.t); ctx.lineTo(hx, pad.t + ph); ctx.stroke();
       ctx.fillStyle = "#ece4d4"; ctx.beginPath(); ctx.arc(hx, hy, 2, 0, Math.PI * 2); ctx.fill();
-      const label = `${(d.mv / 1000).toFixed(3)} V  ${fmtClock(d.t, true)}`;
+      const label = `${(d.mv / 1000).toFixed(3)} V (raw ${(d.raw / 1000).toFixed(3)})  ${fmtClock(d.t, true)}`;
       ctx.textBaseline = "top"; ctx.textAlign = hx > W - 160 ? "right" : "left";
       ctx.fillText(label, hx + (ctx.textAlign === "left" ? 6 : -6), pad.t + 16);
     }
@@ -712,7 +725,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   $("banner").onclick = () => { const b = $("banner"); b.hidden = true; delete b.dataset.alert; };
 
   function clearSession() {
-    data.length = 0; bdata.length = 0; notes = []; liveMv = 0; peak = 0; peakT = 0; mahTotal = 0; burnSec = 0;
+    data.length = 0; bdata.length = 0; notes = []; liveMv = 0; voc = null; peak = 0; peakT = 0; mahTotal = 0; burnSec = 0;
     renderLog(); render();
   }
   function resetSession() {
@@ -916,7 +929,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         body: JSON.stringify({
           session, start: sessionStart, settings,
           notes: notes.map(n => ({ t: n.t, text: n.text })),
-          samples: data.slice(pushedIdx, end).map(d => [d.t, d.mv]),
+          samples: data.slice(pushedIdx, end).map(d => [d.t, d.raw]),  // the phone smooths them itself
           gauge: gaugeNow(),  // [PROTOTYPE-ONLY: LTC4150]
           battery: batLive && Date.now() - batLive.at < 10000 ? { mv: batLive.mv } : null,
           coulomb: coulLive && coulBase && Date.now() - coulLive.at < 10000
@@ -972,12 +985,12 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
 
   // ---------- CSV ----------
   $("btnCsv").onclick = () => {
-    const rows = ["seconds,millivolts,est_mA,note"];
+    const rows = ["seconds,millivolts,raw_millivolts,est_mA,note"];
     let ni = 0;
     for (const d of data) {
       let note = "";
       while (ni < notes.length && notes[ni].t <= d.t) { note += (note ? " | " : "") + notes[ni].text; ni++; }
-      rows.push(`${d.t.toFixed(2)},${Math.round(d.mv)},${chargeMa(d.mv).toFixed(2)},"${note.replace(/"/g, "'")}"`);
+      rows.push(`${d.t.toFixed(2)},${Math.round(d.mv)},${Math.round(d.raw)},${chargeMa(d.mv).toFixed(2)},"${note.replace(/"/g, "'")}"`);
     }
     const blob = new Blob([rows.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");

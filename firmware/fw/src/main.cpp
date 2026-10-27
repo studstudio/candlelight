@@ -195,7 +195,7 @@ void coulombTest() {
   int intAfter = rd(COUL_INT);
   delay(300);
   int intLater = rd(COUL_INT);
-  // time the pulses: clear, then wait for INT to latch again (up to 1.5 s, 5 times, under the monitor's 10 s heartbeat)
+  // time the pulses: clear, then wait for INT to latch again (up to 1.5 s, 5 times, well under the monitor's heartbeat timeout)
   uint32_t gaps[5]; int pols[5], nGaps = 0;
   for (int k = 0; k < 5; k++) {
     rtc_gpio_set_level(COUL_CLR, 0); delay(1); rtc_gpio_set_level(COUL_CLR, 1);
@@ -1576,18 +1576,21 @@ void saveSeenFlags() {
 // pack + to GND, printed as "BAT,<pack millivolts>" once a second.
 // The monitor page sends "TEG ON" every few seconds while it is connected;
 // while those keep coming the lamp prints "TEG,<millivolts>" 4 times a second
-// and stays awake instead of sleeping. "TEG OFF", or 10 s without a
+// and stays awake instead of sleeping. "TEG OFF", or TEG_HEARTBEAT_MS without a
 // heartbeat, ends it. The page ignores every other log line.
 
 const int TEG_PIN = A0;                     // GPIO36, input only
 const uint32_t TEG_SAMPLE_MS = 250;         // one printed reading per this (4 a second)
-const uint32_t TEG_HEARTBEAT_MS = 10000;    // monitoring ends this long after the page's last "TEG ON"
+const uint32_t TEG_HEARTBEAT_MS = 120000;   // monitoring ends this long after the page's last "TEG ON". Long because a browser can slow a hidden tab's timers to one a minute
 volatile uint32_t tegLastHeartbeat = 0;     // millis() of the last "TEG ON" (0 = not monitoring)
 const int BAT_PIN = A1;                     // GPIO39, input only
 const float BAT_DIVIDER = 2.0f;             // pack volts per pin volt (100k/100k). Trim against a multimeter if it reads off
 
 bool tegMonitoring() {
-  return tegLastHeartbeat && millis() - tegLastHeartbeat < TEG_HEARTBEAT_MS;
+  // the heartbeat is set on the other core: it can land after this millis() (and "| 1"
+  // can put it 1 ms ahead), so a heartbeat newer than now counts as fresh, not 49 days old
+  uint32_t hb = tegLastHeartbeat;
+  return hb && (int32_t)(millis() - hb) < (int32_t)TEG_HEARTBEAT_MS;
 }
 
 // calibrated millivolts on A0, averaged over 3 reads to take the edge off ADC noise.

@@ -795,9 +795,11 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       $("btnConnect").textContent = "disconnect";
       gotSample = false;
       readLoop();
-      // the firmware streams TEG readings and stays awake only while these keep coming
+      // the firmware streams TEG readings and stays awake only while these keep coming.
+      // The timer runs in a worker: a hidden tab's own timers can be slowed to one a minute
       sendLine("TEG ON");
-      beatTimer = setInterval(() => sendLine("TEG ON"), 3000);
+      beatTimer = new Worker(URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 3000)"], { type: "text/javascript" })));
+      beatTimer.onmessage = () => sendLine("TEG ON");
     } catch (e) {
       port = null;
       setConn("not connected", "");
@@ -858,7 +860,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   }
 
   async function disconnect() {
-    clearInterval(beatTimer); beatTimer = null;
+    beatTimer?.terminate(); beatTimer = null;
     await sendLine("TEG OFF");  // lets the lamp go back to sleep right away
     keepReading = false;
     try { await reader?.cancel(); } catch (e) {}

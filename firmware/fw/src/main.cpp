@@ -13,6 +13,7 @@
 #include <esp_wifi.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
+#include <esp32/rom/crc.h>        // crc32_le: fingerprint of the picture on screen
 #include <esp32/ulp.h>            // [PROTOTYPE-ONLY: LTC4150] the three ULP headers are only for the coulomb counter
 #include <soc/rtc_io_reg.h>
 #include <soc/rtc_cntl_reg.h>
@@ -1303,6 +1304,13 @@ class MonoCanvas : public Adafruit_GFX {
 // badge > 0 also draws that number bottom-left; syncBadge adds the top-left \"Syncing...\" badge;
 // info (if not null) adds the bottom-left info box
 bool wokeFromSleep = false;   // set in setup(): the panel was hibernated, not freshly powered
+// a fingerprint of the picture on the panel, so drawing the same picture again
+// (a sync that brought nothing, a reboot, a redraw) leaves the panel alone. It lives
+// in RTC memory that no reset initialises (so it outlives a reboot as well as deep
+// sleep, as the picture itself does); the magic says it's valid. Cleared on power-up,
+// while a refresh is under way, and when something else (the setup screen) is drawn
+const uint32_t SCREEN_MAGIC = 0x5C4EE17;
+RTC_NOINIT_ATTR uint32_t rtcScreenMagic, rtcScreenHash;
 bool drewThisWake = false;
 uint32_t lastBuildMs = 0, lastPanelMs = 0;  // of the last drawFrame: making the picture vs sending it and refreshing
 
@@ -1375,7 +1383,24 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
   return true;
 }
 
+// fingerprint of what drawFrame would put up: the frame and everything drawn over it
+uint32_t pictureHash(const EpdImage& img, int badge, bool syncBadge, const char* info) {
+  uint32_t h = crc32_le(0, frameBuf, epdFrameBytes(img));
+  int32_t extras[] = { img.w, img.h, img.bpp, badge, syncBadge, drainOn };
+  h = crc32_le(h, (const uint8_t*)extras, sizeof(extras));
+  if (info) h = crc32_le(h, (const uint8_t*)info, strlen(info));
+  return h;
+}
+
+// the screen shows something drawFrame didn't (the setup screen)
+void forgetScreen() { rtcScreenMagic = 0; }
+
 void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge = false, const char* info = nullptr) {
+  uint32_t hash = pictureHash(img, badge, syncBadge, info);
+  if (rtcScreenMagic == SCREEN_MAGIC && rtcScreenHash == hash) {
+    Serial.println("Same picture already on screen, not refreshing");
+    return;
+  }
   if (FULL_REFRESH_ON_WAKE && wokeFromSleep && !drewThisWake) partial = false;
   drewThisWake = true;
   display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
@@ -1383,8 +1408,13 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
     Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
     return;
   }
+  rtcScreenMagic = 0;  // a reset mid-refresh leaves the panel in an unknown state
   // full-size landscape frames (badges included) go straight to the panel; anything else uses the library
-  if (drawDirect(img, partial, badge, syncBadge, info)) return;
+  if (drawDirect(img, partial, badge, syncBadge, info)) {
+    rtcScreenHash = hash;
+    rtcScreenMagic = SCREEN_MAGIC;
+    return;
+  }
 
   if (partial) display.setPartialWindow(0, 0, img.w, img.h);
   else display.setFullWindow();
@@ -1409,6 +1439,8 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
   } while (more);
   lastBuildMs = tBuild;
   lastPanelMs = tPanel;
+  rtcScreenHash = hash;
+  rtcScreenMagic = SCREEN_MAGIC;
 }
 
 // set by buttonTask on each press of the NEXT button, cleared when consumed
@@ -1679,6 +1711,7 @@ void drawSetupScreen(const String& apName) {
   String payload = "WIFI:S:" + apName + ";T:nopass;;";
   qrcode_initText(&qr, qrData, 3, ECC_LOW, payload.c_str());
   const int scale = 6, qx = 20, qy = 50;
+  forgetScreen();
 
   display.setRotation(0);
   display.setFullWindow();
@@ -1921,9 +1954,9 @@ bool doSync(bool portalIfUnconfigured, int& added) {
   // its images are on flash now: their PSRAM copies make room for this sync's
   for (MemImage& m : memImages) free(m.data);
   memImages.clear();
+  saveSeenFlags();  // the sync rewrites the manifest from flash (and callers reload it even when it fails), so save our changes first
   if (!connectForSync(portalIfUnconfigured)) return false;
   cycleOk = true;
-  saveSeenFlags();  // the sync rewrites the manifest from flash, so save our changes first
   uint32_t tSync = millis();
   SyncResult sr = syncBundle(added);
   if (sr != SYNC_OK) {
@@ -2054,7 +2087,7 @@ void quickPass() {
     Serial.println("Auto pass complete, resting on image 1, the newest (press the button to step)");
     if (millis() - passLastDraw < STILL_HOLD_MS) delay(STILL_HOLD_MS - (millis() - passLastDraw));
   }
-  drawIndexStill(0, unseen, false);  // fast partial refresh (after power-up the library makes the first one full itself)
+  drawIndexStill(0, unseen, false);  // fast partial refresh (after power-up the library makes the first one full itself, if the picture changes)
 }
 
 // redraws the image on screen as a still (first frame) with or without the
@@ -2195,10 +2228,9 @@ void installUpdateNow() {
   updateBeforeSleep();
 }
 
-// [PROTOTYPE-ONLY: LTC4150] drain mode's report: a quiet sync (no "Syncing..."
-// badge), and a quick pass only if it brought new images
-void drainReport() {
-  Serial.println("Drain mode: reporting to the worker");
+// a sync nobody asked for while the lamp is held awake: no "Syncing..." badge, and
+// the screen is only touched if it brought new images (then the quick pass)
+void quietSync() {
   int added = 0;
   doSync(false, added);
   loadStoredIds();
@@ -2206,10 +2238,18 @@ void drainReport() {
   if (added > 0 && !storedIds.empty()) quickPass();
 }
 
+// [PROTOTYPE-ONLY: LTC4150] drain mode's report is a quiet sync
+void drainReport() {
+  Serial.println("Drain mode: reporting to the worker");
+  quietSync();
+}
+
 // [PROTOTYPE-ONLY: LTC4150] keeps WiFi connected between drain reports (a sync turns it off)
 void drainKeepWiFi() {
   if (WiFi.status() != WL_CONNECTED) connectForSync(false);  // connects with power save off
 }
+
+const uint32_t SEEN_SAVE_MS = 3000;  // the seen flags are written this long after the last press
 
 // stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
 // can step through the images; a 2 s hold replays an animation (on a still it
@@ -2240,11 +2280,18 @@ void idleWindow() {
       // held awake, it keeps the sync schedule it would have kept asleep
       if (millis() - lastSync >= SYNC_INTERVAL_S * 1000UL) {
         Serial.println("TEG monitor holds the lamp awake: scheduled sync");
-        syncRequested = true;
+        quietSync();
+        last = lastSync = millis();
+        installUpdateNow();
       }
     }
     uint32_t idle = millis() - last;
-    bool pressed = waitForNext(idle < AWAKE_IDLE_MS ? AWAKE_IDLE_MS - idle : 1000);
+    // the seen flags go to flash shortly after the last press, not only at sleep, so a
+    // reboot (an update, a brownout on a weak pack) can't bring the badge back
+    if (seenDirty && !writerBusy && idle >= SEEN_SAVE_MS) saveSeenFlags();
+    uint32_t wait = idle < AWAKE_IDLE_MS ? AWAKE_IDLE_MS - idle : 1000;
+    if (seenDirty) wait = min(wait, SEEN_SAVE_MS);
+    bool pressed = waitForNext(wait);
     if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
     if (syncRequested) {
       manualSync();
@@ -2313,13 +2360,14 @@ void setup() {
   bool timerWake = cause == ESP_SLEEP_WAKEUP_TIMER;
   wokeFromSleep = buttonWake || timerWake;
   if (esp_reset_reason() == ESP_RST_POWERON) {  // RTC memory also survives soft resets (e.g. after an update)
+    forgetScreen();  // RTC_NOINIT: whatever was in it at power-up is garbage
     rtcViewIdx = 0;
     rtcInTour = false;
     rtcBadge = 0;
     rtcManualFails = 0;
   }
-  Serial.printf("Wake: %s, PSRAM %u KB free\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset",
-                (unsigned)(ESP.getFreePsram() / 1024));
+  Serial.printf("Wake: %s (reset reason %d), PSRAM %u KB free\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset",
+                (int)esp_reset_reason(), (unsigned)(ESP.getFreePsram() / 1024));  // 1 power-on, 3 software (update), 4/5/6/7 crash/watchdog, 9 brownout
   if (buttonWake) rtc_gpio_deinit((gpio_num_t)NEXT_BUTTON);
   coulombBegin(wokeFromSleep);  // [PROTOTYPE-ONLY: LTC4150]
 

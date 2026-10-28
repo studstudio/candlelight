@@ -113,7 +113,29 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **2026-10-26 update:** the first LTC board was faulty. With the pack on it read 5.13 V on OUT (supply fine), SHDN 3.3 V and **0 mV across IN -> OUT**, yet `LTC TEST` pulsed every 154 ms (7.2/s, "221 mV"), well over a healthy chip's 1.6/s limit. Replaced by a new board: **no phantom pulses, "out" counts look right** (one 0.17 mAh out tick from the chip's own draw). No "in" counted with the TEG lit because the pack (5.11 V) is above the BQ's stop voltage (**OV now ~4.89 V**), so the BQ doesn't charge; the page's "harvested est." comes from the TEG voltage alone and can't know that. Next: run the pack down with **drain mode** (below) until it rests ~4.7-4.8 V, then light the candle and watch "pack in".
 
-### 2026-10-27 bookmark (resume here)
+### 2026-10-28 bookmark (resume here)
+
+**Pack is now 3xNiMH, not 4.** 4xNiMH can't work: the BQ25504's OV tops out at ~5.25 V (1.31 V/cell) and a charging NiMH cell sits at 1.3-1.45 V, so at OV 4.89 V (1.22 V/cell) the BQ stopped as soon as current flowed. Also a full 4-cell pack (5.6-5.8 V) exceeds the FireBeetle's RT9080 LDO max (5.5 V). 3 cells: 3.6-4.35 V, inside the FireBeetle's 3.7-4.2 V Li-ion design range; LDO dropout ~0.2 V at WiFi peaks, so the lamp runs down to ~3.2-3.3 V pack under load (~1.1 V/cell).
+- One slot of the 4xAA holder bridged with a wire/dummy. Pack read 3.65 V, later 3.57 V resting after the candle died down.
+- **OV stays at ~4.89 V (3.9 Mohm, no change).** It's now only a ceiling (1.63 V/cell, never reached): the BQ trickles whenever the candle is lit. TEG ~C/150 on 2000 mAh is safe for NiMH. The 3.3 Mohm isn't needed.
+- Page setting "pack volts" 3.7 (mAh stays the cells' rating, series doesn't add mAh). Drain mode / future low-battery cutoff: stop at ~3.3 V under load, not 4.0 V.
+- User is buying a **spot-welded 3xAA NiMH pack with leads** (no spring contacts) and **skipping the TL431 clamp** (47k/47k design, ~40 uA, was offered against VSTOR overshoot if the pack disconnects). Until then keep FireBeetle VCC off the BAT row during charge tests.
+- MPPT confirmed working: loaded TEG ~0.55-0.6 x open circuit (OCS jumper on GND = 50%). A0 reads ~40 mV above a meter at BQ VIN: normal.
+
+**LTC4150: still no "in" pulses.**
+- SJ2/SJ3 now open (CLR and SHDN separate). LTC TEST passes. Then **SHDN was found floating** (meter: bouncing 0-3 V, resting at 3.16 V): with SJ2/SJ3 open nothing held it high, so the chip kept shutting down/resetting. Likely cause of the in+out double ticks too (one more at a sync time, ~11 min into a session). **SHDN now jumpered to 3V3** (CLR-SHDN checked not to beep). Still no "in" pulses after that.
+- Strong candle (~0.7 V loaded, 1.2 V Voc, est. ~25 mA) gave zero ticks earlier, but the current wasn't measured then. Weak candle (VIN 0.35 V): **0.1-0.2 mV across IN-OUT** (~2-4 mA at 0.05 ohm), a tick every 2.5-5 min at most.
+- LTC OUT / BQ BAT are NOT in the 3V3/VIO strip (user checked).
+- User is sure the new board is fine. No load resistors on hand (only the 3.3 Mohm).
+
+**Next (pick up here):**
+1. **INT latch test, no firmware involved:** unplug only INT at D3 (CLR stays high from the ESP, so nothing clears INT). Meter INT pin to GND (~3.3 V). Light the candle to a strong flame (VIN ~0.6-0.7 V): the first pulse latches INT at ~0 V within ~30-40 s (weak flame: up to 5 min). Confirm ~1 mV IN-OUT on 200 mV.
+   - Or use the lamp as the load: LTC OUT strip -> FireBeetle VCC, USB out, drain mode on (~100 mA): INT should latch within ~6 s. Pack is low, keep it short.
+2. INT latches -> the chip counts; the fault is the INT wire / D3 contact / firmware. Plug INT back and watch "out"/"in" on the page.
+3. INT never latches with current confirmed -> read the sense resistor marking (R050 vs R010) and the VDD pin (datasheet pinout first).
+4. Firmware offered, not built: log each tick with time + WiFi state; drop an in+out pair within ~3 s (physically impossible below ~0.6 A).
+
+### 2026-10-27 bookmark
 
 **Today's fixes (all pushed, firmware on the lamp):** the lamp stays awake with the monitor page in the background (`736d422`); the same picture is never redrawn, a reboot doesn't flash, automatic syncs are quiet, the seen flags are saved early (`a4b7c5e`); the page smooths the TEG reading with a 2 s median and shows the BQ's open-circuit samples as text (`c0c6531`). The user wants **as few full refreshes as possible** (the pass ends with a partial; only the wrap to image 1 is full).
 

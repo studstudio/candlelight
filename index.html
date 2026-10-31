@@ -266,7 +266,7 @@
      scale instead of being squeezed smaller than its real 400x300 resolution,
      which was smoothing away the actual blockiness of the real panel */
   .preview-wrap {
-    position: relative; touch-action: auto;
+    position: sticky; top: 0; z-index: 30; touch-action: auto; /* stays on screen while the sliders scroll underneath it */
     width: calc(100% + 30px); margin-left: -15px; margin-right: -15px;
     border-radius: 0; overflow: hidden;
     border: 1px solid var(--line); border-top: 1px solid rgba(156,154,148,0.2); /* faint grey seam under the crop view */

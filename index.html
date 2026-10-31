@@ -194,9 +194,11 @@
   .crop-toggle { position: absolute; left: 50%; top: 0; transform: translateX(-50%); width: 56px; height: 34px; opacity: 0.8; }
   .photo-wrap.collapsed { display: none; }
   /* the edit buttons and the video header ride under the pinned preview */
-  #editPillRow { position: sticky; top: var(--pvH, 0px); z-index: 29; background: var(--pageBg, var(--bg)); padding-bottom: 6px; }
-  #videoPanel > #videoHead { position: sticky; top: calc(var(--pvH, 0px) + var(--pillH, 0px)); z-index: 28; background: var(--pageBg, var(--bg)); margin-top: 0 !important; padding-top: 12px; padding-bottom: 4px; }
-  #videoPanel > .sec-body { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  body.is-cycle #previewWrap { position: sticky; top: 0; z-index: 30; } /* in a cycle the preview stays on screen while the sliders scroll underneath it */
+  body.is-cycle #editPillRow { position: sticky; top: var(--pvH, 0px); z-index: 29; }
+  #editPillRow { background: var(--pageBg, var(--bg)); margin-top: 0 !important; padding-top: 14px; }
+  body.is-cycle #videoSticky { position: sticky; top: calc(var(--pvH, 0px) + var(--pillH, 0px)); z-index: 28; background: var(--pageBg, var(--bg)); padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+  #videoSticky > #videoHead { margin-top: 0 !important; padding-top: 14px; }
   .shader-panel { margin: 10px 0 4px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .preview-wrap.touch-on { cursor: crosshair; outline: 1px solid var(--ember); outline-offset: -1px; }
   #shaderTouchBtn.on { color: var(--ember); border-color: var(--ember); }
@@ -270,7 +272,7 @@
      scale instead of being squeezed smaller than its real 400x300 resolution,
      which was smoothing away the actual blockiness of the real panel */
   .preview-wrap {
-    position: sticky; top: 0; z-index: 30; touch-action: auto; /* stays on screen while the sliders scroll underneath it */
+    position: relative; touch-action: auto;
     width: calc(100% + 30px); margin-left: -15px; margin-right: -15px;
     border-radius: 0; overflow: hidden;
     border: 1px solid var(--line); border-top: 1px solid rgba(156,154,148,0.2); /* faint grey seam under the crop view */
@@ -1158,12 +1160,14 @@ html, body { background-color: #fdd48d; background-image: none; }
 </div>
 
 <div class="shader-panel" id="videoPanel" style="display:none;">
+<div id="videoSticky">
   <div class="shader-head sec-head" id="videoHead" style="margin-top:0;cursor:default;"><span class="name"><span class="shader-name">video</span><button class="vlive" id="videoLiveBtn" type="button" aria-label="play or pause the live video" title="play or pause the live video">■</button></span><span class="anim-interval-value" id="videoInfo" style="flex:0 1 auto;white-space:nowrap;font-size:9px;letter-spacing:0;text-transform:none;opacity:.75;"></span></div>
   <div class="sec-body slider-grid">
   <div class="moire-row full"><span class="moire-label">time</span><div id="videoTimeWrap" style="position:relative;flex:1;display:flex;align-items:center;min-width:0"><input type="range" id="videoTime" min="0" max="1000" value="0" style="flex:1;margin:0 36px;min-width:0;width:auto"><span class="anim-interval-value" id="videoTimeVal" style="position:absolute;top:50%;left:0;transform:translate(-100%,-50%);white-space:nowrap;font-size:11px;pointer-events:none">0.0s</span><span class="anim-interval-value" id="videoEndVal" style="position:absolute;top:50%;left:0;transform:translateY(-50%);white-space:nowrap;font-size:11px;pointer-events:none">0.0s</span></div></div>
   <div class="moire-row full"><span class="moire-label">step</span><input type="range" id="videoStep" min="0" max="28" value="2"><span class="anim-interval-value" id="videoStepVal" style="flex:0 0 auto;min-width:88px;text-align:right;white-space:nowrap;"></span></div>
   <div class="moire-row full"><span class="moire-label">echo</span><input type="range" id="echoSlider" min="0" max="100" value="0"></div>
   </div>
+</div>
 </div>
 
 <div class="tex-section" id="texSection">
@@ -1975,7 +1979,7 @@ function setMode(next) {
     const src = frames.find(frameIsFilled);
     for (let i = 0; i < 3; i++) layers[i] = src[i] ? cloneLayer(src[i]) : null;
   }
-  mode = next;
+  mode = next; document.body.classList.toggle('is-cycle', mode === 'cycle');
   // Carry an in-progress still session (base photo + any overlays, with all
   // their crop/tone/texture settings) into the cycle as frame 1, so the user
   // doesn't have to re-add the photo. Only when the cycle has no frames yet —

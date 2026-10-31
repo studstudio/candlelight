@@ -93,11 +93,18 @@ const bool COUL_POL_HIGH_IS_CHARGE = true;  // POL high = current OUT -> IN, int
 const int COUL_SLOT_A = 0, COUL_SLOT_B = 1; // ULP counters: [0] POL high, [1] POL low (16 bits each)
 const int COUL_SLOT_PREV = 2;               // INT as of the last poll (1 high, 0 low): only a high -> low edge counts
 const int COUL_SLOT_STUCK = 3;              // polls in a row INT has read low; a cleared pulse is back high by the next poll
+const int COUL_SLOT_GLITCH = 4;             // INT went low but was back high 1 ms later by itself: noise or a bad contact, not a pulse (a real one stays latched until CLR)
+const int COUL_SLOT_POLLS = 5;              // every ULP run, so the log can show the ULP is alive and at what rate
 const uint16_t COUL_STUCK_POLLS = 3;        // this many low polls in a row: CLR isn't releasing INT (wiring, or INT tied to CLR)
 const int COUL_PROG = 8;                    // program loads here, after the counters (words)
 
 RTC_DATA_ATTR uint32_t rtcCoulMagic = 0;
 RTC_DATA_ATTR uint16_t rtcCoulSeenA = 0, rtcCoulSeenB = 0;  // ULP counter values already added to the totals
+RTC_DATA_ATTR uint16_t rtcCoulSeenGlitch = 0;               // same, for the glitch counter
+RTC_DATA_ATTR uint32_t rtcCoulGlitches = 0;                 // glitches since power-on (not counted as ticks)
+uint32_t coulLastTickMs = 0;                                // millis() of the last logged tick, for the gap between ticks
+// what else the lamp was doing when a tick came, for the tick log
+volatile uint32_t actSyncStart = 0, actSyncEnd = 0, actPanelStart = 0, actPanelEnd = 0;
 RTC_DATA_ATTR uint32_t rtcCoulIn = 0, rtcCoulOut = 0;       // ticks into / out of the pack since power-on
 portMUX_TYPE coulMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -117,8 +124,9 @@ void coulombBegin(bool wokeFromSleep) {
   if (rtcCoulMagic != 0xC0170150 || esp_reset_reason() == ESP_RST_POWERON) {
     RTC_SLOW_MEM[COUL_SLOT_A] = 0;
     RTC_SLOW_MEM[COUL_SLOT_B] = 0;
-    rtcCoulSeenA = rtcCoulSeenB = 0;
-    rtcCoulIn = rtcCoulOut = 0;
+    RTC_SLOW_MEM[COUL_SLOT_GLITCH] = 0;
+    rtcCoulSeenA = rtcCoulSeenB = rtcCoulSeenGlitch = 0;
+    rtcCoulIn = rtcCoulOut = rtcCoulGlitches = 0;
     rtcCoulMagic = 0xC0170150;
   }
   if (wokeFromSleep) return;  // the ULP has been running all along; reloading it could drop a pulse
@@ -136,15 +144,19 @@ void coulombBegin(bool wokeFromSleep) {
   const int intBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_INT);
   const int polBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_POL);
   const int clrRtc = rtc_io_number_get(COUL_CLR);
-  enum { L_DONE, L_HIGH, L_LOW, L_CLEAR };
+  enum { L_DONE, L_HIGH, L_LOW, L_CLEAR, L_GLITCH };
   const ulp_insn_t prog[] = {
     I_MOVI(R3, 0),                                   // R3 = the counters' base address
+    I_LD(R1, R3, COUL_SLOT_POLLS), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_POLLS),
     I_RD_REG(RTC_GPIO_IN_REG, intBit, intBit),       // R0 = INT
     M_BGE(L_HIGH, 1),                                // high: nothing latched
     I_LD(R1, R3, COUL_SLOT_STUCK), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_STUCK),
     I_LD(R0, R3, COUL_SLOT_PREV),                    // R0 = INT at the last poll
     I_MOVI(R2, 0), I_ST(R2, R3, COUL_SLOT_PREV),
     M_BL(L_CLEAR, 1),                                // was low already: counted then, just try the clear again
+    I_DELAY(8000),                                   // ~1 ms, then INT again: a real pulse stays latched until CLR
+    I_RD_REG(RTC_GPIO_IN_REG, intBit, intBit),
+    M_BGE(L_GLITCH, 1),                              // back high by itself: noise or a contact blip, not a tick
     I_RD_REG(RTC_GPIO_IN_REG, polBit, polBit),       // R0 = POL, latched with INT
     M_BL(L_LOW, 1),
     I_LD(R1, R3, COUL_SLOT_A), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_A),
@@ -156,7 +168,9 @@ void coulombBegin(bool wokeFromSleep) {
     I_DELAY(8000),                                   // ~1 ms at 8 MHz: well over the 20 us minimum, for slower boards
     I_WR_REG(RTC_GPIO_OUT_W1TS_REG, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, 1),
     M_BX(L_DONE),
-    M_LABEL(L_HIGH),
+    M_LABEL(L_GLITCH),
+    I_LD(R1, R3, COUL_SLOT_GLITCH), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_GLITCH),
+    M_LABEL(L_HIGH),                                 // (a glitch falls through: INT is high again)
     I_MOVI(R2, 1), I_ST(R2, R3, COUL_SLOT_PREV),
     I_MOVI(R2, 0), I_ST(R2, R3, COUL_SLOT_STUCK),
     M_LABEL(L_DONE),
@@ -166,6 +180,9 @@ void coulombBegin(bool wokeFromSleep) {
   CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // a soft reset can leave the old program ticking
   RTC_SLOW_MEM[COUL_SLOT_PREV] = 1;  // a pulse already latched at boot still counts once
   RTC_SLOW_MEM[COUL_SLOT_STUCK] = 0;
+  RTC_SLOW_MEM[COUL_SLOT_GLITCH] = 0;  // older firmware left these slots unused: start them clean
+  RTC_SLOW_MEM[COUL_SLOT_POLLS] = 0;
+  rtcCoulSeenGlitch = 0;
   esp_err_t err = ulp_process_macros_and_load(COUL_PROG, prog, &size);
   if (err == ESP_OK) {
     ulp_set_wakeup_period(0, COUL_POLL_US);
@@ -240,15 +257,52 @@ void coulombTest() {
 // INT has read low for several polls in a row: the LTC4150 isn't being cleared
 bool coulombStuck() { return (RTC_SLOW_MEM[COUL_SLOT_STUCK] & 0xFFFF) >= COUL_STUCK_POLLS; }
 
-// adds what the ULP counted since the last call to the totals
+uint32_t readTegMv();
+
+// "sync running 4 s" / "last sync 312 s ago" and the same for the panel, for the tick log
+String coulActivity(const char* what, uint32_t start, uint32_t end) {
+  uint32_t now = millis();
+  if (!start) return String(what) + " none yet";
+  if (start > end) return String(what) + " RUNNING " + (now - start) / 1000 + " s";
+  return String(what) + " ended " + (now - end) / 1000 + " s ago";
+}
+
+// adds what the ULP counted since the last call to the totals, and logs every tick and
+// glitch with what the lamp was doing at the time (checked every 20 ms while the
+// monitor page is connected, so the time is close)
 void coulombPoll() {
   uint16_t a = RTC_SLOW_MEM[COUL_SLOT_A] & 0xFFFF, b = RTC_SLOW_MEM[COUL_SLOT_B] & 0xFFFF;
+  uint16_t g = RTC_SLOW_MEM[COUL_SLOT_GLITCH] & 0xFFFF;
   portENTER_CRITICAL(&coulMux);
   uint16_t da = a - rtcCoulSeenA, db = b - rtcCoulSeenB;  // 16-bit wrap is fine: never 65 k pulses between reads
-  rtcCoulSeenA = a; rtcCoulSeenB = b;
-  rtcCoulIn += COUL_POL_HIGH_IS_CHARGE ? da : db;
-  rtcCoulOut += COUL_POL_HIGH_IS_CHARGE ? db : da;
+  uint16_t dg = g - rtcCoulSeenGlitch;
+  rtcCoulSeenA = a; rtcCoulSeenB = b; rtcCoulSeenGlitch = g;
+  uint16_t dIn = COUL_POL_HIGH_IS_CHARGE ? da : db, dOut = COUL_POL_HIGH_IS_CHARGE ? db : da;
+  rtcCoulIn += dIn;
+  rtcCoulOut += dOut;
+  rtcCoulGlitches += dg;
   portEXIT_CRITICAL(&coulMux);
+  if (!dIn && !dOut && !dg) return;
+
+  // "LTC tick: ..." / "LTC glitch: ...", one line each; the monitor page keeps them and relays them
+  uint32_t now = millis();
+  String ctx = String("TEG ") + readTegMv() + " mV | WiFi " +
+               (WiFi.getMode() == WIFI_OFF ? "off" : WiFi.status() == WL_CONNECTED ? "connected" : "on, not connected") +
+               " | " + coulActivity("sync", actSyncStart, actSyncEnd) + " | " + coulActivity("panel", actPanelStart, actPanelEnd) +
+               " | INT " + rtc_gpio_get_level(COUL_INT) + " POL " + rtc_gpio_get_level(COUL_POL) +
+               " | up " + now / 1000 + " s | ULP polls " + (RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF);
+  if (dIn || dOut) {
+    String gap = coulLastTickMs ? String((now - coulLastTickMs) / 1000.0f, 1) + " s" : String("first");
+    // the TEG gives tens of mA at most, a tick every ~15 s or slower; under 3 s needs > ~0.3 A
+    bool fast = coulLastTickMs && now - coulLastTickMs < 3000;
+    Serial.printf("LTC tick: %s%s%s | gap %s%s | totals in %u out %u | %s\n",
+                  dIn ? (String("in x") + dIn).c_str() : "", dIn && dOut ? " + " : "", dOut ? (String("out x") + dOut).c_str() : "",
+                  gap.c_str(), fast || dIn + dOut > 1 ? " | TOO FAST, can't be real current" : "",
+                  (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, ctx.c_str());
+    coulLastTickMs = now;
+  }
+  if (dg) Serial.printf("LTC glitch: INT dropped and came back by itself x%u (not counted) | glitches total %u | %s\n",
+                        dg, (unsigned)rtcCoulGlitches, ctx.c_str());
 }
 
 // manifest.json is an array, oldest first, one entry per stored image:
@@ -1368,6 +1422,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
   lastBuildMs = millis() - t0;
 
   uint32_t t1 = millis();
+  actPanelStart = t1 | 1;  // [PROTOTYPE-ONLY: LTC4150] for the tick log
   auto& e = display.epd2;
   if (partial) {
     e.writeImage(bitmap, 0, 0, W, H);
@@ -1380,6 +1435,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
     e.powerOff();
   }
   lastPanelMs = millis() - t1;
+  actPanelEnd = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150]
   return true;
 }
 
@@ -1420,6 +1476,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
   else display.setFullWindow();
   uint32_t tBuild = 0, tPanel = 0;
   bool more;
+  actPanelStart = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150] for the tick log
   display.firstPage();
   do {
     uint32_t t0 = millis();
@@ -1439,6 +1496,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
   } while (more);
   lastBuildMs = tBuild;
   lastPanelMs = tPanel;
+  actPanelEnd = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150]
   rtcScreenHash = hash;
   rtcScreenMagic = SCREEN_MAGIC;
 }
@@ -1678,11 +1736,14 @@ void tegTask(void*) {
       if (millis() - lastCoul >= 1000) {  // [PROTOTYPE-ONLY: LTC4150] coulomb totals once a second: "COUL,<ticks in>,<ticks out>,<mAh per tick>,<INT>,<POL>,<stuck>"
         lastCoul = millis();
         coulombPoll();
-        // then the raw INT and POL levels and the stuck flag, for wiring checks: "...,<INT>,<POL>,<stuck>"
-        Serial.printf("COUL,%u,%u,%.6f,%d,%d,%d\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK,
-                      rtc_gpio_get_level(COUL_INT), rtc_gpio_get_level(COUL_POL), coulombStuck() ? 1 : 0);
+        // then the raw INT and POL levels and the stuck flag, for wiring checks: "...,<INT>,<POL>,<stuck>",
+        // then glitches (not counted) and the ULP's 16-bit poll counter: "...,<glitches>,<polls>"
+        Serial.printf("COUL,%u,%u,%.6f,%d,%d,%d,%u,%u\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK,
+                      rtc_gpio_get_level(COUL_INT), rtc_gpio_get_level(COUL_POL), coulombStuck() ? 1 : 0,
+                      (unsigned)rtcCoulGlitches, (unsigned)(RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF));
       }
     }
+    if (tegMonitoring()) coulombPoll();  // [PROTOTYPE-ONLY: LTC4150] every 20 ms, so each tick's log line has a close time
     delay(20);
   }
 }
@@ -1945,6 +2006,8 @@ bool connectForSync(bool portalIfUnconfigured) {
 // firmware the worker reported is installed only at the end of the wake (see
 // updateBeforeSleep), so nobody waits for it. False if it couldn't get online
 bool doSync(bool portalIfUnconfigured, int& added) {
+  actSyncStart = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150] for the tick log
+  struct SyncEnd { ~SyncEnd() { actSyncEnd = millis() | 1; } } syncEnd;
   added = 0;
   waitForWriter();  // an earlier sync this wake may still be storing
   passQueue.clear();  // the pass shows only what this sync brings

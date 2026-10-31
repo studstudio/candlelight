@@ -353,9 +353,12 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     el.hidden = !live;
     if (!live) return;
     const lv = v => v ? "high" : "low";
-    el.classList.toggle("bad", !!coulLive.stuck);
+    // glitches: INT blips the lamp didn't count; too fast: counted ticks closer than physically possible (see the "LTC tick" lines)
+    const noise = (coulLive.glitches || 0) + (coulLive.fast || 0) > 0;
+    el.classList.toggle("bad", !!coulLive.stuck || noise);
     el.textContent = coulLive.stuck ? "INT low at every check: CLR isn't releasing it, or the chip pulses nonstop. Press test ltc to see which"
-      : `ltc pins · INT ${lv(coulLive.int)} · POL ${lv(coulLive.pol)} (${coulLive.pol ? "charging" : "discharging"})`;
+      : `ltc pins · INT ${lv(coulLive.int)} · POL ${lv(coulLive.pol)} (${coulLive.pol ? "charging" : "discharging"})` +
+        (coulLive.glitches !== undefined ? ` · glitches ${coulLive.glitches} · too-fast ticks ${coulLive.fast || 0}` : "");
     if (coulLive.stuck && !stuckWarned && !viewer) { stuckWarned = true; alertBanner("LTC4150 INT reads low at every check, so the counts can't be trusted. Press test ltc (battery column) and check the serial console."); }
     if (!coulLive.stuck) stuckWarned = false;
   }
@@ -844,6 +847,9 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
           if (line && !READING.test(line)) conLog(line);
+          // [PROTOTYPE-ONLY: LTC4150] "LTC tick: ..." / "LTC glitch: ..." lines go to the worker too, for debugging from afar
+          if (/^LTC (tick|glitch):/.test(line)) { ltcLog.push({ at: Date.now(), text: line.slice(0, 400) }); if (ltcLog.length > 300) ltcLog.shift(); }
+          if (/^LTC tick:.*TOO FAST/.test(line)) fastTicks++;
           // only "TEG,<mV>" lines; the lamp's other log lines are ignored
           const m = line.match(/TEG,(\d+(?:\.\d+)?)/);
           const mv = m ? parseFloat(m[1]) : NaN;
@@ -856,10 +862,12 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
           if (bt) setBattery(+bt[1]);
           // "COUL,<ticks in>,<ticks out>,<mAh per tick>": the LTC4150 totals since the lamp's power-on
           // newer firmware adds the raw pin levels and a stuck flag: ",<INT>,<POL>,<stuck>"
-          const c = line.match(/COUL,(\d+),(\d+),([\d.]+)(?:,(\d),(\d),(\d))?/);
+          // and then ",<glitches>,<ULP polls>" (glitches: INT blips not counted, since the lamp's power-up)
+          const c = line.match(/COUL,(\d+),(\d+),([\d.]+)(?:,(\d),(\d),(\d))?(?:,(\d+),(\d+))?/);
           if (c) {
             coulLive = { in: +c[1], out: +c[2], mahPerTick: +c[3], at: Date.now() };
             if (c[4] !== undefined) Object.assign(coulLive, { int: +c[4], pol: +c[5], stuck: +c[6] });
+            if (c[7] !== undefined) Object.assign(coulLive, { glitches: +c[7], fast: fastTicks });
             gaugeTotals(coulLive.in, coulLive.out, coulLive.mahPerTick, coulLive.at);
             addBatt();
             if (!coulBase || coulLive.in < coulBase.in || coulLive.out < coulBase.out) coulBase = { in: coulLive.in, out: coulLive.out };  // new session, or the lamp restarted
@@ -914,6 +922,8 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   const RELAY = `${API}/teg/${encodeURIComponent(LAMP_ID)}`;
   const LAG = 1.6;
   let pushedIdx = 0, pushing = false;
+  const ltcLog = [];  // [PROTOTYPE-ONLY: LTC4150] the lamp's tick/glitch lines, newest last
+  let fastTicks = 0;  // [PROTOTYPE-ONLY: LTC4150] "TOO FAST" ticks seen since the page connected
   const relayStatus = (text, ok) => { const r = $("relay"); r.textContent = text ? "· " + text : ""; r.className = "relay" + (ok ? " ok" : ""); };
 
   async function push() {
@@ -931,9 +941,10 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
           notes: notes.map(n => ({ t: n.t, text: n.text })),
           samples: data.slice(pushedIdx, end).map(d => [d.t, d.raw]),  // the phone smooths them itself
           gauge: gaugeNow(),  // [PROTOTYPE-ONLY: LTC4150]
+          ltcLog: ltcLog.slice(-100),  // [PROTOTYPE-ONLY: LTC4150] the newest 100 (the post goes out every second)
           battery: batLive && Date.now() - batLive.at < 10000 ? { mv: batLive.mv } : null,
           coulomb: coulLive && coulBase && Date.now() - coulLive.at < 10000
-            ? { in: coulLive.in, out: coulLive.out, baseIn: coulBase.in, baseOut: coulBase.out, mahPerTick: coulLive.mahPerTick, int: coulLive.int, pol: coulLive.pol, stuck: coulLive.stuck } : null,
+            ? { in: coulLive.in, out: coulLive.out, baseIn: coulBase.in, baseOut: coulBase.out, mahPerTick: coulLive.mahPerTick, int: coulLive.int, pol: coulLive.pol, stuck: coulLive.stuck, glitches: coulLive.glitches, fast: coulLive.fast } : null,
         }),
       });
       if (!r.ok) throw new Error(r.status);
@@ -971,6 +982,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       if (s.coulomb) {
         coulLive = { in: s.coulomb.in, out: s.coulomb.out, mahPerTick: s.coulomb.mahPerTick, at: Date.now() - (s.now - s.updated) };
         if (s.coulomb.int !== undefined) Object.assign(coulLive, { int: s.coulomb.int, pol: s.coulomb.pol, stuck: s.coulomb.stuck });
+        if (s.coulomb.glitches !== undefined) Object.assign(coulLive, { glitches: s.coulomb.glitches, fast: s.coulomb.fast });
         coulBase = { in: s.coulomb.baseIn, out: s.coulomb.baseOut };
         addBatt();
       }

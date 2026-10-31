@@ -424,6 +424,10 @@ export default {
           // [PROTOTYPE-ONLY: LTC4150] live LTC4150 totals from the lamp's serial line, relayed for the phone: {in, out, baseIn, baseOut, mahPerTick}
           coulomb: body.coulomb && ['in', 'out', 'baseIn', 'baseOut', 'mahPerTick'].every(k => Number.isFinite(body.coulomb[k]))
             ? body.coulomb : null,
+          // [PROTOTYPE-ONLY: LTC4150] the lamp's "LTC tick/glitch" log lines, as the laptop saw them: [{at, text}]
+          ltcLog: Array.isArray(body.ltcLog)
+            ? body.ltcLog.filter(l => l && Number.isFinite(l.at) && typeof l.text === 'string').slice(-300).map(l => ({ at: l.at, text: l.text.slice(0, 400) }))
+            : [],
           updated: Date.now(),
         }));
         return json({ ok: true });

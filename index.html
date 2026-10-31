@@ -5750,8 +5750,8 @@ function framesGalleryHTML(urls, standalone, gifUrl) {
   }).join('');
   const css = 'body{margin:0;background:#14100d;color:#bfb8aa;font:13px -apple-system,system-ui,sans-serif;padding:18px 16px 60px}' +
     `.lab{font:12px ${mono};letter-spacing:.06em;margin:0 0 8px}p{margin:0 0 18px;font:11px ${mono};color:#8a8478;line-height:1.4}hr{border:0;border-top:1px solid rgba(191,184,170,.22);margin:6px 0 18px}` +
-    'figure{margin:0 0 18px}img{display:block;width:100%;max-width:800px;image-rendering:pixelated;background:#fff}a{color:inherit}';
-  const body = (gifUrl ? '' : '<p>press and hold to save, or tap to download</p>') + gifSec + figs;
+    '.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.grid figure{margin:0}figure{margin:0 0 18px}img{display:block;width:100%;max-width:800px;image-rendering:pixelated;background:#fff}a{color:inherit}';
+  const body = (gifUrl ? '' : '<p>press and hold to save, or tap to download</p>') + gifSec + '<div class="grid">' + figs + '</div>';
   return standalone
     ? `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>lamp frames</title><style>${css}</style>${body}`
     : { css, body };

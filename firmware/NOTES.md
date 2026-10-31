@@ -117,9 +117,15 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **Decisive run (session mvvpbvzu7tpl, 01:07-01:14):** VIO wire on, candle hot, **0 ticks, 0 glitches, INT high for 7 min**, while the TEG trace shows the BQ's MPPT open-circuit samples every ~16 s (loaded ~1.4 V, open ~1.9 V): the BQ was harvesting the whole time. 2 mV across IN-OUT measured earlier = a tick every ~15 s expected (32.55 Hz/V x 2 mV, independent of the sense resistor's value).
 - **All header-to-chip paths check out (power off, ohms):** INT -> leg 10, POL -> leg 6, IN/OUT -> legs 1/2, CLR -> leg 9 (0 ohm), SHDN = VIO -> leg 5. SJ2/SJ3 bridged, leave them alone.
-- **Lead: legs 3-4 (CF+/CF-, the filter capacitor pins) read 0.1 ohm on the 200 ohm range.** A short there zeroes the signal the chip integrates: powered, enabled, 2 mV in, no counts, everything else normal. **Unconfirmed:** check the pack + USB were unplugged (ohms invalid otherwise) and the probes didn't touch (legs 3/4 are adjacent; compare to probes shorted together).
+- **CF is fine:** legs 3-4 actually read OL; the 0.1 ohm was both probes on one leg (user). **Next = the lamp-as-load test below.**
+- (Superseded) legs 3-4 (CF+/CF-, the filter capacitor pins) read 0.1 ohm on the 200 ohm range. A short there zeroes the signal the chip integrates: powered, enabled, 2 mV in, no counts, everything else normal. **Unconfirmed:** check the pack + USB were unplugged (ohms invalid otherwise) and the probes didn't touch (legs 3/4 are adjacent; compare to probes shorted together).
 - **Next (user, 2026-11-01):** everything unplugged; re-measure leg 3-4, leg 3-GND, leg 4-GND. If shorted: find the part with both ends beeping to legs 3/4 and neither to GND (the CF cap, should be ~4.7 uF): steady ~0 ohm across it = shorted/wrong part, remove it (datasheet: CF pins may be left open). No such part = solder bridge between legs 3 and 4: flux + wick. Then candle lit: expect "in" every ~15 s at 2 mV.
-- If CF is fine: lamp-as-load test (LTC OUT -> FireBeetle VCC, USB out, NEXT held awake, ~100 mA = ~5 mV): INT unplugged from D3 with a meter on the INT pin should drop to 0 V within ~6 s.
+- **TOMORROW: lamp-as-load test** (the user calls it the drain test; no TEG involved):
+  1. LTC OUT -> FireBeetle VCC, unplug USB; press NEXT now and then to keep it awake (~100 mA through the sense resistor).
+  2. Unplug INT from D3; meter (20 V) on the INT header pin: ~3.3 V.
+  3. A working chip drops INT to 0 V within ~6 s and holds it (nothing clears it).
+  4. Meter IN -> OUT on 200 mV: expect ~5 mV.
+  - INT drops: the chip counts; chase the INT wire / D3 contact / firmware. INT stays high with ~5 mV: everything around the chip is verified, so the chip itself isn't counting.
 - The user doubts board faults (the first board's 154 ms phantom pulses likely came from the same INT-pull-up -> VIO backfeed, not a defect: I was wrong to call it bad). Firmware on the lamp: `b5a9936` (INT pull-down, tick/glitch log relayed as ltcLog, glitch filter; VIO check removed).
 
 ### 2026-10-31 bookmark

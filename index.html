@@ -193,6 +193,10 @@
   /* message cursor icon: just highlights orange while the message box is open */
   .crop-toggle { position: absolute; left: 50%; top: 0; transform: translateX(-50%); width: 56px; height: 34px; opacity: 0.8; }
   .photo-wrap.collapsed { display: none; }
+  /* the edit buttons and the video header ride under the pinned preview */
+  #editPillRow { position: sticky; top: var(--pvH, 0px); z-index: 29; background: var(--pageBg, var(--bg)); padding-bottom: 6px; }
+  #videoPanel > #videoHead { position: sticky; top: calc(var(--pvH, 0px) + var(--pillH, 0px)); z-index: 28; background: var(--pageBg, var(--bg)); margin-top: 0 !important; padding-top: 12px; padding-bottom: 4px; }
+  #videoPanel > .sec-body { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .shader-panel { margin: 10px 0 4px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .preview-wrap.touch-on { cursor: crosshair; outline: 1px solid var(--ember); outline-offset: -1px; }
   #shaderTouchBtn.on { color: var(--ember); border-color: var(--ember); }
@@ -4421,7 +4425,7 @@ function videoLabels(n) {
 function syncVideoPanel() { // shows the panel for the layer being edited, if that layer is a video
   const S = (mode === 'cycle') ? videoSrcs[activeLayerIdx] : null;
   if (S !== videoSrc) { videoLiveStop(false); videoSrc = S; if (S) { videoTime.value = S.timeVal; videoStep.value = S.stepIdx; } }
-  videoPanel.style.display = videoSrc ? 'block' : 'none';
+  videoPanel.style.display = videoSrc ? 'contents' : 'none';
   videoTime.classList.toggle('rail', !!videoSrc); // the red rail, like the shader time slider
   if (videoSrc) { videoNameEl.textContent = VIDEO_LAYER_NAMES[videoSrc.idx]; videoLabels(); }
   placePlayBtn();
@@ -4485,7 +4489,7 @@ function detectVideoFps(v) { // plays a moment and times the frames; falls back 
   });
 }
 function videoNote(msg, hideAfter) { // visible feedback in the video panel itself (the send-status line is easy to miss)
-  videoPanel.style.display = 'block'; videoInfo.textContent = msg;
+  videoPanel.style.display = 'contents'; videoInfo.textContent = msg;
   if (hideAfter) setTimeout(() => { if (videoInfo.textContent === msg) syncVideoPanel(); }, hideAfter);
 }
 function videoReady(v, ms) { // resolves true once the video has a drawable frame; nudges iOS (which loads nothing until asked) with a muted play and a seek
@@ -6177,6 +6181,19 @@ document.fonts.ready.then(() => { if (naturalW) render(); });
   document.addEventListener('touchmove', e => { if (edge && e.target && previewWrap.contains(e.target)) e.stopImmediatePropagation(); }, { capture: true, passive: true });
   document.addEventListener('touchend', e => { if (edge && e.target && previewWrap.contains(e.target)) { e.stopImmediatePropagation(); } edge = false; }, { capture: true, passive: true });
   document.addEventListener('touchcancel', () => { edge = false; }, { capture: true, passive: true });
+})();
+
+
+// measures the pinned preview and button row so the rows beneath them know where to stick
+(function () {
+  const root = document.documentElement, pv = document.getElementById('previewWrap'), pr = document.getElementById('editPillRow');
+  function sync() {
+    root.style.setProperty('--pvH', (pv.offsetHeight || 0) + 'px');
+    root.style.setProperty('--pillH', (pr ? pr.offsetHeight : 0) + 'px');
+    try { root.style.setProperty('--pageBg', getComputedStyle(document.body).backgroundColor); } catch (e) {}
+  }
+  if (window.ResizeObserver) { const ro = new ResizeObserver(sync); ro.observe(pv); if (pr) ro.observe(pr); }
+  window.addEventListener('resize', sync); window.addEventListener('load', sync); sync();
 })();
 
 // ---------- generous slider grab zone ----------

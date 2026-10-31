@@ -105,9 +105,6 @@ RTC_DATA_ATTR uint32_t rtcCoulGlitches = 0;                 // glitches since po
 uint32_t coulLastTickMs = 0;                                // millis() of the last logged tick, for the gap between ticks
 // what else the lamp was doing when a tick came, for the tick log
 volatile uint32_t actSyncStart = 0, actSyncEnd = 0, actPanelStart = 0, actPanelEnd = 0;
-// VIO health (see coulombCheckVio): on this clone SHDN is tied to VIO, so VIO gone = chip shut down
-bool coulVioOk = true;
-uint32_t coulVioDrops = 0, coulVioLostAt = 0, coulVioBackAt = 0;
 RTC_DATA_ATTR uint32_t rtcCoulIn = 0, rtcCoulOut = 0;       // ticks into / out of the pack since power-on
 portMUX_TYPE coulMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -138,8 +135,7 @@ void coulombBegin(bool wokeFromSleep) {
     rtc_gpio_init(p);
     rtc_gpio_set_direction(p, RTC_GPIO_MODE_INPUT_ONLY);
   }
-  // INT gets a pull-DOWN: the board's 3.3k to VIO still wins (~3.1 V), but with VIO missing INT
-  // sits low (stuck, shown as VIO LOST). A pull-up here fed VIO backwards through that 3.3k and
+  // INT gets a pull-DOWN: the board's 3.3k to VIO still wins (~3.1 V). A pull-up here fed VIO backwards through that 3.3k and
   // half-ran the chip without its VIO wire: every tick or POL low then dragged SHDN down and
   // reset it (bursts, phantom "out" ticks, lost charge). GPIO34 (POL) has no internal pulls
   rtc_gpio_pullup_dis(COUL_INT);
@@ -266,29 +262,6 @@ uint32_t readTegMv();
 
 bool coulombStuck() { return (RTC_SLOW_MEM[COUL_SLOT_STUCK] & 0xFFFF) >= COUL_STUCK_POLLS; }
 
-// Is the LTC board's VIO at 3.3 V? INT has the ESP's pull-down and the board's 3.3k pull-up to
-// VIO, so with VIO gone INT stays low even though the ULP keeps clearing it: the stuck flag.
-// (A stuck INT can also be CLR not reaching the chip; LTC TEST tells them apart.) On this clone
-// SHDN is tied to VIO, so VIO gone = the chip is shut down and counts nothing, and the ULP
-// counts the drop itself as one tick (POL, also pulled up by VIO, reads low: an "out").
-// Checked every 100 ms while the monitor page is connected
-void coulombCheckVio() {
-  bool ok = !coulombStuck();
-  if (ok == coulVioOk) return;
-  coulVioOk = ok;
-  uint32_t now = millis();
-  if (!ok) {
-    coulVioDrops++;
-    coulVioLostAt = now;
-    Serial.printf("LTC VIO LOST (or CLR not reaching the chip): INT held low | the chip is shut down and counts nothing; the tick logged just before this was the drop, not charge | drops %u | TEG %u mV | up %u s\n",
-                  (unsigned)coulVioDrops, (unsigned)readTegMv(), (unsigned)(now / 1000));
-  } else {
-    coulVioBackAt = now;
-    Serial.printf("LTC VIO back after %.1f s: the chip restarts, its partly counted charge is lost | drops %u | up %u s\n",
-                  (now - coulVioLostAt) / 1000.0f, (unsigned)coulVioDrops, (unsigned)(now / 1000));
-  }
-}
-
 // "sync running 4 s" / "last sync 312 s ago" and the same for the panel, for the tick log
 String coulActivity(const char* what, uint32_t start, uint32_t end) {
   uint32_t now = millis();
@@ -326,8 +299,6 @@ void coulombPoll() {
                (WiFi.getMode() == WIFI_OFF ? "off" : WiFi.status() == WL_CONNECTED ? "connected" : "on, not connected") +
                " | " + coulActivity("sync", actSyncStart, actSyncEnd) + " | " + coulActivity("panel", actPanelStart, actPanelEnd) +
                " | INT " + rtc_gpio_get_level(COUL_INT) + " POL " + rtc_gpio_get_level(COUL_POL) +
-               " | VIO " + (coulVioOk ? "ok" : "LOST") + ", drops " + coulVioDrops +
-               (coulVioBackAt && now - coulVioBackAt < 5000 ? String(", came back ") + String((now - coulVioBackAt) / 1000.0f, 1) + " s ago: power-up tick?" : String("")) +
                " | up " + now / 1000 + " s | ULP polls " + (RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF);
   if (dIn || dOut) {
     String gap = coulLastTickMs ? String((now - coulLastTickMs) / 1000.0f, 1) + " s" : String("first");
@@ -1741,7 +1712,7 @@ void tegTask(void*) {
   analogSetPinAttenuation(TEG_PIN, ADC_11db);
   analogSetPinAttenuation(BAT_PIN, ADC_11db);
   String cmd;
-  uint32_t lastSample = 0, lastBat = 0, lastCoul = 0, lastVio = 0;  // lastCoul, lastVio: [PROTOTYPE-ONLY: LTC4150]
+  uint32_t lastSample = 0, lastBat = 0, lastCoul = 0;  // lastCoul: [PROTOTYPE-ONLY: LTC4150]
   for (;;) {
     while (Serial.available()) {
       char c = Serial.read();
@@ -1775,15 +1746,13 @@ void tegTask(void*) {
         lastCoul = millis();
         coulombPoll();
         // then the raw INT and POL levels and the stuck flag, for wiring checks: "...,<INT>,<POL>,<stuck>",
-        // then glitches (not counted) and the ULP's 16-bit poll counter: "...,<glitches>,<polls>",
-        // then VIO health: "...,<VIO ok 1/0>,<VIO drops>"
-        Serial.printf("COUL,%u,%u,%.6f,%d,%d,%d,%u,%u,%d,%u\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK,
+        // then glitches (not counted) and the ULP's 16-bit poll counter: "...,<glitches>,<polls>"
+        Serial.printf("COUL,%u,%u,%.6f,%d,%d,%d,%u,%u\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK,
                       rtc_gpio_get_level(COUL_INT), rtc_gpio_get_level(COUL_POL), coulombStuck() ? 1 : 0,
-                      (unsigned)rtcCoulGlitches, (unsigned)(RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF), coulVioOk ? 1 : 0, (unsigned)coulVioDrops);
+                      (unsigned)rtcCoulGlitches, (unsigned)(RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF));
       }
     }
     if (tegMonitoring()) coulombPoll();  // [PROTOTYPE-ONLY: LTC4150] every 20 ms, so each tick's log line has a close time
-    if (tegMonitoring() && millis() - lastVio >= 100) { lastVio = millis(); coulombCheckVio(); }  // [PROTOTYPE-ONLY: LTC4150]
     delay(20);
   }
 }

@@ -1011,6 +1011,14 @@ html, body { background-color: #fdd48d; background-image: none; }
   height: 2px; border-radius: 1px;
 }
 
+/* step knobs: a red rectangle inside the box, sized in proportion to the step */
+#videoStep::-webkit-slider-thumb, #shaderBakeStep::-webkit-slider-thumb {
+  background-image: linear-gradient(rgba(255, 36, 24, 0.95), rgba(255, 36, 24, 0.95)) !important;
+  background-repeat: no-repeat !important; background-position: center !important;
+  background-size: calc(var(--sp, 0.1) * 100%) calc(var(--sp, 0.1) * 100%) !important;
+  background-clip: content-box !important;
+}
+
 </style>
 </head>
 <body>
@@ -5734,16 +5742,16 @@ function cycleGifURL(stacks) { // the cycle as an animated GIF, in the preview's
   return 'data:image/gif;base64,' + btoa(bin);
 }
 function framesGalleryHTML(urls, standalone, gifUrl) {
-  const gifFig = gifUrl ? `<figure><a href="${gifUrl}" download="lamp-cycle.gif"><img src="${gifUrl}" alt="animated gif"></a><figcaption>animated gif · press and hold to save it, or tap to download</figcaption></figure>` : '';
-  const figs = gifFig + urls.map((u, i) => {
+  const mono = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+  const gifSec = gifUrl ? `<div class="lab">GIF</div><figure><a href="${gifUrl}" download="lamp-cycle.gif"><img src="${gifUrl}" alt="animated gif"></a></figure><p>press and hold to save, or tap to download</p><hr><div class="lab">Individual Frames</div>` : '';
+  const figs = urls.map((u, i) => {
     const n = String(i + 1).padStart(2, '0');
-    return `<figure><a href="${u}" download="lamp-frame-${n}.png"><img src="${u}" alt="frame ${i + 1}"></a><figcaption>frame ${i + 1} of ${urls.length}</figcaption></figure>`;
+    return `<figure><a href="${u}" download="lamp-frame-${n}.png"><img src="${u}" alt="frame ${i + 1}"></a></figure>`;
   }).join('');
   const css = 'body{margin:0;background:#14100d;color:#bfb8aa;font:13px -apple-system,system-ui,sans-serif;padding:18px 16px 60px}' +
-    'h1{font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;margin:0 0 4px}p{margin:0 0 18px;color:#8a8478;line-height:1.4}' +
-    'figure{margin:0 0 18px}img{display:block;width:100%;max-width:800px;image-rendering:pixelated;background:#fff}' +
-    'figcaption{margin-top:6px;font-size:11px;color:#8a8478}a{color:inherit}';
-  const body = `<h1>lamp frames · ${urls.length}</h1><p>${gifUrl ? 'the gif first, then each frame on its own' : 'press and hold an image to save it, or tap to download'} · ${animIntervalSec}s per frame</p>${figs}`;
+    `.lab{font:12px ${mono};letter-spacing:.06em;margin:0 0 8px}p{margin:0 0 18px;font:11px ${mono};color:#8a8478;line-height:1.4}hr{border:0;border-top:1px solid rgba(191,184,170,.22);margin:6px 0 18px}` +
+    'figure{margin:0 0 18px}img{display:block;width:100%;max-width:800px;image-rendering:pixelated;background:#fff}a{color:inherit}';
+  const body = (gifUrl ? '' : '<p>press and hold to save, or tap to download</p>') + gifSec + figs;
   return standalone
     ? `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>lamp frames</title><style>${css}</style>${body}`
     : { css, body };
@@ -6228,13 +6236,14 @@ document.fonts.ready.then(() => { if (naturalW) render(); });
   const knobOn = 'rgba(105, 206, 241, 0.55)', knobOff = '#6b767f';
   function calc(el) {
     const min = +el.min || 0, max = +el.max || 100, v = +el.value, pct = max > min ? (v - min) / (max - min) : 0, thumb = 15;
-    return { px: (thumb / 2 + (el.clientWidth - thumb) * pct).toFixed(1) + 'px', r: pct > 0 ? (pct * 70).toFixed(1) + '%' : '-8%', c: v > min ? knobOn : knobOff };
+    return { sp: (max > min ? 0.1 + 0.65 * (v - min) / (max - min) : 0.1).toFixed(3), px: (thumb / 2 + (el.clientWidth - thumb) * pct).toFixed(1) + 'px', r: pct > 0 ? (pct * 70).toFixed(1) + '%' : '-8%', c: v > min ? knobOn : knobOff };
   }
   function apply(el, n) {
     const o = el.__fill || (el.__fill = {});
     if (o.px !== n.px) { o.px = n.px; el.style.setProperty('--fillpx', n.px); }
     if (o.r !== n.r) { o.r = n.r; el.style.setProperty('--knobr', n.r); }
     if (o.c !== n.c) { o.c = n.c; el.style.setProperty('--knobc', n.c); }
+    if ((el.id === 'videoStep' || el.id === 'shaderBakeStep') && o.sp !== n.sp) { o.sp = n.sp; el.style.setProperty('--sp', n.sp); } // the step knobs' red centre grows with the step
   }
   function all() {
     if (document.hidden) return;

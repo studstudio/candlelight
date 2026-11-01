@@ -125,6 +125,12 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - **User doubts these are real ticks, and the trace agrees:** TEG loaded 1.2-1.58 V from t ~240 s to ~780 s (9 min, strongest harvest, legs 1-2 at ~1-2 mV) gave **zero ticks**, where ~30 were expected. The pairs only came once the harvest was falling (TEG 1.06 V and dropping). So they follow the current *changing* (falling toward zero, maybe flipping direction around the BQ's bursts), not the charge passed. A steady charge current produces no counts.
 - **INT-stuck banner showed afterwards; LTC test (13:20) passed** (INT high, CLR works, no pulses). The banner stayed up until tapped, so it may have been left over from earlier. Likely the 2.7 s pair: by the ULP's logic a tick pair is INT going low (tick 1), staying low through several CLR pulses (stuck >= 3 polls = banner), briefly high, then low again (tick 2). If so, each "pair" is one long INT-low episode that CLR can't release, during falling current. Page now clears the banner on release and logs the episode's time and length to the console (891eb9b).
 
+### 2026-11-01 edge mode (resume here)
+
+- **Blind spot found in my firmware:** the ULP only looked at INT every 100 ms. If the chip's pulses are short (INT released by itself instead of staying latched until our CLR), a 100 ms poll misses nearly all of them. That fits the data: a steady charge gives 0 ticks; the rare "ghost" pairs are the few times INT happened to stay low long enough to be caught. The 1-minute code-free meter test can't rule this out either, because a meter doesn't show microsecond dips.
+- **Built (uncommitted at writing): edge mode.** While the monitor page is connected, the ULP is paused and INT goes to a hardware GPIO interrupt. That latches an edge however short it is, reads POL, and the TEG task clears with CLR (1 ms). Back to the ULP when the page lets go and before sleep. Every tick line now says how long INT stayed low and what released it: "released by our clear" (latched, normal), "BY ITSELF before our clear" (with its width), or "SHORT pulse" (< ~5 us).
+- **Test:** flash/OTA, open the monitor page, light the candle, leave it ~5 min. Ticks every ~15-30 s = fixed (the chip was always sending; the poller missed them). Read the tick lines for the release type.
+
 ### 2026-11-01 late bookmark (resume here)
 
 **Independent audit (fresh agent, 2026-11-01, from the datasheet rev C + SparkFun's LTC4150_BOB.sch v10):**

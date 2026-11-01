@@ -17,6 +17,7 @@
 #include <esp32/ulp.h>            // [PROTOTYPE-ONLY: LTC4150] the three ULP headers are only for the coulomb counter
 #include <soc/rtc_io_reg.h>
 #include <soc/rtc_cntl_reg.h>
+#include <soc/gpio_reg.h>       // [PROTOTYPE-ONLY: LTC4150] edge mode reads INT/POL straight from the GPIO registers
 #include <qrcode.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include "epd_png.h"
@@ -120,6 +121,8 @@ bool drainOn = false;                 // set by every sync header; deep sleep re
 uint32_t drainHeardAt = 0;            // millis() of the last header that said so
 RTC_DATA_ATTR bool rtcDrainShown = false;  // the screen shows the "Draining" badge
 
+void coulombStartUlp();
+
 void coulombBegin(bool wokeFromSleep) {
   if (rtcCoulMagic != 0xC0170150 || esp_reset_reason() == ESP_RST_POWERON) {
     RTC_SLOW_MEM[COUL_SLOT_A] = 0;
@@ -130,7 +133,11 @@ void coulombBegin(bool wokeFromSleep) {
     rtcCoulMagic = 0xC0170150;
   }
   if (wokeFromSleep) return;  // the ULP has been running all along; reloading it could drop a pulse
+  coulombStartUlp();
+}
 
+// (re)takes the pins for the RTC side and loads + starts the ULP poller; the counters in RTC memory stay
+void coulombStartUlp() {
   for (gpio_num_t p : { COUL_INT, COUL_POL }) {
     rtc_gpio_init(p);
     rtc_gpio_set_direction(p, RTC_GPIO_MODE_INPUT_ONLY);
@@ -196,9 +203,111 @@ void coulombBegin(bool wokeFromSleep) {
 
 extern volatile uint32_t tegLastHeartbeat;  // TEG monitor section, below
 
+// Edge mode [PROTOTYPE-ONLY: LTC4150]: while the monitor page holds the lamp awake, the
+// ULP is paused and INT goes to a hardware GPIO interrupt instead. The ULP only looks at
+// INT every 100 ms, so a pulse shorter than that (INT released by something other than our
+// CLR) is never seen; the GPIO peripheral latches an edge however short it is. Each tick's
+// log line gives how long INT stayed low and what released it, which tells whether the
+// chip's pulses are latched (released by our clear) or short (released by themselves).
+// Before sleep (or when the page lets go) the pins go back to the ULP.
+volatile uint32_t coulEdgeA = 0, coulEdgeB = 0;      // ticks by POL (high / low), like the ULP's slots
+volatile uint32_t coulEdgeShort = 0;                 // of those, pulses already over when the ISR looked (< ~5 us)
+volatile uint32_t coulLowSinceUs = 0;                // micros() INT went low; 0 = INT high
+volatile uint32_t coulLastWidthUs = 0;               // how long the last pulse held INT low
+volatile bool coulLastByClear = false;               // the last pulse ended because we pulsed CLR
+volatile bool coulClearing = false;                  // CLR is low right now
+volatile bool coulClearPending = false;
+uint32_t coulSeenEdgeA = 0, coulSeenEdgeB = 0, coulSeenEdgeShort = 0;
+uint32_t coulClearTries = 0;                         // clears in a row that didn't release INT
+bool coulEdgeOn = false;
+SemaphoreHandle_t coulModeLock = nullptr;
+
+void IRAM_ATTR coulIsr() {
+  uint32_t now = micros();
+  // plain register reads: an ISR mustn't call into flash (LittleFS writes switch the flash cache off)
+  bool low = !((REG_READ(GPIO_IN_REG) >> COUL_INT) & 1);
+  bool pol = (REG_READ(GPIO_IN1_REG) >> (COUL_POL - 32)) & 1;
+  if (low) {
+    if (!coulLowSinceUs) {  // a new pulse
+      coulLowSinceUs = now | 1;
+      if (pol) coulEdgeA++; else coulEdgeB++;
+      coulClearPending = true;
+    }
+  } else if (coulLowSinceUs) {  // released
+    coulLastWidthUs = now - coulLowSinceUs;
+    coulLastByClear = coulClearing;
+    coulLowSinceUs = 0;
+  } else {  // the edge latched but INT is high again already: a pulse shorter than the ISR's latency
+    if (pol) coulEdgeA++; else coulEdgeB++;
+    coulEdgeShort++;
+    coulLastWidthUs = 0;
+    coulLastByClear = false;
+  }
+}
+
+void coulombPoll();
+
+int coulPin(gpio_num_t p) { return coulEdgeOn ? gpio_get_level(p) : rtc_gpio_get_level(p); }
+
+void coulombEdgeStart() {
+  if (!coulModeLock) coulModeLock = xSemaphoreCreateMutex();
+  xSemaphoreTake(coulModeLock, portMAX_DELAY);
+  if (!coulEdgeOn) {
+    CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // pause the ULP
+    delay(5);                                                                // let a run in progress finish
+    coulombPoll();                                                           // take what it counted
+    for (gpio_num_t p : { COUL_INT, COUL_POL, COUL_CLR }) rtc_gpio_deinit(p);
+    pinMode(COUL_CLR, OUTPUT);
+    digitalWrite(COUL_CLR, HIGH);
+    pinMode(COUL_INT, INPUT_PULLDOWN);  // same pull-down as the ULP side (the board's pull-up wins)
+    pinMode(COUL_POL, INPUT);
+    coulLowSinceUs = 0;
+    coulClearPending = false;
+    coulClearTries = 0;
+    coulEdgeOn = true;
+    attachInterrupt(COUL_INT, coulIsr, CHANGE);
+    if (!digitalRead(COUL_INT)) coulIsr();  // already latched: count it once and clear it
+    Serial.println("LTC: edge mode on (hardware interrupt on INT while the monitor is connected; catches pulses of any length)");
+  }
+  xSemaphoreGive(coulModeLock);
+}
+
+void coulombEdgeStop() {
+  if (!coulModeLock) return;
+  xSemaphoreTake(coulModeLock, portMAX_DELAY);
+  if (coulEdgeOn) {
+    detachInterrupt(COUL_INT);
+    coulombPoll();
+    coulEdgeOn = false;
+    coulombStartUlp();  // re-takes the pins for the RTC side and restarts the poller
+    Serial.println("LTC: edge mode off, back to the ULP poller");
+  }
+  xSemaphoreGive(coulModeLock);
+}
+
+// edge mode's CLR pulse, from the TEG task (every 20 ms): 1 ms low, like the ULP's
+void coulombEdgeService() {
+  if (!coulEdgeOn) return;
+  bool low = !gpio_get_level(COUL_INT);
+  if (!coulClearPending && !low) { coulClearTries = 0; return; }
+  coulClearPending = false;
+  coulClearing = true;
+  digitalWrite(COUL_CLR, LOW);
+  delay(1);
+  digitalWrite(COUL_CLR, HIGH);
+  delayMicroseconds(50);
+  coulClearing = false;
+  if (!gpio_get_level(COUL_INT)) {
+    if (++coulClearTries == 3) Serial.println("LTC: INT still low after 3 clears (edge mode): CLR isn't releasing it");
+  } else {
+    coulClearTries = 0;
+  }
+}
+
 // "LTC TEST" from the monitor page: pauses the ULP, drives the pins by hand and
 // prints what INT, POL and CLR do, with a verdict, to find why INT sticks low
 void coulombTest() {
+  coulombEdgeStop();  // the test drives the pins through the RTC side; the TEG task turns edge mode back on after
   CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // pause the ULP
   delay(5);
   auto rd = [](gpio_num_t p) { return rtc_gpio_get_level(p); };
@@ -260,7 +369,7 @@ void coulombTest() {
 // INT has read low for several polls in a row: the LTC4150 isn't being cleared
 uint32_t readTegMv();
 
-bool coulombStuck() { return (RTC_SLOW_MEM[COUL_SLOT_STUCK] & 0xFFFF) >= COUL_STUCK_POLLS; }
+bool coulombStuck() { return coulEdgeOn ? coulClearTries >= 3 : (RTC_SLOW_MEM[COUL_SLOT_STUCK] & 0xFFFF) >= COUL_STUCK_POLLS; }
 
 // "sync running 4 s" / "last sync 312 s ago" and the same for the panel, for the tick log
 String coulActivity(const char* what, uint32_t start, uint32_t end) {
@@ -280,6 +389,10 @@ void coulombPoll() {
   uint16_t da = a - rtcCoulSeenA, db = b - rtcCoulSeenB;  // 16-bit wrap is fine: never 65 k pulses between reads
   uint16_t dg = g - rtcCoulSeenGlitch;
   rtcCoulSeenA = a; rtcCoulSeenB = b; rtcCoulSeenGlitch = g;
+  uint32_t ea = coulEdgeA, eb = coulEdgeB, es = coulEdgeShort;  // edge mode's ticks (0 while the ULP has the pins)
+  da += ea - coulSeenEdgeA; db += eb - coulSeenEdgeB;
+  uint32_t dShort = es - coulSeenEdgeShort;
+  coulSeenEdgeA = ea; coulSeenEdgeB = eb; coulSeenEdgeShort = es;
   uint16_t dIn = COUL_POL_HIGH_IS_CHARGE ? da : db, dOut = COUL_POL_HIGH_IS_CHARGE ? db : da;
   rtcCoulIn += dIn;
   rtcCoulOut += dOut;
@@ -298,8 +411,18 @@ void coulombPoll() {
   String ctx = String("TEG ") + readTegMv() + " mV | WiFi " +
                (WiFi.getMode() == WIFI_OFF ? "off" : WiFi.status() == WL_CONNECTED ? "connected" : "on, not connected") +
                " | " + coulActivity("sync", actSyncStart, actSyncEnd) + " | " + coulActivity("panel", actPanelStart, actPanelEnd) +
-               " | INT " + rtc_gpio_get_level(COUL_INT) + " POL " + rtc_gpio_get_level(COUL_POL) +
-               " | up " + now / 1000 + " s | ULP polls " + (RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF);
+               " | INT " + coulPin(COUL_INT) + " POL " + coulPin(COUL_POL) +
+               " | up " + now / 1000 + " s | " +
+               (coulEdgeOn ? String("edge mode") : String("ULP polls ") + (RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF));
+  if (coulEdgeOn && (dIn || dOut)) {
+    // how the pulse ended: tells latched pulses (our clear releases them) from short ones (released by themselves)
+    String w;
+    if (dShort) w = String("SHORT pulse x") + dShort + ": INT was back high before the interrupt could look (< ~5 us), released by itself";
+    else if (coulLowSinceUs) w = "INT still low, clear coming";
+    else w = String("INT held low ") + String(coulLastWidthUs / 1000.0f, 2) + " ms, released " +
+             (coulLastByClear ? "by our clear (latched pulse, normal)" : "BY ITSELF before our clear");
+    ctx = w + " | " + ctx;
+  }
   if (dIn || dOut) {
     String gap = coulLastTickMs ? String((now - coulLastTickMs) / 1000.0f, 1) + " s" : String("first");
     // the TEG gives tens of mA at most, a tick every ~15 s or slower; under 3 s needs > ~0.3 A
@@ -1748,11 +1871,13 @@ void tegTask(void*) {
         // then the raw INT and POL levels and the stuck flag, for wiring checks: "...,<INT>,<POL>,<stuck>",
         // then glitches (not counted) and the ULP's 16-bit poll counter: "...,<glitches>,<polls>"
         Serial.printf("COUL,%u,%u,%.6f,%d,%d,%d,%u,%u\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK,
-                      rtc_gpio_get_level(COUL_INT), rtc_gpio_get_level(COUL_POL), coulombStuck() ? 1 : 0,
+                      coulPin(COUL_INT), coulPin(COUL_POL), coulombStuck() ? 1 : 0,
                       (unsigned)rtcCoulGlitches, (unsigned)(RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF));
       }
     }
-    if (tegMonitoring()) coulombPoll();  // [PROTOTYPE-ONLY: LTC4150] every 20 ms, so each tick's log line has a close time
+    // [PROTOTYPE-ONLY: LTC4150] edge mode while the page is connected, the ULP otherwise; poll every 20 ms so each tick's log line has a close time
+    if (tegMonitoring()) { coulombEdgeStart(); coulombEdgeService(); coulombPoll(); }
+    else coulombEdgeStop();
     delay(20);
   }
 }
@@ -2403,6 +2528,7 @@ void idleWindow() {
 
   if (displayReady) display.hibernate();
   WiFi.mode(WIFI_OFF);
+  coulombEdgeStop();  // [PROTOTYPE-ONLY: LTC4150] the ULP must have the pins in sleep
   esp_sleep_enable_ext0_wakeup((gpio_num_t)NEXT_BUTTON, 0);
   rtc_gpio_pullup_en((gpio_num_t)NEXT_BUTTON);
   rtc_gpio_pulldown_dis((gpio_num_t)NEXT_BUTTON);

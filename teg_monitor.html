@@ -911,8 +911,8 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
           if (line && !READING.test(line)) conLog(line);
-          // [PROTOTYPE-ONLY: LTC4150] "LTC tick: ..." / "LTC glitch: ..." lines go to the worker too, for debugging from afar
-          if (/^LTC (tick|glitch)/.test(line)) { ltcLog.push({ at: Date.now(), text: line.slice(0, 400) }); if (ltcLog.length > 300) ltcLog.shift(); }
+          // [PROTOTYPE-ONLY: LTC4150] every "LTC ..." line (ticks, glitches, SHDN watch, test, mode) goes to the worker too, for debugging from afar
+          if (/^LTC/.test(line)) { ltcLog.push({ at: Date.now(), text: line.slice(0, 400) }); if (ltcLog.length > 300) ltcLog.shift(); }
           if (/^LTC tick:.*TOO FAST/.test(line)) fastTicks++;
           // only "TEG,<mV>" lines; the lamp's other log lines are ignored
           const m = line.match(/TEG,(\d+(?:\.\d+)?)/);

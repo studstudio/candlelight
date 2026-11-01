@@ -88,6 +88,7 @@ const char* TMP_PATH = "/tmp.png";
 const gpio_num_t COUL_INT = GPIO_NUM_26;    // D3
 const gpio_num_t COUL_POL = GPIO_NUM_34;    // A2, input only
 const gpio_num_t COUL_CLR = GPIO_NUM_15;    // A4
+const gpio_num_t COUL_SHDN_WATCH = GPIO_NUM_21;  // SDA: listens to the SHDN row (a jumper from it), edge mode only; never driven
 const uint32_t COUL_POLL_US = 100000;       // the LTC4150 pulses at most ~1.6 times a second, so 10 polls a second catch every one
 const float COUL_MAH_PER_TICK = 0.1707f;    // 1 / (32.55 Hz/V * 0.05 ohm) = 0.6144 C. Other sense resistor: 0.008533 / ohms
 const bool COUL_POL_HIGH_IS_CHARGE = true;  // POL high = current OUT -> IN, into the pack on IN (SparkFun's convention); flip if they come out swapped
@@ -218,6 +219,12 @@ volatile bool coulLastByClear = false;               // the last pulse ended bec
 volatile bool coulClearing = false;                  // CLR is low right now
 volatile bool coulClearPending = false;
 uint32_t coulSeenEdgeA = 0, coulSeenEdgeB = 0, coulSeenEdgeShort = 0;
+// SHDN watch: low on SHDN (or VDD < 2.5 V) resets the chip's internal counter to 0. INT only fires
+// when that counter passes 1024 steps (~15-30 s at 1-2 mV), so drops more often than that keep a
+// good chip from ever ticking, and a meter can't see them. Same edge trick as INT
+volatile uint32_t shdnDrops = 0, shdnShortDrops = 0;  // drops; of those, over before the ISR could look (< ~5 us)
+volatile uint32_t shdnLowSinceUs = 0, shdnLastWidthUs = 0, shdnLongestUs = 0;
+uint32_t shdnSeenDrops = 0, shdnSeenShort = 0, shdnLastReport = 0, shdnLastDropMs = 0;
 uint32_t coulClearTries = 0;                         // clears in a row that didn't release INT
 bool coulEdgeOn = false;
 SemaphoreHandle_t coulModeLock = nullptr;
@@ -246,6 +253,21 @@ void IRAM_ATTR coulIsr() {
 }
 
 void coulombPoll();
+uint32_t readTegMv();
+
+void IRAM_ATTR shdnIsr() {
+  uint32_t now = micros();
+  bool low = !((REG_READ(GPIO_IN_REG) >> COUL_SHDN_WATCH) & 1);
+  if (low) {
+    if (!shdnLowSinceUs) { shdnLowSinceUs = now | 1; shdnDrops++; }
+  } else if (shdnLowSinceUs) {
+    shdnLastWidthUs = now - shdnLowSinceUs;
+    if (shdnLastWidthUs > shdnLongestUs) shdnLongestUs = shdnLastWidthUs;
+    shdnLowSinceUs = 0;
+  } else {  // dropped and came back before the ISR looked
+    shdnDrops++; shdnShortDrops++; shdnLastWidthUs = 0;
+  }
+}
 
 int coulPin(gpio_num_t p) { return coulEdgeOn ? gpio_get_level(p) : rtc_gpio_get_level(p); }
 
@@ -268,6 +290,12 @@ void coulombEdgeStart() {
     attachInterrupt(COUL_INT, coulIsr, CHANGE);
     if (!digitalRead(COUL_INT)) coulIsr();  // already latched: count it once and clear it
     Serial.println("LTC: edge mode on (hardware interrupt on INT while the monitor is connected; catches pulses of any length)");
+    pinMode(COUL_SHDN_WATCH, INPUT_PULLDOWN);  // no jumper in = reads low, so a missing wire can't pass for a healthy SHDN
+    shdnLowSinceUs = 0;
+    attachInterrupt(COUL_SHDN_WATCH, shdnIsr, CHANGE);
+    shdnLastReport = millis();
+    Serial.printf("LTC SHDN watch on (SDA/GPIO21): SHDN reads %s\n", digitalRead(COUL_SHDN_WATCH)
+                  ? "HIGH (chip enabled)" : "LOW: the chip is shut down, or the SDA jumper isn't in the SHDN row");
   }
   xSemaphoreGive(coulModeLock);
 }
@@ -277,6 +305,7 @@ void coulombEdgeStop() {
   xSemaphoreTake(coulModeLock, portMAX_DELAY);
   if (coulEdgeOn) {
     detachInterrupt(COUL_INT);
+    detachInterrupt(COUL_SHDN_WATCH);
     coulombPoll();
     coulEdgeOn = false;
     coulombStartUlp();  // re-takes the pins for the RTC side and restarts the poller
@@ -288,6 +317,21 @@ void coulombEdgeStop() {
 // edge mode's CLR pulse, from the TEG task (every 20 ms): 1 ms low, like the ULP's
 void coulombEdgeService() {
   if (!coulEdgeOn) return;
+  // SHDN watch report: every batch of drops at once, plus an all-clear once a minute
+  uint32_t d = shdnDrops, ds = shdnShortDrops, now = millis();
+  if (d != shdnSeenDrops) {
+    uint32_t n = d - shdnSeenDrops, ns = ds - shdnSeenShort;
+    String gap = shdnLastDropMs ? String((now - shdnLastDropMs) / 1000.0f, 1) + " s since the last drop" : String("first drop");
+    Serial.printf("LTC SHDN DROPPED x%u (%u shorter than ~5 us) | last one %s | longest %.1f us | %s | SHDN now %s | INT %d | TEG %u mV | up %u s | each drop resets the chip's counter\n",
+                  (unsigned)n, (unsigned)ns, shdnLowSinceUs ? "STILL LOW" : (String((float)shdnLastWidthUs, 1) + " us").c_str(),
+                  (float)shdnLongestUs, gap.c_str(), gpio_get_level(COUL_SHDN_WATCH) ? "high" : "LOW",
+                  gpio_get_level(COUL_INT), (unsigned)readTegMv(), (unsigned)(now / 1000));
+    shdnSeenDrops = d; shdnSeenShort = ds; shdnLastDropMs = now; shdnLastReport = now;
+  } else if (now - shdnLastReport >= 60000) {
+    shdnLastReport = now;
+    Serial.printf("LTC SHDN watch: no drops in the last 60 s, SHDN %s (%u drops since the watch started)\n",
+                  gpio_get_level(COUL_SHDN_WATCH) ? "high" : "LOW (shut down, or the jumper isn't in)", (unsigned)d);
+  }
   bool low = !gpio_get_level(COUL_INT);
   if (!coulClearPending && !low) { coulClearTries = 0; return; }
   coulClearPending = false;

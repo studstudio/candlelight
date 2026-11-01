@@ -228,7 +228,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     <div>
       <div class="label">reports · every minute while draining</div>
       <div class="log" id="dLog"><span>no reports yet</span></div>
-      <p class="note">The lamp stays awake with WiFi on (~100 mA) and reports its LTC4150 count with a sync every minute (plus its LTC log lines: POL, SHDN, ticks, readable from the relay); the worker adds up what left the pack (out − in) and switches drain off at the target, then the lamp sleeps as usual. Wiring: pack + → LTC IN, LTC OUT row → BQ BAT and FireBeetle <b>VCC</b> (not its BAT/JST socket), GND common, <b>USB unplugged</b> (on USB nothing drains). The lamp picks up a start at its next scheduled sync (up to 10 min while it sleeps), or at once with a 5 s NEXT hold; "Draining" shows top-left while it runs. It stops by itself after an hour without reaching the worker. Afterwards let the pack rest 10 min before reading its voltage.</p>
+      <p class="note">The lamp stays awake with WiFi on (~100 mA) and reports its LTC4150 count with a sync every minute (and its LTC log lines, POL, SHDN and ticks, to the relay every 5 s); the worker adds up what left the pack (out − in) and switches drain off at the target, then the lamp sleeps as usual. Wiring: pack + → LTC IN, LTC OUT row → BQ BAT and FireBeetle <b>VCC</b> (not its BAT/JST socket), GND common, <b>USB unplugged</b> (on USB nothing drains). The lamp picks up a start at its next scheduled sync (up to 10 min while it sleeps), or at once with a 5 s NEXT hold; "Draining" shows top-left while it runs. It stops by itself after an hour without reaching the worker. Afterwards let the pack rest 10 min before reading its voltage.</p>
     </div>
   </section>
 

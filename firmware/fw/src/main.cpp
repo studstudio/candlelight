@@ -117,6 +117,7 @@ portMUX_TYPE coulMux = portMUX_INITIALIZER_UNLOCKED;
 // DRAIN_REPORT_S, which reports its LTC4150 totals. The worker adds up what left the
 // pack and turns drain off at the target. A "Draining" badge sits top-left meanwhile
 const uint32_t DRAIN_REPORT_S = 60;   // a sync (status report) this often while draining
+const uint32_t DRAIN_LTC_POST_MS = 5000;  // [PROTOTYPE-ONLY: LTC4150] the LTC log lines go to the TEG relay this often while draining
 const uint32_t DRAIN_LOST_S = 3600;   // no word from the worker for this long: stop draining and sleep as usual
 bool drainOn = false;                 // set by every sync header; deep sleep resets it
 uint32_t drainHeardAt = 0;            // millis() of the last header that said so
@@ -2561,18 +2562,24 @@ void drainPostLtcLog() {
   JsonObject c = doc["coulomb"].to<JsonObject>();
   c["in"] = rtcCoulIn; c["out"] = rtcCoulOut; c["baseIn"] = 0; c["baseOut"] = 0; c["mahPerTick"] = COUL_MAH_PER_TICK;
   String body; serializeJson(doc, body);
-  ResumableTLS client;
-  if (!connectWorker(client, "LTC log")) return;
+  // one connection kept open between posts (every DRAIN_LTC_POST_MS); a fresh one only when it dropped
+  static ResumableTLS* client = nullptr;
+  if (!client) client = new ResumableTLS;
+  if (!client->connected()) {
+    client->stop();
+    if (!connectWorker(*client, "LTC log")) return;
+  }
   long len;
-  int code = rawRequest(client, "POST", String("/teg/") + LAMP_ID, body, len);
-  Serial.printf("Drain mode: LTC log posted (%u lines), HTTP %d\n", (unsigned)lg.size(), code);
+  int code = rawRequest(*client, "POST", String("/teg/") + LAMP_ID, body, len, 4000);
+  if (len > 0) { uint8_t junk[64]; long left = len; uint32_t t0 = millis();  // read the reply body so the next request starts clean
+    while (left > 0 && millis() - t0 < 2000) { int n = client->read(junk, min(left, (long)sizeof(junk))); if (n > 0) left -= n; else delay(1); } }
+  if (code != 200) { client->stop(); Serial.printf("Drain mode: LTC log post failed, HTTP %d\n", code); }
 }
 
 // [PROTOTYPE-ONLY: LTC4150] drain mode's report is a quiet sync
 void drainReport() {
   Serial.println("Drain mode: reporting to the worker");
   quietSync();
-  drainPostLtcLog();
 }
 
 
@@ -2582,7 +2589,7 @@ const uint32_t SEEN_SAVE_MS = 3000;  // the seen flags are written this long aft
 // can step through the images; a 2 s hold replays an animation (on a still it
 // toggles the info box), a 5 s hold syncs
 void idleWindow() {
-  uint32_t last = millis(), lastSync = millis();
+  uint32_t last = millis(), lastSync = millis(), lastLtcPost = 0;
   while (millis() - last < AWAKE_IDLE_MS || tegMonitoring() || drainOn) {  // the TEG monitor page and drain mode keep the lamp up
     if (drainOn) {  // [PROTOTYPE-ONLY: LTC4150]
       if (cycleOk) otaguard::markValid();
@@ -2593,6 +2600,9 @@ void idleWindow() {
         drainReport();
         last = lastSync = millis();
         installUpdateNow();  // a newer firmware the report found goes in now (reboots), as with the monitor page
+      } else if (millis() - lastLtcPost >= DRAIN_LTC_POST_MS) {
+        lastLtcPost = millis();
+        drainPostLtcLog();
       } else {
         drainKeepWiFi();
       }

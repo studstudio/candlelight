@@ -128,7 +128,7 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 ### 2026-11-01 drain + POL test (resume here)
 
 - **POL watch result (candle, 10 min, TEG up to 0.9-1.3 V):** POL "into pack" 100%, 0 flips; 0 ticks. SHDN: 8 sub-5 us drops, all at 15:18:42 (local) together with 35 INT bounce ticks before the candle was lit (a wire bumped?), none after. So no sloshing current; every datasheet condition for counting checks out from outside, still no ticks during steady charge. Relay "not coming through" was the laptop tab running the old page (hard refresh, Ctrl+Shift+R).
-- **User's call: drain test to see if POL switches** (to "out of pack"). USB is unplugged in drain, so: edge mode (INT/POL/SHDN interrupts) now also runs while drain mode is on; every `LTC ...` line goes into an 80-line ring that each drain report (now every 60 s, was 120) POSTs to the TEG relay as session `drain-test-lamp-1` (`at` = lamp uptime ms). Read with `curl .../teg/test-lamp-1`. No worker change.
+- **User's call: drain test to see if POL switches** (to "out of pack"). USB is unplugged in drain, so: edge mode (INT/POL/SHDN interrupts) now also runs while drain mode is on; every `LTC ...` line goes into an 80-line ring that is POSTed to the TEG relay every 5 s while draining (kept-open connection; the sync report runs every 60 s, was 120) as session `drain-test-lamp-1` (`at` = lamp uptime ms). Read with `curl .../teg/test-lamp-1`. No worker change.
 - **Expect:** ~100 mA out = ~5 mV = an "out" tick every ~6 s, POL "out of pack" ~100%.
 
 ### 2026-11-01 POL watch (resume here)

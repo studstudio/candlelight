@@ -210,7 +210,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         <label>pack mAh<input type="number" id="cap" step="50" value="2000"></label>
         <label>lit threshold mV<input type="number" id="lit" step="10" value="150"></label>
       </div>
-      <p class="note">Pack gauge: counts LTC4150 charge in and out from the last full. Full is marked by hand, or automatically when the candle is lit, charge was flowing, and then no charge pulse comes for 20 min (the BQ25504 has stopped at its limit). Charge is an estimate: V²/(4R) at the TEG's best point, times booster efficiency, over pack voltage. Break-even counts down what this session has already harvested against a day's use, at the current rate. Warning above 2.8 V (BQ25504 input limit 3 V).</p>
+      <p class="note">Pack gauge: counts LTC4150 charge in and out from the last full. Full is marked by hand, or automatically when the candle is lit, charge was flowing, and then no charge pulse comes for 20 min (the BQ25504 has stopped at its limit). Charge is an estimate: V·(Voc − V)/R from the loaded TEG voltage and the latest open-circuit sample (V²/R, the best point, when there's no recent sample), times booster efficiency, over pack voltage. Break-even counts down what this session has already harvested against a day's use, at the current rate. Warning above 2.8 V (BQ25504 input limit 3 V).</p>
     </div>
   </section>
 
@@ -277,9 +277,14 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     return m + ":" + (frac ? r.toFixed(1).padStart(4, "0") : String(Math.floor(r)).padStart(2, "0"));
   };
 
-  function chargeMa(mv) {
+  // mv is the TEG voltage loaded by the BQ25504, not the open-circuit one, so V²/(4R) would read ~4x low.
+  // The TEG is Voc behind R: the current is (Voc - V)/R, so the power it delivers is V·(Voc - V)/R.
+  // Voc comes from the BQ's own open-circuit samples (the orange dots) when one is recent (< 60 s);
+  // with none, assume the BQ holds it at its best point (V = Voc/2), so P = V²/R.
+  function chargeMa(mv, vocMv) {
     const v = mv / 1000, r = Math.max(0.1, num("rInt"));
-    const p = v * v / (4 * r) * (num("eff") / 100);
+    const vo = vocMv > mv ? vocMv / 1000 : 2 * v;
+    const p = Math.max(0, v * (vo - v)) / r * (num("eff") / 100);
     return p / Math.max(0.5, num("vPack")) * 1000;
   }
 
@@ -308,7 +313,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     if (prev) {
       const dt = t - prev.t;
       if (dt > 0 && dt < 30) {
-        mahTotal += chargeMa((mv + prev.mv) / 2) * dt / 3600;
+        mahTotal += chargeMa((mv + prev.mv) / 2, recentVoc(t)) * dt / 3600;
         if (mv >= num("lit")) burnSec += dt;
       }
     }
@@ -316,6 +321,8 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     checkFull(mv);
     render();
   }
+
+  const recentVoc = (t = now()) => voc && t - voc.t < 60 ? voc.mv : undefined;
 
   function slopePerMin() {
     const t = now();
@@ -334,7 +341,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     $("vocSub").textContent = voc
       ? `open circuit ${(voc.mv / 1000).toFixed(3)} V · ${Math.max(0, Math.round(now() - voc.t))} s ago · ${vocCount} spike${vocCount === 1 ? "" : "s"}`
       : "open circuit: no spikes yet";
-    const ma = chargeMa(mv);
+    const ma = chargeMa(mv, recentVoc());
     $("gMa").textContent = ma.toFixed(1) + " mA";
     // break-even: what's still missing from a day's use after this session's harvest, at the current rate
     const use = num("use"), left = use - mahTotal;
@@ -556,9 +563,9 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   // ---------- trace ----------
   const cv = $("chart"), ctx = cv.getContext("2d");
   const FONT = "10px " + getComputedStyle(document.body).fontFamily;
-  let hoverX = null;
-  cv.addEventListener("pointermove", e => { hoverX = e.offsetX; });
-  cv.addEventListener("pointerleave", () => { hoverX = null; });
+  let hoverX = null, hoverY = null;
+  cv.addEventListener("pointermove", e => { hoverX = e.offsetX; hoverY = e.offsetY; });
+  cv.addEventListener("pointerleave", () => { hoverX = hoverY = null; });
 
   const firstAtOrAfter = t => { let lo = 0, hi = data.length; while (lo < hi) { const m = (lo + hi) >> 1; data[m].t < t ? lo = m + 1 : hi = m; } return lo; };
   const niceStep = raw => [10, 20, 25, 50, 100, 200, 250, 500, 1000].find(s => s >= raw) || 1000;
@@ -594,6 +601,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     const tStart = tNow - sp / 2;
     const x = t => pad.l + (t - tStart) / sp * pw;
 
+    let ocHover = null;  // open-circuit dot under the pointer, if any
     let shown = data.slice(Math.max(0, firstAtOrAfter(tStart) - 1));
     if (shown.length > pw) {  // more points than pixels: keep each column's min and max so spikes survive
       const cols = new Map();
@@ -674,11 +682,18 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       ctx.lineWidth = 1.5; ctx.strokeStyle = along;
       ctx.stroke();
       // open-circuit spikes: the trace is the median and drops them, so each one is a dot at its raw value
+      // remember the dot nearest the pointer (within 8 px) so hovering it shows its reading
       ctx.fillStyle = "#ff9d6e";
+      let best = 64;
       for (let i = firstAtOrAfter(tStart); i < data.length; i++) {
         const d = data[i];
         if (!d.oc) continue;
-        ctx.beginPath(); ctx.arc(x(d.t), y(d.raw), 2.5, 0, Math.PI * 2); ctx.fill();
+        const dx = x(d.t), dy = y(d.raw);
+        ctx.beginPath(); ctx.arc(dx, dy, 2.5, 0, Math.PI * 2); ctx.fill();
+        if (hoverX !== null && dy >= pad.t && dy <= pad.t + ph) {
+          const dd = (dx - hoverX) ** 2 + (dy - hoverY) ** 2;
+          if (dd < best) { best = dd; ocHover = { d, dx, dy }; }
+        }
       }
       ctx.restore();
 
@@ -689,8 +704,19 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       ctx.fillText((liveMv / 1000).toFixed(3) + arrow, ex + 12, ey);
     }
 
+    // hovering an open-circuit dot: ring it and show its raw reading instead of the trace readout
+    if (ocHover) {
+      const { d, dx, dy } = ocHover;
+      ctx.strokeStyle = "#ff9d6e"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(dx, dy, 5.5, 0, Math.PI * 2); ctx.stroke();
+      const label = `open circuit ${(d.raw / 1000).toFixed(3)} V  ${fmtClock(d.t, true)}`;
+      ctx.font = FONT; ctx.fillStyle = "#ffc3a3";
+      ctx.textAlign = dx > W - 180 ? "right" : "left";
+      ctx.textBaseline = dy < pad.t + 18 ? "top" : "bottom";
+      ctx.fillText(label, dx + (ctx.textAlign === "left" ? 9 : -9), dy + (ctx.textBaseline === "top" ? 6 : -6));
+    }
     // hover readout
-    if (hoverX !== null && hoverX > pad.l && hoverX < ex && data.length) {
+    else if (hoverX !== null && hoverX > pad.l && hoverX < ex && data.length) {
       const t = tStart + (hoverX - pad.l) / pw * sp;
       let i = firstAtOrAfter(t);
       if (i >= data.length || (i > 0 && t - data[i - 1].t < data[i].t - t)) i--;
@@ -1016,11 +1042,12 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   // ---------- CSV ----------
   $("btnCsv").onclick = () => {
     const rows = ["seconds,millivolts,raw_millivolts,open_circuit_mv,est_mA,note"];
-    let ni = 0;
+    let ni = 0, lastOc = null;
     for (const d of data) {
+      if (d.oc) lastOc = d;
       let note = "";
       while (ni < notes.length && notes[ni].t <= d.t) { note += (note ? " | " : "") + notes[ni].text; ni++; }
-      rows.push(`${d.t.toFixed(2)},${Math.round(d.mv)},${Math.round(d.raw)},${d.oc ? Math.round(d.raw) : ""},${chargeMa(d.mv).toFixed(2)},"${note.replace(/"/g, "'")}"`);
+      rows.push(`${d.t.toFixed(2)},${Math.round(d.mv)},${Math.round(d.raw)},${d.oc ? Math.round(d.raw) : ""},${chargeMa(d.mv, lastOc && d.t - lastOc.t < 60 ? lastOc.raw : undefined).toFixed(2)},"${note.replace(/"/g, "'")}"`);
     }
     const blob = new Blob([rows.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");

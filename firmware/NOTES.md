@@ -113,6 +113,17 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **2026-10-26 update:** the first LTC board was faulty. With the pack on it read 5.13 V on OUT (supply fine), SHDN 3.3 V and **0 mV across IN -> OUT**, yet `LTC TEST` pulsed every 154 ms (7.2/s, "221 mV"), well over a healthy chip's 1.6/s limit. Replaced by a new board: **no phantom pulses, "out" counts look right** (one 0.17 mAh out tick from the chip's own draw). No "in" counted with the TEG lit because the pack (5.11 V) is above the BQ's stop voltage (**OV now ~4.89 V**), so the BQ doesn't charge; the page's "harvested est." comes from the TEG voltage alone and can't know that. Next: run the pack down with **drain mode** (below) until it rests ~4.7-4.8 V, then light the candle and watch "pack in".
 
+### 2026-11-01 night: SJ2 resoldered
+
+- SJ2 pads soldered, pack 3.67 V, candle lit: **still no ticks.**
+- **Leg 9 (CLR at the chip) to leg 7 = 3.3 V:** CLR is good, so SJ2 is fixed and the chip isn't held in clear. SJ2 was not the cause.
+- **Next: legs 3-4 (CF+/CF-) on the 200 mV range, candle lit and charging.** About the legs 1-2 reading (0.9-2 mV) = the signal reaches the integrator, so the fault is past it (chip/INT). Near 0 = CF leaky or input fault.
+- **Legs 3-4 = 1 mV while charging** (same as legs 1-2): CF is fine and the signal reaches the integrator. At 1 mV expect a tick every ~31 s.
+- **Next: meter zero check.** Candle out, legs 1-2 (bottom-left corner + its right neighbour) on 200 mV. 0.0 = the 1 mV readings are real current, and every input to the chip checks out. ~1 mV with no current = meter offset, so the "current" was never really measured.
+- User: legs 3-4 fell as the candle died, so the 1 mV is real (meter zero check not needed).
+- **FIRST TICKS WITH THE CANDLE (session mvyb7foskfie):** six ticks, in pairs, "out" then "in" right after: t = 830.2/830.4, 848.4/848.6, 1032.0/1034.6 s (gaps 0.2, 0.2, 2.7 s). Pairs 18 s apart at TEG ~1.05 V, then 183 s apart as the TEG fell to 0.44 V, so the rate follows the current. ULP glitch counter 0: INT stayed low the full 1 ms both times. The second INT of each pair needs INT to go high after the clear and low again 1-2 polls later. Net in-out = 0, so no charge is counted. The BQ's open-circuit samples (every ~15.7 s) don't line up with the ticks (1.3-6.3 s apart). Cause unknown; couldn't fetch the datasheet (analog.com timed out) to check how POL/INT behave around a clear.
+- **User doubts these are real ticks, and the trace agrees:** TEG loaded 1.2-1.58 V from t ~240 s to ~780 s (9 min, strongest harvest, legs 1-2 at ~1-2 mV) gave **zero ticks**, where ~30 were expected. The pairs only came once the harvest was falling (TEG 1.06 V and dropping). So they follow the current *changing* (falling toward zero, maybe flipping direction around the BQ's bursts), not the charge passed. A steady charge current produces no counts.
+
 ### 2026-11-01 late bookmark (resume here)
 
 **Independent audit (fresh agent, 2026-11-01, from the datasheet rev C + SparkFun's LTC4150_BOB.sch v10):**

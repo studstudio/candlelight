@@ -125,6 +125,15 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - **User doubts these are real ticks, and the trace agrees:** TEG loaded 1.2-1.58 V from t ~240 s to ~780 s (9 min, strongest harvest, legs 1-2 at ~1-2 mV) gave **zero ticks**, where ~30 were expected. The pairs only came once the harvest was falling (TEG 1.06 V and dropping). So they follow the current *changing* (falling toward zero, maybe flipping direction around the BQ's bursts), not the charge passed. A steady charge current produces no counts.
 - **INT-stuck banner showed afterwards; LTC test (13:20) passed** (INT high, CLR works, no pulses). The banner stayed up until tapped, so it may have been left over from earlier. Likely the 2.7 s pair: by the ULP's logic a tick pair is INT going low (tick 1), staying low through several CLR pulses (stuck >= 3 polls = banner), briefly high, then low again (tick 2). If so, each "pair" is one long INT-low episode that CLR can't release, during falling current. Page now clears the banner on release and logs the episode's time and length to the console (891eb9b).
 
+### 2026-11-01 POL watch (resume here)
+
+- **SHDN watch: no drops in 4 min** (SDA jumper in the 3V3 row = SHDN row; it sees the row, not the header pin's own contact). SHDN ruled out as far as it can be.
+- **Wiring confirmed by the user:** INT in its own row with the D3 jumper only; VIO + SHDN in the 3V3 row; POL straight to A2, CLR straight to A4.
+- **Real latched pair caught in edge mode (23:01:34, TEG ~0.8 V and falling):** out (INT low 17.5 ms, released by our clear) then in 0.2 s later (1.2 ms, our clear). Chip, INT, CLR and firmware all work. An out+in pair means the chip's up/down counter is sitting at its wrap point, i.e. **the net current the chip integrates is ~0**, despite the meter's 1-2 mV IN-OUT. A steady 20-40 mA in would march the counter up and give "in" every 15-30 s.
+- **Lead:** current through the sense resistor goes both ways (BQ charge bursts, flow back out between them / during the ~16 s MPPT samples) with a near-zero average; a DMM can show mV on that. The user remembers something on the LTC swinging with the BQ's spikes (not recorded which).
+- **Built: POL watch.** In edge mode a CHANGE interrupt on POL (A2/GPIO34) times POL high vs low; every 30 s: `LTC POL last 30 s: into pack X% / out of pack Y% | N flips ...`. POL shows the latest direction whenever INT is high (datasheet). No wiring needed.
+- **Next:** sync now, candle on, ~5 min, pull ltcLog. Mostly "into" with no ticks would contradict the net-zero idea; ~50/50 with many flips = bidirectional current netting ~0.
+
 ### 2026-11-01 SHDN watch (resume here)
 
 - **Edge mode result:** with the hardware interrupt on INT, a ~12 min candle run (TEG ~1.0 V loaded) gave **0 edges**: INT never moved, not even for microseconds. So short pulses weren't the cause. Plugging and unplugging the INT wire gave 102 + 54 bounce ticks (fake, flagged TOO FAST), which proves the firmware, D3 and the page register INT. (Debounce still to add: ignore edges for ~0.3 s after a tick.)

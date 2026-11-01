@@ -224,6 +224,12 @@ uint32_t coulSeenEdgeA = 0, coulSeenEdgeB = 0, coulSeenEdgeShort = 0;
 // good chip from ever ticking, and a meter can't see them. Same edge trick as INT
 volatile uint32_t shdnDrops = 0, shdnShortDrops = 0;  // drops; of those, over before the ISR could look (< ~5 us)
 volatile uint32_t shdnLowSinceUs = 0, shdnLastWidthUs = 0, shdnLongestUs = 0;
+// POL watch: POL shows the direction of the most recent charge the chip saw whenever INT is high
+// (low = out of the pack), so its share of time high vs low says which way the current really nets
+volatile uint32_t polFlips = 0, polSinceUs = 0;
+volatile uint64_t polHighUs = 0, polLowUs = 0;
+volatile bool polLevel = true;
+uint32_t polLastReport = 0, polSeenFlips = 0;
 uint32_t shdnSeenDrops = 0, shdnSeenShort = 0, shdnLastReport = 0, shdnLastDropMs = 0;
 uint32_t coulClearTries = 0;                         // clears in a row that didn't release INT
 bool coulEdgeOn = false;
@@ -269,6 +275,15 @@ void IRAM_ATTR shdnIsr() {
   }
 }
 
+void IRAM_ATTR polIsr() {
+  uint32_t now = micros();
+  bool lvl = (REG_READ(GPIO_IN1_REG) >> (COUL_POL - 32)) & 1;
+  if (lvl == polLevel) { polFlips += 2; return; }  // flipped and back before we looked: count it, time unknown
+  uint32_t dt = now - polSinceUs;
+  if (polLevel) polHighUs += dt; else polLowUs += dt;
+  polLevel = lvl; polSinceUs = now; polFlips++;
+}
+
 int coulPin(gpio_num_t p) { return coulEdgeOn ? gpio_get_level(p) : rtc_gpio_get_level(p); }
 
 void coulombEdgeStart() {
@@ -290,6 +305,9 @@ void coulombEdgeStart() {
     attachInterrupt(COUL_INT, coulIsr, CHANGE);
     if (!digitalRead(COUL_INT)) coulIsr();  // already latched: count it once and clear it
     Serial.println("LTC: edge mode on (hardware interrupt on INT while the monitor is connected; catches pulses of any length)");
+    polLevel = digitalRead(COUL_POL); polSinceUs = micros(); polHighUs = polLowUs = 0; polFlips = 0;
+    polSeenFlips = 0; polLastReport = millis();
+    attachInterrupt(COUL_POL, polIsr, CHANGE);
     pinMode(COUL_SHDN_WATCH, INPUT_PULLDOWN);  // no jumper in = reads low, so a missing wire can't pass for a healthy SHDN
     shdnLowSinceUs = 0;
     attachInterrupt(COUL_SHDN_WATCH, shdnIsr, CHANGE);
@@ -306,6 +324,7 @@ void coulombEdgeStop() {
   if (coulEdgeOn) {
     detachInterrupt(COUL_INT);
     detachInterrupt(COUL_SHDN_WATCH);
+    detachInterrupt(COUL_POL);
     coulombPoll();
     coulEdgeOn = false;
     coulombStartUlp();  // re-takes the pins for the RTC side and restarts the poller
@@ -317,8 +336,27 @@ void coulombEdgeStop() {
 // edge mode's CLR pulse, from the TEG task (every 20 ms): 1 ms low, like the ULP's
 void coulombEdgeService() {
   if (!coulEdgeOn) return;
+  uint32_t now = millis();
+  // POL watch report every 30 s: share of time the chip saw current into vs out of the pack
+  if (now - polLastReport >= 30000) {
+    noInterrupts();
+    uint32_t t = micros();
+    uint64_t hi = polHighUs, lo = polLowUs;
+    if (polLevel) hi += t - polSinceUs; else lo += t - polSinceUs;
+    polHighUs = polLowUs = 0; polSinceUs = t;
+    uint32_t flips = polFlips;
+    interrupts();
+    uint32_t nf = flips - polSeenFlips; polSeenFlips = flips;
+    float tot = (float)(hi + lo);
+    float inPct = tot > 0 ? 100.0f * hi / tot : 0;
+    bool in = COUL_POL_HIGH_IS_CHARGE;
+    Serial.printf("LTC POL last %.0f s: into pack %.1f%% / out of pack %.1f%% | %u flips (%.1f/s) | POL now %d | INT %d | TEG %u mV | up %u s\n",
+                  tot / 1e6, in ? inPct : 100 - inPct, in ? 100 - inPct : inPct, (unsigned)nf, nf / max(1.0f, tot / 1e6f),
+                  gpio_get_level(COUL_POL), gpio_get_level(COUL_INT), (unsigned)readTegMv(), (unsigned)(now / 1000));
+    polLastReport = now;
+  }
   // SHDN watch report: every batch of drops at once, plus an all-clear once a minute
-  uint32_t d = shdnDrops, ds = shdnShortDrops, now = millis();
+  uint32_t d = shdnDrops, ds = shdnShortDrops;
   if (d != shdnSeenDrops) {
     uint32_t n = d - shdnSeenDrops, ns = ds - shdnSeenShort;
     String gap = shdnLastDropMs ? String((now - shdnLastDropMs) / 1000.0f, 1) + " s since the last drop" : String("first drop");

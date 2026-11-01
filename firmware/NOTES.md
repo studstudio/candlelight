@@ -116,11 +116,11 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 ### 2026-11-01 late bookmark (resume here)
 
 - **Legs 1-2 (SENSE+/SENSE-) read 0.9 mV** with a weaker candle (IN-OUT 2 mV at full candle): the chip sees the current.
-- **SJ2/SJ3 are NOT bridged** (a blob on each pad, not joined). The 10-31 note saying "bridged" was wrong.
+- **SJ3 is closed; SJ2 has sparse, shoddy solder** (may be open or intermittent). Ignore my earlier same-day line saying both were open.
 - **Code-free test:** candle charging (BQ VSTOR 3.64 V, VIN 1.34 V), CLR on 3V3, INT unplugged from D3, meter on INT: **stayed 3.3 V for 1+ min.** No firmware pin on INT or CLR, so it's not the code. Expected at 0.9 mV: a latch every ~34 s.
 - Asked and answered: the TEG on OUT / pack on IN is correct (the chip is bidirectional, POL gives direction; charging = "in"). Low current isn't a cutoff: there's no minimum, ticks just come further apart (2 mV ~15 s, 0.9 mV ~34 s).
 - The user won't drain while the pack is low and is fed up with test chains: one reading at a time, plain conclusions.
-- **Next (user, 2026-11-02):** user thinks SJ2's solder is too sparse to be closed and will redo SJ2 (and SJ3). Caution from 10-27/28: on this clone, closed jumpers joined CLR to SHDN (= VIO), holding CLR high. After resoldering, check **CLR header to VIO header** (power off): ~0 ohm = CLR tied high; then my code can't clear, but INT sticking low after the first tick would at least prove the chip counts. Then candle on, normal wiring, watch the page for ticks.
+- **Next (user, 2026-11-02):** user will redo SJ2's solder properly (SJ3 is already closed). Caution from 10-27/28: on this clone, closed jumpers joined CLR to SHDN (= VIO), holding CLR high. After resoldering, check **CLR header to VIO header** (power off): ~0 ohm = CLR tied high; then my code can't clear, but INT sticking low after the first tick would at least prove the chip counts. Then candle on, normal wiring, watch the page for ticks.
 - Only board part never checked: the CF capacitor (legs 3-4 voltage while charging, 200 mV range; should be about legs 1-2).
 
 ### 2026-11-01 bookmark

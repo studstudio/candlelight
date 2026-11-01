@@ -197,7 +197,8 @@
   body.is-cycle #previewWrap { position: sticky; top: 0; z-index: 30; } /* in a cycle the preview stays on screen while the sliders scroll underneath it */
   body.is-cycle #editPillRow { position: sticky; top: var(--pvH, 0px); z-index: 29; }
   #editPillRow { background: var(--pageBg, var(--bg)); margin-top: 0 !important; padding-top: 14px; }
-  body.is-cycle #videoSticky { position: sticky; top: calc(var(--pvH, 0px) + var(--pillH, 0px)); z-index: 28; background: var(--pageBg, var(--bg)); padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+  body.is-cycle #videoSticky { position: sticky; top: calc(var(--pvH, 0px) + var(--pillH, 0px)); z-index: 28; background: var(--pageBg, var(--bg)); padding-bottom: 2px; }
+  #videoEchoBody { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 0.5px solid rgba(178, 124, 78, 0.3); }
   #videoSticky > #videoHead { margin-top: 0 !important; padding-top: 14px; }
   .shader-panel { margin: 10px 0 4px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .preview-wrap.touch-on { cursor: crosshair; outline: 1px solid var(--ember); outline-offset: -1px; }
@@ -1165,8 +1166,10 @@ html, body { background-color: #fdd48d; background-image: none; }
   <div class="sec-body slider-grid">
   <div class="moire-row full"><span class="moire-label">time</span><div id="videoTimeWrap" style="position:relative;flex:1;display:flex;align-items:center;min-width:0"><input type="range" id="videoTime" min="0" max="1000" value="0" style="flex:1;margin:0 36px;min-width:0;width:auto"><span class="anim-interval-value" id="videoTimeVal" style="position:absolute;top:50%;left:0;transform:translate(-100%,-50%);white-space:nowrap;font-size:11px;pointer-events:none">0.0s</span><span class="anim-interval-value" id="videoEndVal" style="position:absolute;top:50%;left:0;transform:translateY(-50%);white-space:nowrap;font-size:11px;pointer-events:none">0.0s</span></div></div>
   <div class="moire-row full"><span class="moire-label">step</span><input type="range" id="videoStep" min="0" max="28" value="2"><span class="anim-interval-value" id="videoStepVal" style="flex:0 0 auto;min-width:88px;text-align:right;white-space:nowrap;"></span></div>
-  <div class="moire-row full"><span class="moire-label">echo</span><input type="range" id="echoSlider" min="0" max="100" value="0"></div>
   </div>
+</div>
+<div class="sec-body slider-grid" id="videoEchoBody">
+  <div class="moire-row full"><span class="moire-label">echo</span><input type="range" id="echoSlider" min="0" max="100" value="0"></div>
 </div>
 </div>
 

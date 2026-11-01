@@ -277,11 +277,18 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     return m + ":" + (frac ? r.toFixed(1).padStart(4, "0") : String(Math.floor(r)).padStart(2, "0"));
   };
 
+  // The ESP32's ADC (A0 at 11 dB) can't read near 0 V: with nothing on the pin the factory
+  // calibration still reports ~130-150 mV. Anything at or below this is shown as ≈0 V
+  // and harvests nothing; the raw readings (CSV, relay) are left as they came
+  const ADC_FLOOR_MV = 160;
+  const shownMv = mv => mv <= ADC_FLOOR_MV ? 0 : mv;
+
   // mv is the TEG voltage loaded by the BQ25504, not the open-circuit one, so V²/(4R) would read ~4x low.
   // The TEG is Voc behind R: the current is (Voc - V)/R, so the power it delivers is V·(Voc - V)/R.
   // Voc comes from the BQ's own open-circuit samples (the orange dots) when one is recent (< 60 s);
   // with none, assume the BQ holds it at its best point (V = Voc/2), so P = V²/R.
   function chargeMa(mv, vocMv) {
+    if (mv <= ADC_FLOOR_MV) return 0;  // nothing there: the ADC's floor, not the TEG
     const v = mv / 1000, r = Math.max(0.1, num("rInt"));
     const vo = vocMv > mv ? vocMv / 1000 : 2 * v;
     const p = Math.max(0, v * (vo - v)) / r * (num("eff") / 100);
@@ -337,7 +344,9 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     const last = data[data.length - 1];
     const mv = last ? last.mv : 0;
     const slope = slopePerMin();
-    $("vSub").textContent = last ? `${Math.round(mv)} mV smoothed · ${data.length} pts · ${fmtTime(now())}` : "waiting for data";
+    $("vSub").textContent = !last ? "waiting for data"
+      : mv <= ADC_FLOOR_MV ? `≈0 V · ${Math.round(mv)} mV is the ADC floor, not the TEG · ${fmtTime(now())}`
+      : `${Math.round(mv)} mV smoothed · ${data.length} pts · ${fmtTime(now())}`;
     $("vocSub").textContent = voc
       ? `open circuit ${(voc.mv / 1000).toFixed(3)} V · ${Math.max(0, Math.round(now() - voc.t))} s ago · ${vocCount} spike${vocCount === 1 ? "" : "s"}`
       : "open circuit: no spikes yet";
@@ -712,7 +721,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       const eyRaw = y(liveMv), ey = Math.min(pad.t + ph, Math.max(pad.t, eyRaw));
       ctx.fillStyle = "rgba(255,240,215,.85)"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
       const arrow = eyRaw < pad.t ? " ↑" : eyRaw > pad.t + ph ? " ↓" : "";
-      ctx.fillText((liveMv / 1000).toFixed(3) + arrow, ex + 12, ey);
+      ctx.fillText((liveMv <= ADC_FLOOR_MV ? "≈0" : (liveMv / 1000).toFixed(3)) + arrow, ex + 12, ey);
     }
 
     // hovering an open-circuit dot: ring it and show its raw reading instead of the trace readout
@@ -750,7 +759,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     const target = data.length ? data[data.length - 1].mv : 0;
     liveMv = calm.matches ? target : liveMv + (target - liveMv) * (1 - Math.exp(-dt / 90));
     if (Math.abs(target - liveMv) < 0.5) liveMv = target;
-    const vs = (liveMv / 1000).toFixed(3);
+    const vs = (shownMv(liveMv) / 1000).toFixed(3);
     if (vs !== shownV) { shownV = vs; $("vNow").innerHTML = [...vs].map(c => c === "." ? '<span class="p">.</span>' : `<span class="d">${c}</span>`).join(""); }
     draw(dt);
     drawBatt();

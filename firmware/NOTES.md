@@ -115,12 +115,21 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 ### 2026-11-01 late bookmark (resume here)
 
+**Independent audit (fresh agent, 2026-11-01, from the datasheet rev C + SparkFun's LTC4150_BOB.sch v10):**
+- **Firmware: no bug** (RTC pin numbers, edge/glitch logic, 1 ms CLR pulse, deep-sleep power all fine).
+- SparkFun nets: VDD = SENSE+ = OUT; SENSE- = IN (pack on IN is right). VIO only feeds three 3.3k pull-ups (INT, POL, SHDN header). **CLR: header -> 47k -> chip CLR, chip CLR -> 75k -> GND; SJ2 shorts the 47k.** SHDN the same with SJ3. SJ1 ties INT to CLR headers. SJ2 and SJ3 sit at opposite ends of the board: **closing them can't join CLR to SHDN** (my 10-27/28 "clone quirk" was wrong, likely measured through breadboard wiring; so were "SHDN tied to VIO on the board" and the 3.03 V VIO "back-feed", both explained by the SHDN wire on the 3V3 row).
+- **With SJ2 open, chip CLR sees 3.3 x 75/122 = 2.03 V, barely above VIH 1.9 V.** A shoddy SJ2 makes CLR marginal, so the chip may sit in "clear". Fixing SJ2 is a real lead.
+- Logic thresholds fixed (VIL 0.7 V, VIH 1.9 V); abs max on CLR/SHDN = VDD + 0.3 V (3.3 V logic needs VDD >= 3.0 V). CF may be left open; a leaky CF shrinks the signal. Offset ±150-200 uV.
+- The 1-minute code-free test is weak (at 0.9 mV ± meter error, a tick every 34-77 s).
+- **Checks after the SJ2 fix, in order (single readings, no drain):** (1) leg 9 (CLR at the chip) to GND, powered, normal wiring: ~3.3 V good, ~2.0 V SJ2 still open, < 1.9 V chip held in clear. (2) legs 3-4 on 200 mV while charging: about legs 1-2; near 0 = CF/input fault. (3) legs 1-2 with the candle out: should read 0.0 (meter zero check).
+- Bare-board reference values (all wires off, SJ1 open, SJ2/SJ3 closed): INT, POL, SHDN header ~3.3k to VIO; legs 5 and 9 ~75k to GND; CLR header to VIO no path; INT to CLR ~157k.
+
 - **Legs 1-2 (SENSE+/SENSE-) read 0.9 mV** with a weaker candle (IN-OUT 2 mV at full candle): the chip sees the current.
 - **SJ3 is closed; SJ2 has sparse, shoddy solder** (may be open or intermittent). Ignore my earlier same-day line saying both were open.
 - **Code-free test:** candle charging (BQ VSTOR 3.64 V, VIN 1.34 V), CLR on 3V3, INT unplugged from D3, meter on INT: **stayed 3.3 V for 1+ min.** No firmware pin on INT or CLR, so it's not the code. Expected at 0.9 mV: a latch every ~34 s.
 - Asked and answered: the TEG on OUT / pack on IN is correct (the chip is bidirectional, POL gives direction; charging = "in"). Low current isn't a cutoff: there's no minimum, ticks just come further apart (2 mV ~15 s, 0.9 mV ~34 s).
 - The user won't drain while the pack is low and is fed up with test chains: one reading at a time, plain conclusions.
-- **Next (user, 2026-11-02):** user will redo SJ2's solder properly (SJ3 is already closed). Caution from 10-27/28: on this clone, closed jumpers joined CLR to SHDN (= VIO), holding CLR high. After resoldering, check **CLR header to VIO header** (power off): ~0 ohm = CLR tied high; then my code can't clear, but INT sticking low after the first tick would at least prove the chip counts. Then candle on, normal wiring, watch the page for ticks.
+- **Next (user, 2026-11-02):** user will redo SJ2's solder properly (SJ3 is already closed). (The CLR-to-SHDN caution was wrong, see the audit above.) After resoldering: the audit's checks, then candle on, normal wiring, watch the page for ticks.
 - Only board part never checked: the CF capacitor (legs 3-4 voltage while charging, 200 mV range; should be about legs 1-2).
 
 ### 2026-11-01 bookmark

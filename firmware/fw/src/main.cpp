@@ -209,7 +209,7 @@ extern volatile uint32_t tegLastHeartbeat;  // TEG monitor section, below
 // mode posts to the worker's TEG relay (USB is unplugged then, so the page can't relay them)
 struct LtcLine { uint32_t ms; String text; };
 std::vector<LtcLine> ltcRing;
-const size_t LTC_RING_MAX = 80;
+const size_t LTC_RING_MAX = 120;  // ~8 min of POL lines at one per 5 s, plus ticks
 portMUX_TYPE ltcRingMux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t ltcRingLock = nullptr;
 void ltcOut(const char* fmt, ...) {
@@ -357,8 +357,8 @@ void coulombEdgeStop() {
 void coulombEdgeService() {
   if (!coulEdgeOn) return;
   uint32_t now = millis();
-  // POL watch report every 30 s: share of time the chip saw current into vs out of the pack
-  if (now - polLastReport >= 30000) {
+  // POL watch report every 5 s: share of time the chip saw current into vs out of the pack
+  if (now - polLastReport >= 5000) {
     noInterrupts();
     uint32_t t = micros();
     uint64_t hi = polHighUs, lo = polLowUs;

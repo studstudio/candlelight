@@ -137,7 +137,7 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - **Wiring confirmed by the user:** INT in its own row with the D3 jumper only; VIO + SHDN in the 3V3 row; POL straight to A2, CLR straight to A4.
 - **Real latched pair caught in edge mode (23:01:34, TEG ~0.8 V and falling):** out (INT low 17.5 ms, released by our clear) then in 0.2 s later (1.2 ms, our clear). Chip, INT, CLR and firmware all work. An out+in pair means the chip's up/down counter is sitting at its wrap point, i.e. **the net current the chip integrates is ~0**, despite the meter's 1-2 mV IN-OUT. A steady 20-40 mA in would march the counter up and give "in" every 15-30 s.
 - **Lead:** current through the sense resistor goes both ways (BQ charge bursts, flow back out between them / during the ~16 s MPPT samples) with a near-zero average; a DMM can show mV on that. The user remembers something on the LTC swinging with the BQ's spikes (not recorded which).
-- **Built: POL watch.** In edge mode a CHANGE interrupt on POL (A2/GPIO34) times POL high vs low; every 30 s: `LTC POL last 30 s: into pack X% / out of pack Y% | N flips ...`. POL shows the latest direction whenever INT is high (datasheet). No wiring needed.
+- **Built: POL watch.** In edge mode a CHANGE interrupt on POL (A2/GPIO34) times POL high vs low; every 5 s (was 30 s): `LTC POL last 5 s: into pack X% / out of pack Y% | N flips ...`. POL shows the latest direction whenever INT is high (datasheet). No wiring needed.
 - **Next:** sync now, candle on, ~5 min, pull ltcLog. Mostly "into" with no ticks would contradict the net-zero idea; ~50/50 with many flips = bidirectional current netting ~0.
 
 ### 2026-11-01 SHDN watch (resume here)

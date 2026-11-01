@@ -116,7 +116,7 @@ portMUX_TYPE coulMux = portMUX_INITIALIZER_UNLOCKED;
 // WiFi connected with no power save (~100 mA from the pack) and syncs every
 // DRAIN_REPORT_S, which reports its LTC4150 totals. The worker adds up what left the
 // pack and turns drain off at the target. A "Draining" badge sits top-left meanwhile
-const uint32_t DRAIN_REPORT_S = 120;  // a sync (status report) this often while draining
+const uint32_t DRAIN_REPORT_S = 60;   // a sync (status report) this often while draining
 const uint32_t DRAIN_LOST_S = 3600;   // no word from the worker for this long: stop draining and sleep as usual
 bool drainOn = false;                 // set by every sync header; deep sleep resets it
 uint32_t drainHeardAt = 0;            // millis() of the last header that said so
@@ -203,6 +203,25 @@ void coulombStartUlp() {
 }
 
 extern volatile uint32_t tegLastHeartbeat;  // TEG monitor section, below
+
+// [PROTOTYPE-ONLY: LTC4150] every "LTC ..." log line goes to serial and into a small ring, which drain
+// mode posts to the worker's TEG relay (USB is unplugged then, so the page can't relay them)
+struct LtcLine { uint32_t ms; String text; };
+std::vector<LtcLine> ltcRing;
+const size_t LTC_RING_MAX = 80;
+portMUX_TYPE ltcRingMux = portMUX_INITIALIZER_UNLOCKED;
+SemaphoreHandle_t ltcRingLock = nullptr;
+void ltcOut(const char* fmt, ...) {
+  char buf[512];
+  va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
+  Serial.print(buf);
+  if (!ltcRingLock) ltcRingLock = xSemaphoreCreateMutex();
+  xSemaphoreTake(ltcRingLock, portMAX_DELAY);
+  String t(buf); t.trim();
+  ltcRing.push_back({ millis(), t });
+  if (ltcRing.size() > LTC_RING_MAX) ltcRing.erase(ltcRing.begin());
+  xSemaphoreGive(ltcRingLock);
+}
 
 // Edge mode [PROTOTYPE-ONLY: LTC4150]: while the monitor page holds the lamp awake, the
 // ULP is paused and INT goes to a hardware GPIO interrupt instead. The ULP only looks at
@@ -304,7 +323,7 @@ void coulombEdgeStart() {
     coulEdgeOn = true;
     attachInterrupt(COUL_INT, coulIsr, CHANGE);
     if (!digitalRead(COUL_INT)) coulIsr();  // already latched: count it once and clear it
-    Serial.println("LTC: edge mode on (hardware interrupt on INT while the monitor is connected; catches pulses of any length)");
+    ltcOut("LTC: edge mode on (hardware interrupt on INT while the monitor is connected or drain mode is on; catches pulses of any length)\n");
     polLevel = digitalRead(COUL_POL); polSinceUs = micros(); polHighUs = polLowUs = 0; polFlips = 0;
     polSeenFlips = 0; polLastReport = millis();
     attachInterrupt(COUL_POL, polIsr, CHANGE);
@@ -312,7 +331,7 @@ void coulombEdgeStart() {
     shdnLowSinceUs = 0;
     attachInterrupt(COUL_SHDN_WATCH, shdnIsr, CHANGE);
     shdnLastReport = millis();
-    Serial.printf("LTC SHDN watch on (SDA/GPIO21): SHDN reads %s\n", digitalRead(COUL_SHDN_WATCH)
+    ltcOut("LTC SHDN watch on (SDA/GPIO21): SHDN reads %s\n", digitalRead(COUL_SHDN_WATCH)
                   ? "HIGH (chip enabled)" : "LOW: the chip is shut down, or the SDA jumper isn't in the SHDN row");
   }
   xSemaphoreGive(coulModeLock);
@@ -328,7 +347,7 @@ void coulombEdgeStop() {
     coulombPoll();
     coulEdgeOn = false;
     coulombStartUlp();  // re-takes the pins for the RTC side and restarts the poller
-    Serial.println("LTC: edge mode off, back to the ULP poller");
+    ltcOut("LTC: edge mode off, back to the ULP poller\n");
   }
   xSemaphoreGive(coulModeLock);
 }
@@ -350,7 +369,7 @@ void coulombEdgeService() {
     float tot = (float)(hi + lo);
     float inPct = tot > 0 ? 100.0f * hi / tot : 0;
     bool in = COUL_POL_HIGH_IS_CHARGE;
-    Serial.printf("LTC POL last %.0f s: into pack %.1f%% / out of pack %.1f%% | %u flips (%.1f/s) | POL now %d | INT %d | TEG %u mV | up %u s\n",
+    ltcOut("LTC POL last %.0f s: into pack %.1f%% / out of pack %.1f%% | %u flips (%.1f/s) | POL now %d | INT %d | TEG %u mV | up %u s\n",
                   tot / 1e6, in ? inPct : 100 - inPct, in ? 100 - inPct : inPct, (unsigned)nf, nf / max(1.0f, tot / 1e6f),
                   gpio_get_level(COUL_POL), gpio_get_level(COUL_INT), (unsigned)readTegMv(), (unsigned)(now / 1000));
     polLastReport = now;
@@ -360,14 +379,14 @@ void coulombEdgeService() {
   if (d != shdnSeenDrops) {
     uint32_t n = d - shdnSeenDrops, ns = ds - shdnSeenShort;
     String gap = shdnLastDropMs ? String((now - shdnLastDropMs) / 1000.0f, 1) + " s since the last drop" : String("first drop");
-    Serial.printf("LTC SHDN DROPPED x%u (%u shorter than ~5 us) | last one %s | longest %.1f us | %s | SHDN now %s | INT %d | TEG %u mV | up %u s | each drop resets the chip's counter\n",
+    ltcOut("LTC SHDN DROPPED x%u (%u shorter than ~5 us) | last one %s | longest %.1f us | %s | SHDN now %s | INT %d | TEG %u mV | up %u s | each drop resets the chip's counter\n",
                   (unsigned)n, (unsigned)ns, shdnLowSinceUs ? "STILL LOW" : (String((float)shdnLastWidthUs, 1) + " us").c_str(),
                   (float)shdnLongestUs, gap.c_str(), gpio_get_level(COUL_SHDN_WATCH) ? "high" : "LOW",
                   gpio_get_level(COUL_INT), (unsigned)readTegMv(), (unsigned)(now / 1000));
     shdnSeenDrops = d; shdnSeenShort = ds; shdnLastDropMs = now; shdnLastReport = now;
   } else if (now - shdnLastReport >= 60000) {
     shdnLastReport = now;
-    Serial.printf("LTC SHDN watch: no drops in the last 60 s, SHDN %s (%u drops since the watch started)\n",
+    ltcOut("LTC SHDN watch: no drops in the last 60 s, SHDN %s (%u drops since the watch started)\n",
                   gpio_get_level(COUL_SHDN_WATCH) ? "high" : "LOW (shut down, or the jumper isn't in)", (unsigned)d);
   }
   bool low = !gpio_get_level(COUL_INT);
@@ -380,7 +399,7 @@ void coulombEdgeService() {
   delayMicroseconds(50);
   coulClearing = false;
   if (!gpio_get_level(COUL_INT)) {
-    if (++coulClearTries == 3) Serial.println("LTC: INT still low after 3 clears (edge mode): CLR isn't releasing it");
+    if (++coulClearTries == 3) ltcOut("LTC: INT still low after 3 clears (edge mode): CLR isn't releasing it\n");
   } else {
     coulClearTries = 0;
   }
@@ -483,7 +502,7 @@ void coulombPoll() {
   static bool logStarted = false;  // whatever the first poll after a boot finds was counted before the log ran
   if (!logStarted) {
     logStarted = true;
-    if (dIn || dOut || dg) Serial.printf("LTC: counted before this log started (around the restart): in %u out %u glitches %u\n", dIn, dOut, dg);
+    if (dIn || dOut || dg) ltcOut("LTC: counted before this log started (around the restart): in %u out %u glitches %u\n", dIn, dOut, dg);
     return;
   }
   if (!dIn && !dOut && !dg) return;
@@ -509,13 +528,13 @@ void coulombPoll() {
     String gap = coulLastTickMs ? String((now - coulLastTickMs) / 1000.0f, 1) + " s" : String("first");
     // the TEG gives tens of mA at most, a tick every ~15 s or slower; under 3 s needs > ~0.3 A
     bool fast = coulLastTickMs && now - coulLastTickMs < 3000;
-    Serial.printf("LTC tick: %s%s%s | gap %s%s | totals in %u out %u | %s\n",
+    ltcOut("LTC tick: %s%s%s | gap %s%s | totals in %u out %u | %s\n",
                   dIn ? (String("in x") + dIn).c_str() : "", dIn && dOut ? " + " : "", dOut ? (String("out x") + dOut).c_str() : "",
                   gap.c_str(), fast || dIn + dOut > 1 ? " | TOO FAST, can't be real current" : "",
                   (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, ctx.c_str());
     coulLastTickMs = now;
   }
-  if (dg) Serial.printf("LTC glitch: INT dropped and came back by itself x%u (not counted) | glitches total %u | %s\n",
+  if (dg) ltcOut("LTC glitch: INT dropped and came back by itself x%u (not counted) | glitches total %u | %s\n",
                         dg, (unsigned)rtcCoulGlitches, ctx.c_str());
 }
 
@@ -1958,7 +1977,7 @@ void tegTask(void*) {
       }
     }
     // [PROTOTYPE-ONLY: LTC4150] edge mode while the page is connected, the ULP otherwise; poll every 20 ms so each tick's log line has a close time
-    if (tegMonitoring()) { coulombEdgeStart(); coulombEdgeService(); coulombPoll(); }
+    if (tegMonitoring() || drainOn) { coulombEdgeStart(); coulombEdgeService(); coulombPoll(); }
     else coulombEdgeStop();
     delay(20);
   }
@@ -2517,16 +2536,45 @@ void quietSync() {
   if (added > 0 && !storedIds.empty()) quickPass();
 }
 
-// [PROTOTYPE-ONLY: LTC4150] drain mode's report is a quiet sync
-void drainReport() {
-  Serial.println("Drain mode: reporting to the worker");
-  quietSync();
-}
-
 // [PROTOTYPE-ONLY: LTC4150] keeps WiFi connected between drain reports (a sync turns it off)
 void drainKeepWiFi() {
   if (WiFi.status() != WL_CONNECTED) connectForSync(false);  // connects with power save off
 }
+
+// [PROTOTYPE-ONLY: LTC4150] drain mode: posts the LTC log ring (POL / SHDN / tick lines) and the TEG
+// reading to the TEG relay as session "drain-<lamp>", so they can be read with GET /teg/<lamp> while
+// USB is unplugged. "at" is the lamp's uptime in ms, not a clock time
+void drainPostLtcLog() {
+  drainKeepWiFi();
+  if (WiFi.status() != WL_CONNECTED) return;
+  JsonDocument doc;
+  doc["session"] = String("drain-") + LAMP_ID;
+  doc["start"] = 0;
+  JsonArray smp = doc["samples"].to<JsonArray>();
+  JsonArray one = smp.add<JsonArray>();
+  one.add(millis() / 1000.0); one.add(readTegMv());
+  JsonArray lg = doc["ltcLog"].to<JsonArray>();
+  if (!ltcRingLock) ltcRingLock = xSemaphoreCreateMutex();
+  xSemaphoreTake(ltcRingLock, portMAX_DELAY);
+  for (const LtcLine& l : ltcRing) { JsonObject o = lg.add<JsonObject>(); o["at"] = l.ms; o["text"] = l.text; }
+  xSemaphoreGive(ltcRingLock);
+  JsonObject c = doc["coulomb"].to<JsonObject>();
+  c["in"] = rtcCoulIn; c["out"] = rtcCoulOut; c["baseIn"] = 0; c["baseOut"] = 0; c["mahPerTick"] = COUL_MAH_PER_TICK;
+  String body; serializeJson(doc, body);
+  ResumableTLS client;
+  if (!connectWorker(client, "LTC log")) return;
+  long len;
+  int code = rawRequest(client, "POST", String("/teg/") + LAMP_ID, body, len);
+  Serial.printf("Drain mode: LTC log posted (%u lines), HTTP %d\n", (unsigned)lg.size(), code);
+}
+
+// [PROTOTYPE-ONLY: LTC4150] drain mode's report is a quiet sync
+void drainReport() {
+  Serial.println("Drain mode: reporting to the worker");
+  quietSync();
+  drainPostLtcLog();
+}
+
 
 const uint32_t SEEN_SAVE_MS = 3000;  // the seen flags are written this long after the last press
 

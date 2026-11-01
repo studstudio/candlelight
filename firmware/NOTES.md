@@ -125,6 +125,12 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - **User doubts these are real ticks, and the trace agrees:** TEG loaded 1.2-1.58 V from t ~240 s to ~780 s (9 min, strongest harvest, legs 1-2 at ~1-2 mV) gave **zero ticks**, where ~30 were expected. The pairs only came once the harvest was falling (TEG 1.06 V and dropping). So they follow the current *changing* (falling toward zero, maybe flipping direction around the BQ's bursts), not the charge passed. A steady charge current produces no counts.
 - **INT-stuck banner showed afterwards; LTC test (13:20) passed** (INT high, CLR works, no pulses). The banner stayed up until tapped, so it may have been left over from earlier. Likely the 2.7 s pair: by the ULP's logic a tick pair is INT going low (tick 1), staying low through several CLR pulses (stuck >= 3 polls = banner), briefly high, then low again (tick 2). If so, each "pair" is one long INT-low episode that CLR can't release, during falling current. Page now clears the banner on release and logs the episode's time and length to the console (891eb9b).
 
+### 2026-11-01 drain + POL test (resume here)
+
+- **POL watch result (candle, 10 min, TEG up to 0.9-1.3 V):** POL "into pack" 100%, 0 flips; 0 ticks. SHDN: 8 sub-5 us drops, all at 15:18:42 (local) together with 35 INT bounce ticks before the candle was lit (a wire bumped?), none after. So no sloshing current; every datasheet condition for counting checks out from outside, still no ticks during steady charge. Relay "not coming through" was the laptop tab running the old page (hard refresh, Ctrl+Shift+R).
+- **User's call: drain test to see if POL switches** (to "out of pack"). USB is unplugged in drain, so: edge mode (INT/POL/SHDN interrupts) now also runs while drain mode is on; every `LTC ...` line goes into an 80-line ring that each drain report (now every 60 s, was 120) POSTs to the TEG relay as session `drain-test-lamp-1` (`at` = lamp uptime ms). Read with `curl .../teg/test-lamp-1`. No worker change.
+- **Expect:** ~100 mA out = ~5 mV = an "out" tick every ~6 s, POL "out of pack" ~100%.
+
 ### 2026-11-01 POL watch (resume here)
 
 - **SHDN watch: no drops in 4 min** (SDA jumper in the 3V3 row = SHDN row; it sees the row, not the header pin's own contact). SHDN ruled out as far as it can be.

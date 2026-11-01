@@ -129,7 +129,7 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - **Code-free test:** candle charging (BQ VSTOR 3.64 V, VIN 1.34 V), CLR on 3V3, INT unplugged from D3, meter on INT: **stayed 3.3 V for 1+ min.** No firmware pin on INT or CLR, so it's not the code. Expected at 0.9 mV: a latch every ~34 s.
 - Asked and answered: the TEG on OUT / pack on IN is correct (the chip is bidirectional, POL gives direction; charging = "in"). Low current isn't a cutoff: there's no minimum, ticks just come further apart (2 mV ~15 s, 0.9 mV ~34 s).
 - The user won't drain while the pack is low and is fed up with test chains: one reading at a time, plain conclusions.
-- **Next (user, 2026-11-02):** user will redo SJ2's solder properly (SJ3 is already closed). (The CLR-to-SHDN caution was wrong, see the audit above.) After resoldering: the audit's checks, then candle on, normal wiring, watch the page for ticks.
+- **Next (user, 2026-11-02):** user will redo SJ2's solder properly (SJ3 is already closed). (The CLR-to-SHDN caution was wrong, see the audit above.) **FIRST TEST after resoldering: leg 9 (CLR at the chip, top row second from left) to GND (leg 7), powered, normal wiring, 20 V range.** ~3.3 V = good, light the candle and watch the page for ticks; ~2.0 V = SJ2 still open; < 1.9 V = chip held in clear. If ticks still don't come: legs 3-4 on 200 mV while charging.
 - Only board part never checked: the CF capacitor (legs 3-4 voltage while charging, 200 mV range; should be about legs 1-2).
 
 ### 2026-11-01 bookmark

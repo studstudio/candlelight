@@ -363,7 +363,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     else if (b.dataset.alert !== "1") b.hidden = true;
   }
 
-  let stuckWarned = false;
+  let stuckWarned = false, stuckAt = 0;
   function renderPins() {
     const live = coulLive && Date.now() - coulLive.at < 10000 && coulLive.int !== undefined;
     const el = $("pinSub");
@@ -376,8 +376,19 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     el.textContent = coulLive.stuck ? "INT low at every check: CLR isn't releasing it, or the chip pulses nonstop. Press test ltc to see which"
       : `ltc pins · INT ${lv(coulLive.int)} · POL ${lv(coulLive.pol)} (${coulLive.pol ? "charging" : "discharging"})` +
         (coulLive.glitches !== undefined ? ` · glitches ${coulLive.glitches} · too-fast ticks ${coulLive.fast || 0}` : "");
-    if (coulLive.stuck && !stuckWarned && !viewer) { stuckWarned = true; alertBanner("LTC4150 INT reads low at every check, so the counts can't be trusted. Press test ltc (battery column) and check the serial console."); }
-    if (!coulLive.stuck) stuckWarned = false;
+    // while INT is held low the banner says so; once it's released the banner goes and the console keeps when and how long,
+    // so a short episode (e.g. around a tick pair) isn't left on screen looking like a live fault
+    if (coulLive.stuck && !stuckWarned && !viewer) {
+      stuckWarned = true; stuckAt = Date.now();
+      alertBanner("LTC4150 INT is being held low: CLR isn't releasing it right now, so the counts can't be trusted.");
+      $("banner").dataset.stuck = "1";
+    }
+    if (!coulLive.stuck && stuckWarned) {
+      stuckWarned = false;
+      sysLog(`LTC INT was held low ~${Math.max(1, Math.round((Date.now() - stuckAt) / 1000))} s from ${new Date(stuckAt).toLocaleTimeString()}, released now`);
+      const b = $("banner");
+      if (b.dataset.stuck) { b.hidden = true; delete b.dataset.alert; delete b.dataset.stuck; }
+    }
   }
 
   function renderCoulomb() {
@@ -768,7 +779,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   $("cap").addEventListener("change", () => { try { localStorage.setItem(GAUGE_KEY + "-cap", $("cap").value); } catch (e) {} });
 
   function setConn(text, cls) { $("connText").textContent = text; $("dot").className = "dot " + (cls || ""); }
-  function alertBanner(msg) { const b = $("banner"); b.hidden = false; b.dataset.alert = "1"; b.textContent = msg + "  (tap to dismiss)"; }
+  function alertBanner(msg) { const b = $("banner"); b.hidden = false; b.dataset.alert = "1"; delete b.dataset.stuck; b.textContent = msg + "  (tap to dismiss)"; }
   $("banner").onclick = () => { const b = $("banner"); b.hidden = true; delete b.dataset.alert; };
 
   function clearSession() {

@@ -113,7 +113,16 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 **2026-10-26 update:** the first LTC board was faulty. With the pack on it read 5.13 V on OUT (supply fine), SHDN 3.3 V and **0 mV across IN -> OUT**, yet `LTC TEST` pulsed every 154 ms (7.2/s, "221 mV"), well over a healthy chip's 1.6/s limit. Replaced by a new board: **no phantom pulses, "out" counts look right** (one 0.17 mAh out tick from the chip's own draw). No "in" counted with the TEG lit because the pack (5.11 V) is above the BQ's stop voltage (**OV now ~4.89 V**), so the BQ doesn't charge; the page's "harvested est." comes from the TEG voltage alone and can't know that. Next: run the pack down with **drain mode** (below) until it rests ~4.7-4.8 V, then light the candle and watch "pack in".
 
-### 2026-10-31 late bookmark (resume here)
+### 2026-11-01 bookmark (resume here)
+
+- **Board is a HiLetGo LTC4150.** The user is sure it works and won't buy another: don't call it dead.
+- **Lamp-as-load test, first try, invalid (my test design):** INT unplugged from D3 -> D3's pull-down reads low -> the ULP's stuck path pulses CLR every 100 ms and clears the chip. The meter read ~3.24 V. IN-OUT under drain: 7-10 mV (0-18).
+- **Second try, CLR moved from A4 to 3V3 (nothing can clear):** INT stayed ~3.30 V, sagging slowly with the rail. No latch.
+- **INT to CLR header: 3.3 kOhm** (200k range), so not tied (SJ1 idea wrong). The board's INT pull-up looks like it goes to the CLR net, so INT reading 3.3 V says nothing about VIO.
+- **Powered, normal wiring, drain off: leg 5 (SHDN) 3.3 V, leg 8 (VDD) 2.94 V.** VDD comes from the pack: 3 NiMH at ~1 V/cell = nearly flat, just above the LTC's 2.7 V minimum. Under the ~100 mA drain it almost certainly dropped below 2.7 V, so the drain tests ran the chip starved.
+- **Next:** candle on, drain off, watch for "in" ticks while the BQ charges (VDD is already above 2.7 V and charging only raises it). No more drain until leg 8 reads >= 3.6 V. Orientation as the user holds the board: leg 5 bottom-right; bottom row 1-5 left to right, top row 10..6 left to right.
+
+### 2026-10-31 late bookmark
 
 **Decisive run (session mvvpbvzu7tpl, 01:07-01:14):** VIO wire on, candle hot, **0 ticks, 0 glitches, INT high for 7 min**, while the TEG trace shows the BQ's MPPT open-circuit samples every ~16 s (loaded ~1.4 V, open ~1.9 V): the BQ was harvesting the whole time. 2 mV across IN-OUT measured earlier = a tick every ~15 s expected (32.55 Hz/V x 2 mV, independent of the sense resistor's value).
 - **All header-to-chip paths check out (power off, ohms):** INT -> leg 10, POL -> leg 6, IN/OUT -> legs 1/2, CLR -> leg 9 (0 ohm), SHDN = VIO -> leg 5. SJ2/SJ3 bridged, leave them alone.

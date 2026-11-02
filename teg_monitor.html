@@ -1019,6 +1019,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
   }
 
   let viewSession = null, viewAfter = -1, pending = [];
+  const seenRelayLtc = new Set();  // [PROTOTYPE-ONLY: LTC4150] relayed LTC lines already in the console
   function releasePending() {
     const t = now();
     while (pending.length && pending[0][0] <= t) { const [st, mv] = pending.shift(); addSample(mv, st); }
@@ -1031,7 +1032,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       if (!s.session) { setConn("waiting for the laptop", ""); return; }
       if (s.session !== viewSession) {  // a new session on the laptop: start over
         viewSession = s.session; viewAfter = -1; pending = []; viewClock = null;
-        clearSession();
+        clearSession(); seenRelayLtc.clear();
       }
       if (s.settings) for (const id of SETTINGS) if (isFinite(s.settings[id])) $(id).value = s.settings[id];
       for (const smp of s.samples) if (smp[0] > viewAfter) { pending.push(smp); viewAfter = smp[0]; }
@@ -1051,11 +1052,16 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
         addBatt();
       }
       renderCoulomb();
+      // [PROTOTYPE-ONLY: LTC4150] the relayed "LTC ..." lines (from the laptop, or straight from the lamp in drain mode) into this console
+      if (Array.isArray(s.ltcLog)) for (const l of s.ltcLog) {
+        const k = l.at + "|" + l.text;
+        if (!seenRelayLtc.has(k)) { seenRelayLtc.add(k); conLog(l.text); }
+      }
       const prevNotes = notes.length;
       notes = s.notes || [];
       if (notes.length !== prevNotes) renderLog();
       const stale = s.now - s.updated > 10000;
-      setConn(stale ? "laptop stopped streaming" : s.settings?.demo ? "phone view · demo" : "phone view · live", stale ? "" : s.settings?.demo ? "demo" : "on");
+      setConn(stale ? (s.session.startsWith("drain-") ? "lamp stopped posting (drain)" : "laptop stopped streaming") : s.settings?.demo ? "phone view · demo" : "phone view · live", stale ? "" : s.settings?.demo ? "demo" : "on");
     } catch (e) { setConn("can't reach the relay", ""); }
   }
 

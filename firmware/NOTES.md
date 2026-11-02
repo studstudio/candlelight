@@ -129,6 +129,8 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 
 - **Drain (lamp on the pack via OUT -> VCC, USB off, candle out): IN-OUT = 6.7 mV** (~134 mA through the sense resistor, out of the pack). Expected an "out" tick every ~4.6 s and POL low. Got **POL 100% "into pack", 0 flips, 0 ticks** for the 35 s the lamp was posting (edge mode, every input interrupt-watched). The lamp then stopped posting at uptime 57 s (23:58:04 UTC; cause unknown, its 60 s drain report never arrived).
 - So with every input verified (VDD in range, SHDN high and watched, CLR high, 1-2 mV charging / 6.7 mV draining at the sense pins, legs 3-4 follow), the chip's count and POL respond in neither direction. INT/POL outputs and the latch work (the rare latched out+in pairs). What's left is inside the LTC4150 chip (integrator/polarity front end). Cheap modules sometimes carry remarked chips; the board's other parts are fine. User has insisted the board is fine; this is the measured result, stated plainly.
+- **Likely cause (my failure to warn):** the logic pins (CLR, SHDN, VIO pull-ups at 3.3 V) were repeatedly live while VDD was low or off (pack 2.9 V on 10-26 and 11-01; pack unplugged with USB on), over the abs max of VDD + 0.3 V. **Rule from now on:** pack (>= 3.6 V) on first, then USB/logic; remove in reverse; 10k in series with CLR and SHDN if available.
+- **Next: test the FIRST board** (pulled 10-26 as "dead", but its 154 ms phantom pulses were later put down to VIO backfeed), same wiring, safe power order, candle + page (edge mode + POL watch).
 - Drain mode was left ON at the worker (it won't auto-stop without counts): stop it from the page.
 
 ### 2026-11-01 drain + POL test (resume here)

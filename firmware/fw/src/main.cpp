@@ -45,6 +45,9 @@ const int ANIM_LOOPS = 1;              // times an animation plays through befor
 // ---- sleep schedule ----
 const uint32_t SYNC_INTERVAL_S = 600;                        // [PLACEHOLDER] deep-sleep time between worker syncs (10 min while prototyping)
 const uint32_t WIFI_TIMEOUT_MS = 20000;                      // [PLACEHOLDER] give up on WiFi after this and go back to sleep
+const uint32_t WIFI_FAIL_SLEEP_1_S = 1800;                   // [PLACEHOLDER] after one failed connect, sleep this long instead of SYNC_INTERVAL_S
+const uint32_t WIFI_FAIL_SLEEP_2_S = 3600;                   // [PLACEHOLDER] after two or more in a row (router off for the night): this long
+const uint32_t NO_AP_SCAN_MS_PER_CH = 120;                   // [PLACEHOLDER] before a full connect, a quick scan (~1.6 s) checks the network is there at all; not found = router off, give up
 const uint32_t AWAKE_IDLE_MS = 10000;                        // [PLACEHOLDER] stay up this long after the last button press or pass (a held button keeps it open, see idleWindow)
 const uint32_t OTA_BUDGET_MS = 150000;                       // [PLACEHOLDER] a firmware download that isn't finished by now is abandoned (retried next check)
 const uint32_t OTA_STALL_MS = 15000;                         // [PLACEHOLDER] ...and so is one that stops delivering data for this long
@@ -1721,7 +1724,7 @@ void buttonTask(void*) {
 // with none, or if they stop working, it opens the Candlelight-XXXX setup
 // network (and keeps the saved credentials, so a router that is only
 // temporarily down gets rejoined after the portal times out and retries)
-void connectWiFi() {
+bool connectWiFi() {
   String apName = setupApName();
   WiFiManager wm;
   wm.setConnectTimeout(20);
@@ -1737,11 +1740,14 @@ void connectWiFi() {
       screenDrawn = true;
     }
   });
-  while (!wm.autoConnect(apName.c_str())) {
-    otaguard::tick();
-    Serial.println("No WiFi yet, retrying");
+  // one portal session (PORTAL_TIMEOUT_S), not a loop: a lamp nobody sets up goes back to sleep
+  // with the setup screen showing, and a NEXT press opens the portal again (see setup())
+  if (!wm.autoConnect(apName.c_str())) {
+    Serial.println("Setup: nobody joined, going back to sleep (press NEXT to open setup again)");
+    return false;
   }
   Serial.println("Connected: " + WiFi.localIP().toString());
+  return true;
 }
 
 // ---------- sleep / wake cycle ----------
@@ -1762,6 +1768,8 @@ RTC_DATA_ATTR uint8_t rtcWifiChannel = 0;  // 0 = nothing cached
 RTC_DATA_ATTR uint8_t rtcBssid[6];
 RTC_DATA_ATTR uint32_t rtcIp = 0, rtcGw = 0, rtcMask = 0, rtcDns = 0;
 RTC_DATA_ATTR uint32_t rtcDhcpAgeS = 0;    // seconds since the cached address came from DHCP
+RTC_DATA_ATTR uint8_t rtcWifiFails = 0;     // connects in a row that failed: the sleep grows (WIFI_FAIL_SLEEP_*) until one works
+RTC_DATA_ATTR uint32_t rtcLastSleepS = 0;   // how long the last deep sleep was set for
 RTC_DATA_ATTR int rtcManualFails = 0; // 5 s-hold syncs in a row that couldn't connect (the 2nd opens the setup portal)
 
 bool displayReady = false;  // display.init() has run, so it's safe to hibernate
@@ -1782,15 +1790,33 @@ bool waitForNext(uint32_t ms) {
 }
 
 // waits for the WiFi connection, up to ms
-bool waitForWiFi(uint32_t ms) {
+// waits for WiFi up to ms; with noApAfterMs, stops early once the driver reports that the
+// network isn't there at all (after at least that long, so a stale status can't end it)
+bool waitForWiFi(uint32_t ms, uint32_t noApAfterMs = 0) {
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < ms) {
+    if (noApAfterMs && millis() - t0 >= noApAfterMs && WiFi.status() == WL_NO_SSID_AVAIL) {
+      Serial.printf("WiFi: network not found after %u ms, giving up (router off?)\n", (unsigned)(millis() - t0));
+      return false;
+    }
     otaguard::tick();
     delay(20);
   }
   return WiFi.status() == WL_CONNECTED;
 }
 
+bool hasSavedWiFi();
+// whether WiFi is saved, as of the last connect attempt (RTC, so a button wake needn't start the radio
+// to find out): 0 unknown (after a power cut, before any sync), 1 saved, 2 none
+RTC_DATA_ATTR uint8_t rtcWifiSaved = 0;
+bool hasSavedWiFiNow() {
+  if (rtcWifiSaved) return rtcWifiSaved == 1;
+  WiFi.mode(WIFI_STA);  // the saved credentials load with it
+  bool saved = hasSavedWiFi();
+  WiFi.mode(WIFI_OFF);
+  rtcWifiSaved = saved ? 1 : 2;
+  return saved;
+}
 bool hasSavedWiFi() {
   wifi_config_t conf;
   return esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK && conf.sta.ssid[0] != 0;
@@ -1802,12 +1828,13 @@ bool hasSavedWiFi() {
 // the sync and sleep (hold BOOT 8 s to forget the network and set up again)
 bool connectForSync(bool portalIfUnconfigured) {
   WiFi.mode(WIFI_STA);  // also loads the saved credentials
+  rtcWifiSaved = hasSavedWiFi() ? 1 : 2;
   if (!hasSavedWiFi()) {
     if (!portalIfUnconfigured) {
       Serial.println("No saved WiFi, skipping sync");
       return false;
     }
-    connectWiFi();
+    if (!connectWiFi()) return false;
     rtcManualFails = 0;
     return true;
   }
@@ -1825,7 +1852,7 @@ bool connectForSync(bool portalIfUnconfigured) {
     }
     fastTried = true;
     WiFi.begin((const char*)conf.sta.ssid, (const char*)conf.sta.password, rtcWifiChannel, rtcBssid);
-    connected = waitForWiFi(FAST_WIFI_MS);
+    connected = waitForWiFi(FAST_WIFI_MS, 1000);  // "not found" here still gets the full connect (the router may have changed channel)
     if (!connected) {
       Serial.println("Fast WiFi connect failed, doing a full connect");
       WiFi.disconnect();
@@ -1836,6 +1863,17 @@ bool connectForSync(bool portalIfUnconfigured) {
     }
   }
   if (!connected) {
+    // is the network there at all? A router switched off for the night isn't: give up after the
+    // scan instead of trying for WIFI_TIMEOUT_MS
+    int16_t found = WiFi.scanNetworks(false, true, false, NO_AP_SCAN_MS_PER_CH);  // hidden ones too
+    bool seen = false;
+    // a hidden network shows with no name: it might be ours, so that doesn't count as "not found"
+    for (int i = 0; i < found && !seen; i++) seen = WiFi.SSID(i) == String((const char*)conf.sta.ssid) || WiFi.SSID(i).isEmpty();
+    WiFi.scanDelete();
+    if (found >= 0 && !seen) {
+      Serial.printf("WiFi: \"%s\" not found in a scan (%u ms in), giving up: router off?\n", (const char*)conf.sta.ssid, (unsigned)(millis() - t0));
+      return false;
+    }
     WiFi.begin();
     uint32_t spent = millis() - t0;
     connected = waitForWiFi(spent < WIFI_TIMEOUT_MS ? WIFI_TIMEOUT_MS - spent : 0);
@@ -1847,7 +1885,7 @@ bool connectForSync(bool portalIfUnconfigured) {
     rtcWifiChannel = WiFi.channel();
     memcpy(rtcBssid, WiFi.BSSID(), 6);
     if (usedStatic) {
-      rtcDhcpAgeS += SYNC_INTERVAL_S;
+      rtcDhcpAgeS += rtcLastSleepS;  // the sleep actually slept (longer after WiFi failures)
     } else {
       rtcIp = (uint32_t)WiFi.localIP();
       rtcGw = (uint32_t)WiFi.gatewayIP();
@@ -1883,6 +1921,8 @@ bool doSync(bool portalIfUnconfigured, int& added) {
   uint32_t tWifi = millis();
   bool online = connectForSync(portalIfUnconfigured);
   wtWifiMs = millis() - tWifi;  // [PROTOTYPE-ONLY: WAKE TEST]
+  if (online) rtcWifiFails = 0;
+  else if (rtcWifiFails < 255) rtcWifiFails++;
   wakeNow.wifiMs += wtWifiMs;   // [PROTOTYPE-ONLY: WAKE LOG]
   wakeNow.syncs++;
   if (online) wakeNow.rssi = (int8_t)WiFi.RSSI();
@@ -2246,10 +2286,14 @@ void idleWindow() {
   rtc_gpio_pullup_en((gpio_num_t)NEXT_BUTTON);
   rtc_gpio_pulldown_dis((gpio_num_t)NEXT_BUTTON);
   // [PROTOTYPE-ONLY: WAKE TEST] the test's own sleep length while one runs; shipping: SYNC_INTERVAL_S only
-  uint32_t sleepS = rtcWtArmed && rtcWtMode != 'p' ? rtcWtSleepS : SYNC_INTERVAL_S;  // a press test just waits for the press
+  // after failed connects (router off for the night) the sleep grows, so the lamp doesn't spend 20 s
+  // of WiFi every 10 minutes all night; the first connect that works brings it back to SYNC_INTERVAL_S
+  uint32_t sleepS = rtcWifiFails >= 2 ? WIFI_FAIL_SLEEP_2_S : rtcWifiFails == 1 ? WIFI_FAIL_SLEEP_1_S : SYNC_INTERVAL_S;
+  if (rtcWtArmed && rtcWtMode != 'p') sleepS = rtcWtSleepS;  // [PROTOTYPE-ONLY: WAKE TEST] a press test just waits for the press
+  rtcLastSleepS = sleepS;
   esp_sleep_enable_timer_wakeup((uint64_t)sleepS * 1000000ULL);
   if (rtcWtArmed) Serial.println(rtcWtMode == 'p' ? "Wake test: your next NEXT press is the measured wake" : "Wake test: the next timer wake is the measured one");
-  Serial.printf("Sleeping (next sync in %us, or press the button)\n", (unsigned)sleepS);
+  Serial.printf("Sleeping (next sync in %us%s, or press the button)\n", (unsigned)sleepS, rtcWifiFails ? ", longer after failed WiFi" : "");
   Serial.flush();
   // [PROTOTYPE-ONLY: WAKE TEST] the measured wake's time, boot to here (the ~0.2-0.4 s before the firmware
   // starts isn't in millis()); to NVS, because the lamp loses power when the wires go back to normal
@@ -2327,6 +2371,14 @@ void setup() {
     if (rtcWtMode == 'b') goToSleep();
   }
 
+  if (buttonWake && !hasSavedWiFiNow()) {  // never set up (or WiFi forgotten): a press opens setup again, once
+    Serial.println("No WiFi saved: NEXT opens setup");
+    int added = 0;
+    doSync(true, added);
+    loadStoredIds();
+    if (!storedIds.empty() && added > 0) quickPass();
+    goToSleep();
+  }
   if (buttonWake) {  // no WiFi, just step through what's stored
     idleWindow();
     goToSleep();

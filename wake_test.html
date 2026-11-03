@@ -55,9 +55,9 @@ input[type=number] { width: 5em; }
 .big { font: 300 54px/1 "Fraunces", Georgia, serif; font-variant-numeric: tabular-nums; text-shadow: 0 0 22px rgba(255, 205, 130, .2); min-width: 2.4em; }
 .big.awake { color: var(--teal); text-shadow: 0 0 22px rgba(98, 214, 202, .35); }
 .phase { font-size: 14px; flex: 1; min-width: 200px; }
-.asleep { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px; background: rgba(143, 211, 255, .14);
-  border: 1px solid var(--sky); color: var(--sky); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
-.asleep::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--sky); box-shadow: 0 0 8px var(--sky); }
+.asleep { display: inline-flex; align-items: center; justify-content: center; text-align: center; padding: 2px 10px; border-radius: 999px;
+  background: rgba(143, 211, 255, .14); border: 1px solid var(--sky); color: var(--sky); font-size: 10px; line-height: 1.4; letter-spacing: .1em; text-transform: uppercase; }
+.asleep[hidden] { display: none; }  /* the display above would otherwise beat the hidden attribute */
 .todo { border-left: 2px solid var(--gold); padding: 3px 10px; }
 .todo.now { border-color: var(--teal); color: var(--teal); font-size: 14px; }
 .note { font-size: 11px; color: var(--muted); min-height: 1em; }
@@ -124,7 +124,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
       <div class="now-row">
         <div class="big" id="big">—</div>
         <div class="phase" id="phase">Not armed.</div>
-        <div class="asleep" id="asleep" hidden>Asleep · safe to let go</div>
+        <div class="asleep" id="asleep" hidden>Asleep</div>
       </div>
       <div class="todo" id="todo" hidden></div>
       <div class="note" id="note"></div>

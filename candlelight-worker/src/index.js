@@ -327,43 +327,79 @@ export default {
     // phone opening the same page polls them. Readings are stored per minute of
     // session time (teg/{lampId}/{session}/{minute}, [[seconds, mV], ...]) next
     // to a small head object, so neither side ever moves the whole session ----
-    // GET teg/{lampId}/coulomb: the LTC4150 totals the lamp last reported with a sync. [PROTOTYPE-ONLY: LTC4150]
-    if (parts[0] === 'teg' && parts[1] && parts[2] === 'coulomb' && parts.length === 3 && request.method === 'GET') {
-      const obj = await env.LAMP_IMAGES.get(`teg/${parts[1]}/coulomb`);
-      return new Response(obj ? await obj.text() : 'null', {
+    // ---- teg/{lampId}/waketest: times one lamp wake for a meter test of its draw. [PROTOTYPE-ONLY: WAKE TEST]
+    // POST {sleepS, mode: sync|bare|press} arms it, POST {stop: true} cancels it before the lamp
+    // picks it up, GET reads it (wake_test.html polls). /sync below hands it to the lamp once
+    // (pickedUpAt), notes the measured wake checking in (wokeAt, syncing wakes only) and files the
+    // timing the lamp reports on a later sync into the draw log (reportedAt, entryId) ----
+    if (parts[0] === 'teg' && parts[1] && parts[2] === 'waketest' && parts.length === 3) {
+      const key = `teg/${parts[1]}/waketest`;
+      const headers = { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+      const obj = await env.LAMP_IMAGES.get(key);
+      const prev = obj ? await obj.json().catch(() => null) : null;
+      const now = Date.now();
+      if (request.method === 'GET') return new Response(JSON.stringify({ ...(prev || {}), now }), { headers });
+      if (request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        let state;
+        if (body.stop) {
+          if (!prev || !prev.armed) return json({ error: 'nothing armed' }, 404);
+          if (prev.pickedUpAt) return json({ error: 'the lamp already has it; it finishes by itself' }, 409);
+          state = { ...prev, armed: false };
+        } else {
+          const sleepS = Math.round(Number(body.sleepS));
+          if (!(sleepS >= 5 && sleepS <= 600)) return json({ error: 'sleepS must be 5-600' }, 400);
+          if (!['sync', 'bare', 'press'].includes(body.mode)) return json({ error: 'mode must be sync, bare or press' }, 400);
+          state = { armed: true, sleepS, mode: body.mode, armedAt: now, pickedUpAt: null, wokeAt: null, reportedAt: null, entryId: null };
+        }
+        await env.LAMP_IMAGES.put(key, JSON.stringify(state));
+        return new Response(JSON.stringify({ ...state, now }), { headers });
+      }
+    }
+
+    // ---- teg/{lampId}/wakelog: a line per lamp wake, for wake_test.html's console. [PROTOTYPE-ONLY: WAKE LOG]
+    // Filled by /sync: a "sync" line as each request arrives, and the lamp's summaries of its
+    // earlier wakes (button wakes included) from &wl=. GET returns {entries} oldest first ----
+    if (parts[0] === 'teg' && parts[1] && parts[2] === 'wakelog' && parts.length === 3 && request.method === 'GET') {
+      const obj = await env.LAMP_IMAGES.get(`teg/${parts[1]}/wakelog`);
+      return new Response(obj ? await obj.text() : '{"entries":[]}', {
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
       });
     }
 
-    // ---- teg/{lampId}/drain: drain mode, to run the pack down for a charge test. [PROTOTYPE-ONLY: LTC4150]
-    // POST {targetMah} starts it, POST {stop: true} ends it, GET reads it. The lamp learns
-    // whether to keep draining from each sync's header and reports its LTC4150 totals on
-    // the sync request (every 2 min while draining); /sync below adds up what left the
-    // pack and turns drain off once the target is reached ----
-    if (parts[0] === 'teg' && parts[1] && parts[2] === 'drain' && parts.length === 3) {
-      const key = `teg/${parts[1]}/drain`;
+    // ---- teg/{lampId}/drawlog: every measured draw, kept for analysis over weeks. [PROTOTYPE-ONLY: WAKE TEST]
+    // Entries {id, at, kind: sync|bare|press|sleep, awakeMs, wifiMs, syncMs, fw, ma, packV, note}.
+    // Wake entries are filed by /sync from the lamp's report; the meter reading (ma), pack volts and a
+    // note are added from wake_test.html. GET reads all; POST {id, ma?, packV?, note?} edits one,
+    // POST {add: {kind: 'sleep', ma, packV?, note?}} adds a reading with no wake, POST {delete: id} removes one ----
+    if (parts[0] === 'teg' && parts[1] && parts[2] === 'drawlog' && parts.length === 3) {
+      const key = `teg/${parts[1]}/drawlog`;
       const headers = { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
-      if (request.method === 'GET') {
-        const obj = await env.LAMP_IMAGES.get(key);
-        return new Response(obj ? await obj.text() : 'null', { headers });
-      }
+      const obj = await env.LAMP_IMAGES.get(key);
+      const log = obj ? await obj.json().catch(() => ({ entries: [] })) : { entries: [] };
+      if (request.method === 'GET') return new Response(JSON.stringify(log), { headers });
       if (request.method === 'POST') {
         const body = await request.json().catch(() => ({}));
-        const now = Date.now();
-        let state;
-        if (body.stop) {
-          const obj = await env.LAMP_IMAGES.get(key);
-          state = obj ? await obj.json().catch(() => null) : null;
-          if (!state) return json({ error: 'no drain to stop' }, 404);
-          if (state.on) Object.assign(state, { on: false, doneAt: now, endReason: 'stopped' });
+        const num = v => (v === null || v === '' || v === undefined) ? null : (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : undefined);
+        if (body.add) {
+          if (body.add.kind !== 'sleep') return json({ error: 'only sleep readings can be added by hand' }, 400);
+          const ma = num(body.add.ma), packV = num(body.add.packV);
+          if (!(ma > 0)) return json({ error: 'ma must be a positive number' }, 400);
+          log.entries.push({ id: crypto.randomUUID().slice(0, 8), at: Date.now(), kind: 'sleep', awakeMs: null, wifiMs: null, syncMs: null,
+                             fw: null, ma, packV: packV ?? null, note: String(body.add.note || '').slice(0, 300) });
+        } else if (body.delete) {
+          log.entries = log.entries.filter(e => e.id !== body.delete);
         } else {
-          const targetMah = Number(body.targetMah);
-          if (!(targetMah > 0 && targetMah <= 5000)) return json({ error: 'targetMah must be 1-5000' }, 400);
-          state = { on: true, targetMah, mah: 0, startedAt: now, lastAt: null, doneAt: null, endReason: null,
-                    lastIn: null, lastOut: null, points: [] };
+          const e = log.entries.find(x => x.id === body.id);
+          if (!e) return json({ error: 'no such entry' }, 404);
+          if ('ma' in body) { const v = num(body.ma); if (v === undefined) return json({ error: 'bad ma' }, 400); e.ma = v; }
+          if ('packV' in body) { const v = num(body.packV); if (v === undefined) return json({ error: 'bad packV' }, 400); e.packV = v; }
+          if ('note' in body) e.note = String(body.note || '').slice(0, 300);
+          e.editedAt = Date.now();
         }
-        await env.LAMP_IMAGES.put(key, JSON.stringify(state));
-        return new Response(JSON.stringify(state), { headers });
+        if (log.entries.length > 5000) log.entries.splice(0, log.entries.length - 5000);
+        await env.LAMP_IMAGES.put(key, JSON.stringify(log));
+        return new Response(JSON.stringify(log), { headers });
       }
     }
 
@@ -417,17 +453,8 @@ export default {
           settings: body.settings && typeof body.settings === 'object' ? body.settings : {},
           notes,
           lastT,
-          // [PROTOTYPE-ONLY: LTC4150] the laptop's fuel gauge for the phone: {pct, mah, cap, fullAt}
-          gauge: body.gauge && ['pct', 'mah', 'cap', 'fullAt'].every(k => Number.isFinite(body.gauge[k])) ? body.gauge : null,
           // newest pack voltage from the lamp's "BAT," line, for the phone: {mv}
           battery: body.battery && Number.isFinite(body.battery.mv) ? { mv: Math.round(body.battery.mv) } : null,
-          // [PROTOTYPE-ONLY: LTC4150] live LTC4150 totals from the lamp's serial line, relayed for the phone: {in, out, baseIn, baseOut, mahPerTick}
-          coulomb: body.coulomb && ['in', 'out', 'baseIn', 'baseOut', 'mahPerTick'].every(k => Number.isFinite(body.coulomb[k]))
-            ? body.coulomb : null,
-          // [PROTOTYPE-ONLY: LTC4150] the lamp's "LTC tick/glitch" log lines, as the laptop saw them: [{at, text}]
-          ltcLog: Array.isArray(body.ltcLog)
-            ? body.ltcLog.filter(l => l && Number.isFinite(l.at) && typeof l.text === 'string').slice(-300).map(l => ({ at: l.at, text: l.text.slice(0, 400) }))
-            : [],
           updated: Date.now(),
         }));
         return json({ ok: true });
@@ -703,41 +730,73 @@ export default {
     // (one request for all of them). The older /queue + /items routes still work
     // as the lamp's fallback and serve the full PNGs. ----
     if (action === 'sync' && request.method === 'GET') {
-      // [PROTOTYPE-ONLY: LTC4150] coulomb counter totals (ticks into / out of the pack since the lamp's
-      // power-on) ride along on the query string; stored for the TEG monitor page
-      const cin = parseInt(url.searchParams.get('cin'), 10), cout = parseInt(url.searchParams.get('cout'), 10);
-      const haveCoul = Number.isFinite(cin) && Number.isFinite(cout);
-      const mptRaw = parseFloat(url.searchParams.get('mpt'));
-      const mpt = Number.isFinite(mptRaw) ? mptRaw : 0.1707;
-      if (haveCoul) {
-        ctx.waitUntil(env.LAMP_IMAGES.put(`teg/${lampId}/coulomb`, JSON.stringify({
-          in: cin, out: cout, mahPerTick: mpt, at: Date.now(),
-        })));
-      }
       const prefix = `queue/${lampId}/`;
       const t0 = Date.now();
-      const drainKey = `teg/${lampId}/drain`;  // [PROTOTYPE-ONLY: LTC4150]
-      const [listed, fw, drainObj] = await Promise.all([
+      const wtKey = `teg/${lampId}/waketest`;  // [PROTOTYPE-ONLY: WAKE TEST]
+      const [listed, fw, wtObj] = await Promise.all([
         getQueueItems(env, lampId, { include: ['customMetadata'] }),
         env.LAMP_IMAGES.head('firmware/latest.bin'),
-        env.LAMP_IMAGES.get(drainKey),
+        env.LAMP_IMAGES.get(wtKey),
       ]);
-      // [PROTOTYPE-ONLY: LTC4150] drain mode: add what left the pack since the last report
-      // (out - in, so a lit candle counts against it). The totals restart at 0 when the lamp
-      // loses power; a total lower than last time means that happened
-      const drain = drainObj ? await drainObj.json().catch(() => null) : null;
-      if (drain?.on && haveCoul) {
-        const now = Date.now();
-        if (drain.lastIn !== null) {
-          const restarted = cin < drain.lastIn || cout < drain.lastOut;
-          const dIn = restarted ? cin : cin - drain.lastIn, dOut = restarted ? cout : cout - drain.lastOut;
-          drain.mah += (dOut - dIn) * mpt;
+      // [PROTOTYPE-ONLY: WAKE TEST] hand a newly armed test to the lamp (once), note the measured wake
+      // checking in, and file the timing it reports ("awakeMs:wifiMs:syncMs:s|b|p:fw") in the draw log
+      const wt = wtObj ? await wtObj.json().catch(() => null) : null;
+      let wtHead = null;
+      const wtNow = Date.now();
+      let wtChanged = false;
+      if (wt && wt.armed && !wt.pickedUpAt) {
+        wtHead = { sleepS: wt.sleepS, mode: wt.mode };
+        wt.pickedUpAt = wtNow;
+        wtChanged = true;
+      }
+      if (wt && url.searchParams.get('wtw') === '1' && wt.pickedUpAt && !wt.wokeAt) { wt.wokeAt = wtNow; wtChanged = true; }
+      const wtRaw = url.searchParams.get('wt');
+      if (wtRaw) {
+        const [awakeMs, wifiMs, syncMs, mode, fwv, steps, draws, fullDraws] = wtRaw.split(':');
+        const kind = { s: 'sync', b: 'bare', p: 'press' }[mode];
+        const opt = v => (v === undefined || v === '' ? null : +v);
+        const e = { id: crypto.randomUUID().slice(0, 8), at: wtNow, kind, awakeMs: +awakeMs, wifiMs: +wifiMs, syncMs: +syncMs,
+                    steps: opt(steps), draws: opt(draws), fullDraws: opt(fullDraws), fw: fwv || null, ma: null, packV: null, note: '' };
+        if (kind && [e.awakeMs, e.wifiMs, e.syncMs].every(Number.isFinite)) {
+          const logKey = `teg/${lampId}/drawlog`;
+          const logObj = await env.LAMP_IMAGES.get(logKey);
+          const log = logObj ? await logObj.json().catch(() => ({ entries: [] })) : { entries: [] };
+          log.entries.push(e);
+          if (log.entries.length > 5000) log.entries.splice(0, log.entries.length - 5000);
+          ctx.waitUntil(env.LAMP_IMAGES.put(logKey, JSON.stringify(log)));
+          // not an older report riding on the pickup sync
+          if (wt && wt.pickedUpAt && !wtHead && !wt.reportedAt) { wt.reportedAt = wtNow; wt.entryId = e.id; wtChanged = true; }
         }
-        drain.lastIn = cin; drain.lastOut = cout; drain.lastAt = now;
-        drain.points.push([now, Math.round(drain.mah * 100) / 100]);
-        if (drain.points.length > 1500) drain.points.splice(0, drain.points.length - 1500);  // 2 days at one report every 2 min
-        if (drain.mah >= drain.targetMah) Object.assign(drain, { on: false, doneAt: now, endReason: 'target' });
-        ctx.waitUntil(env.LAMP_IMAGES.put(drainKey, JSON.stringify(drain)));
+      }
+      if (wtChanged) ctx.waitUntil(env.LAMP_IMAGES.put(wtKey, JSON.stringify(wt)));
+
+      // [PROTOTYPE-ONLY: WAKE LOG] this request as a "sync" line, plus the lamp's summaries of its earlier wakes
+      // ("startS.cause.reset.awakeMs.wifiMs.syncMs.syncs.syncOk.added.presses.draws.fullDraws.rssi.test.k.steps").
+      // startS is Unix seconds when k=1 (the lamp's clock was set by an earlier sync header's "time"); a k=0 line
+      // comes from a boot that never synced, so it's placed just before this sync, in order
+      const wlNowS = parseInt(url.searchParams.get('wln'), 10);
+      if (Number.isFinite(wlNowS)) {
+        const wlKey = `teg/${lampId}/wakelog`;
+        const wlObj = await env.LAMP_IMAGES.get(wlKey);
+        const wl = wlObj ? await wlObj.json().catch(() => ({ entries: [] })) : { entries: [] };
+        const fwv = url.searchParams.get('fw') || null;
+        let unknown = 0;
+        for (const item of (url.searchParams.get('wl') || '').split(',').filter(Boolean)) {
+          if (item === 'D') { wl.entries.push({ kind: 'dropped', at: wtNow - 1 }); continue; }
+          const f = item.split('.');
+          if (f.length < 14) continue;
+          const n = i => parseInt(f[i], 10);
+          const known = f[14] === undefined ? true : f[14] === '1';
+          const at = known ? n(0) * 1000 : wtNow - 1000 + (unknown++);
+          wl.entries.push({ kind: 'wake', at, clockKnown: known, cause: f[1], reset: n(2), awakeMs: n(3), wifiMs: n(4), syncMs: n(5),
+                            syncs: n(6), syncOk: n(7), added: n(8), presses: n(9), draws: n(10), fullDraws: n(11), rssi: n(12), test: f[13],
+                            steps: f[15] === undefined ? null : n(15), fw: fwv });
+        }
+        wl.entries.push({ kind: 'sync', at: wtNow, cause: url.searchParams.get('cause') || '?', waiting: listed.length,
+                          rssi: parseInt(url.searchParams.get('rssi'), 10), fw: fwv, test: wtHead ? 'armed' : url.searchParams.get('wtw') === '1' ? 'measured' : null });
+        wl.entries.sort((a, b) => a.at - b.at);
+        if (wl.entries.length > 3000) wl.entries.splice(0, wl.entries.length - 3000);
+        ctx.waitUntil(env.LAMP_IMAGES.put(wlKey, JSON.stringify(wl)));
       }
       const timing = [`list+head ${Date.now() - t0}ms`];
       const enc = new TextEncoder();
@@ -752,9 +811,10 @@ export default {
       };
       const headLine = count => enc.encode(JSON.stringify({
         v: 1,
+        time: Date.now(),  // [PROTOTYPE-ONLY: WAKE LOG] sets the lamp's clock, so its wake log carries real times
         count,
         firmware: fw ? { version: fw.customMetadata?.version || '', size: fw.size } : null,
-        drain: drain ? { on: !!drain.on, mah: drain.mah, target: drain.targetMah } : null,  // [PROTOTYPE-ONLY: LTC4150]
+        ...(wtHead ? { waketest: wtHead } : {}),  // [PROTOTYPE-ONLY: WAKE TEST]
       }) + '\n');
       // all the images are fetched at once rather than one after another
       const fetched = listed.map(async (it, i) => {

@@ -14,15 +14,12 @@
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
 #include <esp32/rom/crc.h>        // crc32_le: fingerprint of the picture on screen
-#include <esp32/ulp.h>            // [PROTOTYPE-ONLY: LTC4150] the three ULP headers are only for the coulomb counter
-#include <soc/rtc_io_reg.h>
-#include <soc/rtc_cntl_reg.h>
-#include <soc/gpio_reg.h>       // [PROTOTYPE-ONLY: LTC4150] edge mode reads INT/POL straight from the GPIO registers
 #include <qrcode.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include "epd_png.h"
 #include "ota_guard.h"
 #include "tls_resume.h"
+#include <Preferences.h>  // [PROTOTYPE-ONLY: WAKE TEST] the measured wake's timing survives the power cut
 
 const char* BASE_URL = "https://candlelight.daniloinfinite.workers.dev";
 // stamped in by CI (-DFW_VERSION="<git sha>"); an unstamped local build is "dev"
@@ -48,7 +45,7 @@ const int ANIM_LOOPS = 1;              // times an animation plays through befor
 // ---- sleep schedule ----
 const uint32_t SYNC_INTERVAL_S = 600;                        // [PLACEHOLDER] deep-sleep time between worker syncs (10 min while prototyping)
 const uint32_t WIFI_TIMEOUT_MS = 20000;                      // [PLACEHOLDER] give up on WiFi after this and go back to sleep
-const uint32_t AWAKE_IDLE_MS = 30000;                        // [PLACEHOLDER] stay up this long after the last button press or pass
+const uint32_t AWAKE_IDLE_MS = 10000;                        // [PLACEHOLDER] stay up this long after the last button press or pass (a held button keeps it open, see idleWindow)
 const uint32_t OTA_BUDGET_MS = 150000;                       // [PLACEHOLDER] a firmware download that isn't finished by now is abandoned (retried next check)
 const uint32_t OTA_STALL_MS = 15000;                         // [PLACEHOLDER] ...and so is one that stops delivering data for this long
 const uint32_t FAST_WIFI_MS = 6000;                          // [PLACEHOLDER] fast connect (cached channel/BSSID/IP) gives up after this and does a full connect
@@ -62,481 +59,112 @@ const int MAX_IMAGES = 12;                // most images the device keeps at onc
 const char* MANIFEST_PATH = "/manifest.json";
 const char* TMP_PATH = "/tmp.png";
 
-// ---------- coulomb counter (LTC4150 on the pack wire) ----------
-// [PROTOTYPE-ONLY: LTC4150] bench measurement only; the shipping lamp has no LTC4150.
-// Remove this whole section and every other line tagged with it before shipping:
-//   grep -rn PROTOTYPE-ONLY firmware/ candlelight-worker/
-//
-// The LTC4150 latches INT low each time a fixed charge has passed through its
-// sense resistor, with the direction latched on POL, and holds them until CLR
-// is pulsed low. CLR must NOT be tied to INT (that makes ~1 us pulses the ULP
-// can't see). The ULP coprocessor polls INT every COUL_POLL_US, also in deep
-// sleep, so the main CPU never wakes for a pulse: when INT has gone low since
-// the last poll it reads POL, bumps one of two counters in RTC slow memory and
-// pulses CLR. Only that high -> low edge counts, so an INT stuck low (CLR not
-// reaching the chip) adds one tick, not one per poll; the ULP keeps pulsing CLR
-// while it's low and counts the polls, which the monitor page shows as "stuck". The main CPU
-// reads the counters whenever it's awake (the ULP keeps running) and keeps
-// 32-bit totals; they start at 0 on a real power-on.
-//
-// Wiring (SparkFun BOB-12052): pack + on IN, BQ25504 VBAT on OUT. INT -> D3
-// (GPIO26), POL -> A2 (GPIO34; the FireBeetle 2 has no D4 on its header),
-// CLR -> A4 (GPIO15), VIO -> 3V3, GND -> common GND, SHDN unconnected (pulled
-// up on the board). The board has 3.3k pull-ups to VIO on INT and POL; GPIO34
-// has no internal pull-up anyway. Close SJ2 + SJ3 for 3.3 V logic, open SJ1.
+// ---------- wake test [PROTOTYPE-ONLY: WAKE TEST] ----------
+// Times one wake while a meter in the pack wire reads its current. wake_test.html arms it
+// at the worker (POST teg/<id>/waketest); the next sync's header brings {sleepS, mode}. That
+// is normally the power-up sync right after the meter was wired in. The lamp ends that wake
+// at once (no pass, no button window) and sleeps sleepS, so the page can count down to the
+// measured wake: a real timer wake that syncs, a bare one that boots and goes straight back to
+// sleep, or (button-press test) the next real NEXT press from sleep, whenever it comes. Its time, boot to sleep, goes to NVS, since the lamp loses power
+// when the wires go back to normal, and rides on the next sync request as ?wt=.
+RTC_DATA_ATTR bool rtcWtArmed = false;    // the next timer wake is the measured one
+RTC_DATA_ATTR uint16_t rtcWtSleepS = 0;   // sleep before it
+RTC_DATA_ATTR char rtcWtMode = 's';      // the measured wake: 's' syncs, 'b' bare (straight back to sleep), 'p' your next NEXT press from sleep
+bool wtArmedNow = false;   // this wake's sync brought a test: end the wake at once
+bool wtThisWake = false;   // this is the measured wake
+uint32_t wtWifiMs = 0, wtSyncMs = 0;  // this wake's WiFi connect and sync time
 
-const gpio_num_t COUL_INT = GPIO_NUM_26;    // D3
-const gpio_num_t COUL_POL = GPIO_NUM_34;    // A2, input only
-const gpio_num_t COUL_CLR = GPIO_NUM_15;    // A4
-const gpio_num_t COUL_SHDN_WATCH = GPIO_NUM_21;  // SDA: listens to the SHDN row (a jumper from it), edge mode only; never driven
-const uint32_t COUL_POLL_US = 100000;       // the LTC4150 pulses at most ~1.6 times a second, so 10 polls a second catch every one
-const float COUL_MAH_PER_TICK = 0.1707f;    // 1 / (32.55 Hz/V * 0.05 ohm) = 0.6144 C. Other sense resistor: 0.008533 / ohms
-const bool COUL_POL_HIGH_IS_CHARGE = true;  // POL high = current OUT -> IN, into the pack on IN (SparkFun's convention); flip if they come out swapped
-const int COUL_SLOT_A = 0, COUL_SLOT_B = 1; // ULP counters: [0] POL high, [1] POL low (16 bits each)
-const int COUL_SLOT_PREV = 2;               // INT as of the last poll (1 high, 0 low): only a high -> low edge counts
-const int COUL_SLOT_STUCK = 3;              // polls in a row INT has read low; a cleared pulse is back high by the next poll
-const int COUL_SLOT_GLITCH = 4;             // INT went low but was back high 1 ms later by itself: noise or a bad contact, not a pulse (a real one stays latched until CLR)
-const int COUL_SLOT_POLLS = 5;              // every ULP run, so the log can show the ULP is alive and at what rate
-const uint16_t COUL_STUCK_POLLS = 3;        // this many low polls in a row: CLR isn't releasing INT (wiring, or INT tied to CLR)
-const int COUL_PROG = 8;                    // program loads here, after the counters (words)
-
-RTC_DATA_ATTR uint32_t rtcCoulMagic = 0;
-RTC_DATA_ATTR uint16_t rtcCoulSeenA = 0, rtcCoulSeenB = 0;  // ULP counter values already added to the totals
-RTC_DATA_ATTR uint16_t rtcCoulSeenGlitch = 0;               // same, for the glitch counter
-RTC_DATA_ATTR uint32_t rtcCoulGlitches = 0;                 // glitches since power-on (not counted as ticks)
-uint32_t coulLastTickMs = 0;                                // millis() of the last logged tick, for the gap between ticks
-// what else the lamp was doing when a tick came, for the tick log
-volatile uint32_t actSyncStart = 0, actSyncEnd = 0, actPanelStart = 0, actPanelEnd = 0;
-RTC_DATA_ATTR uint32_t rtcCoulIn = 0, rtcCoulOut = 0;       // ticks into / out of the pack since power-on
-portMUX_TYPE coulMux = portMUX_INITIALIZER_UNLOCKED;
-
-// Drain mode [PROTOTYPE-ONLY: LTC4150]: runs the pack down for a charge test. Started
-// and stopped from the TEG monitor page (POST teg/<id>/drain on the worker); each sync's
-// header says whether to keep going. While it's on the lamp doesn't sleep: it keeps
-// WiFi connected with no power save (~100 mA from the pack) and syncs every
-// DRAIN_REPORT_S, which reports its LTC4150 totals. The worker adds up what left the
-// pack and turns drain off at the target. A "Draining" badge sits top-left meanwhile
-const uint32_t DRAIN_REPORT_S = 60;   // a sync (status report) this often while draining
-const uint32_t DRAIN_LTC_POST_MS = 5000;  // [PROTOTYPE-ONLY: LTC4150] the LTC log lines go to the TEG relay this often while draining
-const uint32_t DRAIN_LOST_S = 3600;   // no word from the worker for this long: stop draining and sleep as usual
-bool drainOn = false;                 // set by every sync header; deep sleep resets it
-uint32_t drainHeardAt = 0;            // millis() of the last header that said so
-RTC_DATA_ATTR bool rtcDrainShown = false;  // the screen shows the "Draining" badge
-
-void coulombStartUlp();
-
-void coulombBegin(bool wokeFromSleep) {
-  if (rtcCoulMagic != 0xC0170150 || esp_reset_reason() == ESP_RST_POWERON) {
-    RTC_SLOW_MEM[COUL_SLOT_A] = 0;
-    RTC_SLOW_MEM[COUL_SLOT_B] = 0;
-    RTC_SLOW_MEM[COUL_SLOT_GLITCH] = 0;
-    rtcCoulSeenA = rtcCoulSeenB = rtcCoulSeenGlitch = 0;
-    rtcCoulIn = rtcCoulOut = rtcCoulGlitches = 0;
-    rtcCoulMagic = 0xC0170150;
-  }
-  if (wokeFromSleep) return;  // the ULP has been running all along; reloading it could drop a pulse
-  coulombStartUlp();
+// the measured wake's timing as "awakeMs:wifiMs:syncMs:s|b|p:fwVersion:steps:refreshes:fullRefreshes", kept until a sync delivers it
+String wtPending() {
+  Preferences p;
+  if (!p.begin("waketest", true)) return "";
+  String r = p.getString("res", "");
+  p.end();
+  return r;
+}
+void wtSetPending(const String& r) {
+  Preferences p;
+  if (!p.begin("waketest", false)) return;
+  if (r.isEmpty()) p.remove("res"); else p.putString("res", r);
+  p.end();
 }
 
-// (re)takes the pins for the RTC side and loads + starts the ULP poller; the counters in RTC memory stay
-void coulombStartUlp() {
-  for (gpio_num_t p : { COUL_INT, COUL_POL }) {
-    rtc_gpio_init(p);
-    rtc_gpio_set_direction(p, RTC_GPIO_MODE_INPUT_ONLY);
-  }
-  // INT gets a pull-DOWN: the board's 3.3k to VIO still wins (~3.1 V). A pull-up here fed VIO backwards through that 3.3k and
-  // half-ran the chip without its VIO wire: every tick or POL low then dragged SHDN down and
-  // reset it (bursts, phantom "out" ticks, lost charge). GPIO34 (POL) has no internal pulls
-  rtc_gpio_pullup_dis(COUL_INT);
-  rtc_gpio_pulldown_en(COUL_INT);
-  rtc_gpio_init(COUL_CLR);
-  rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_OUTPUT_ONLY);
-  rtc_gpio_set_level(COUL_CLR, 1);
+// ---------- wake log [PROTOTYPE-ONLY: WAKE LOG] ----------
+// A one-line summary of every wake (timer, button, power-up/restart), so wake_test.html can show
+// what the lamp did while it runs on the pack with no USB. Each line is appended to a file in
+// flash (/wakelog.txt) just before sleep, so a power cut can't lose it (LittleFS writes are
+// power-safe), and sent on the next sync request as &wl=, so it costs no extra connection; a
+// wake's own line goes out with the sync after it. Times are real clock times: every sync header
+// carries the worker's clock ("time"), which sets the lamp's clock, and that keeps running through
+// deep sleep. After a power cut the clock starts from 0 until the power-up sync sets it; the
+// power-up wake's start is corrected then. A line from a boot that never synced is marked
+// "clock unknown" (k=0) and the worker places it just before the sync that delivers it.
+struct WakeRec {
+  uint32_t startS;            // clock seconds at wake (Unix time once set)
+  char cause;                 // 'T' timer, 'B' button, 'P' power-on, 'R' other restart (see reset)
+  uint8_t reset;              // esp_reset_reason(): 3 software (update), 4-7 crash/watchdog, 9 brownout
+  uint32_t awakeMs, wifiMs, syncMs;
+  uint8_t syncs, syncOk, added, presses, steps, draws, fullDraws;  // presses: every press or hold; steps: presses that moved to the next image
+  int8_t rssi;
+  char test;                  // wake test: 's'/'b'/'p' measured wake, 'a' armed this wake, '-' none
+  bool clockKnown;            // startS is real time
+};
+const char* WAKE_LOG_PATH = "/wakelog.txt";
+const size_t WAKE_LOG_MAX_BYTES = 6000;       // ~100 lines; older ones are dropped beyond this
+RTC_DATA_ATTR bool rtcClockSet = false;       // the clock holds real time (cleared by a power cut)
+WakeRec wakeNow = {};  // this wake, filled in as it goes and filed in goToSleep()
+bool fsReady = false;  // LittleFS mounted
 
-  const int intBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_INT);
-  const int polBit = RTC_GPIO_IN_NEXT_S + rtc_io_number_get(COUL_POL);
-  const int clrRtc = rtc_io_number_get(COUL_CLR);
-  enum { L_DONE, L_HIGH, L_LOW, L_CLEAR, L_GLITCH };
-  const ulp_insn_t prog[] = {
-    I_MOVI(R3, 0),                                   // R3 = the counters' base address
-    I_LD(R1, R3, COUL_SLOT_POLLS), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_POLLS),
-    I_RD_REG(RTC_GPIO_IN_REG, intBit, intBit),       // R0 = INT
-    M_BGE(L_HIGH, 1),                                // high: nothing latched
-    I_LD(R1, R3, COUL_SLOT_STUCK), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_STUCK),
-    I_LD(R0, R3, COUL_SLOT_PREV),                    // R0 = INT at the last poll
-    I_MOVI(R2, 0), I_ST(R2, R3, COUL_SLOT_PREV),
-    M_BL(L_CLEAR, 1),                                // was low already: counted then, just try the clear again
-    I_DELAY(8000),                                   // ~1 ms, then INT again: a real pulse stays latched until CLR
-    I_RD_REG(RTC_GPIO_IN_REG, intBit, intBit),
-    M_BGE(L_GLITCH, 1),                              // back high by itself: noise or a contact blip, not a tick
-    I_RD_REG(RTC_GPIO_IN_REG, polBit, polBit),       // R0 = POL, latched with INT
-    M_BL(L_LOW, 1),
-    I_LD(R1, R3, COUL_SLOT_A), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_A),
-    M_BX(L_CLEAR),
-    M_LABEL(L_LOW),
-    I_LD(R1, R3, COUL_SLOT_B), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_B),
-    M_LABEL(L_CLEAR),                                // CLR low >= 20 us releases INT and POL
-    I_WR_REG(RTC_GPIO_OUT_W1TC_REG, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, RTC_GPIO_OUT_DATA_W1TC_S + clrRtc, 1),
-    I_DELAY(8000),                                   // ~1 ms at 8 MHz: well over the 20 us minimum, for slower boards
-    I_WR_REG(RTC_GPIO_OUT_W1TS_REG, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, RTC_GPIO_OUT_DATA_W1TS_S + clrRtc, 1),
-    M_BX(L_DONE),
-    M_LABEL(L_GLITCH),
-    I_LD(R1, R3, COUL_SLOT_GLITCH), I_ADDI(R1, R1, 1), I_ST(R1, R3, COUL_SLOT_GLITCH),
-    M_LABEL(L_HIGH),                                 // (a glitch falls through: INT is high again)
-    I_MOVI(R2, 1), I_ST(R2, R3, COUL_SLOT_PREV),
-    I_MOVI(R2, 0), I_ST(R2, R3, COUL_SLOT_STUCK),
-    M_LABEL(L_DONE),
-    I_HALT(),
-  };
-  size_t size = sizeof(prog) / sizeof(ulp_insn_t);
-  CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // a soft reset can leave the old program ticking
-  RTC_SLOW_MEM[COUL_SLOT_PREV] = 1;  // a pulse already latched at boot still counts once
-  RTC_SLOW_MEM[COUL_SLOT_STUCK] = 0;
-  RTC_SLOW_MEM[COUL_SLOT_GLITCH] = 0;  // older firmware left these slots unused: start them clean
-  RTC_SLOW_MEM[COUL_SLOT_POLLS] = 0;
-  rtcCoulSeenGlitch = 0;
-  esp_err_t err = ulp_process_macros_and_load(COUL_PROG, prog, &size);
-  if (err == ESP_OK) {
-    ulp_set_wakeup_period(0, COUL_POLL_US);
-    err = ulp_run(COUL_PROG);
-  }
-  Serial.printf("Coulomb counter: ULP %s\n", err == ESP_OK ? "running" : esp_err_to_name(err));
+uint32_t rtcSeconds() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  return (uint32_t)tv.tv_sec;
 }
-
-extern volatile uint32_t tegLastHeartbeat;  // TEG monitor section, below
-
-// [PROTOTYPE-ONLY: LTC4150] every "LTC ..." log line goes to serial and into a small ring, which drain
-// mode posts to the worker's TEG relay (USB is unplugged then, so the page can't relay them)
-struct LtcLine { uint32_t ms; String text; };
-std::vector<LtcLine> ltcRing;
-const size_t LTC_RING_MAX = 120;  // ~8 min of POL lines at one per 5 s, plus ticks
-portMUX_TYPE ltcRingMux = portMUX_INITIALIZER_UNLOCKED;
-SemaphoreHandle_t ltcRingLock = nullptr;
-void ltcOut(const char* fmt, ...) {
-  char buf[512];
-  va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
-  Serial.print(buf);
-  if (!ltcRingLock) ltcRingLock = xSemaphoreCreateMutex();
-  xSemaphoreTake(ltcRingLock, portMAX_DELAY);
-  String t(buf); t.trim();
-  ltcRing.push_back({ millis(), t });
-  if (ltcRing.size() > LTC_RING_MAX) ltcRing.erase(ltcRing.begin());
-  xSemaphoreGive(ltcRingLock);
+// the worker's clock (ms) from a sync header: set ours, and fix this wake's start if it was counted from 0
+void wakeLogSetClock(double workerMs) {
+  if (!(workerMs > 1.6e12)) return;
+  uint32_t before = rtcSeconds();
+  struct timeval tv = { (time_t)(workerMs / 1000), 0 };
+  settimeofday(&tv, nullptr);
+  if (!wakeNow.clockKnown) {
+    wakeNow.startS += rtcSeconds() - before;
+    wakeNow.clockKnown = true;
+  }
+  rtcClockSet = true;
 }
-
-// Edge mode [PROTOTYPE-ONLY: LTC4150]: while the monitor page holds the lamp awake, the
-// ULP is paused and INT goes to a hardware GPIO interrupt instead. The ULP only looks at
-// INT every 100 ms, so a pulse shorter than that (INT released by something other than our
-// CLR) is never seen; the GPIO peripheral latches an edge however short it is. Each tick's
-// log line gives how long INT stayed low and what released it, which tells whether the
-// chip's pulses are latched (released by our clear) or short (released by themselves).
-// Before sleep (or when the page lets go) the pins go back to the ULP.
-volatile uint32_t coulEdgeA = 0, coulEdgeB = 0;      // ticks by POL (high / low), like the ULP's slots
-volatile uint32_t coulEdgeShort = 0;                 // of those, pulses already over when the ISR looked (< ~5 us)
-volatile uint32_t coulLowSinceUs = 0;                // micros() INT went low; 0 = INT high
-volatile uint32_t coulLastWidthUs = 0;               // how long the last pulse held INT low
-volatile bool coulLastByClear = false;               // the last pulse ended because we pulsed CLR
-volatile bool coulClearing = false;                  // CLR is low right now
-volatile bool coulClearPending = false;
-uint32_t coulSeenEdgeA = 0, coulSeenEdgeB = 0, coulSeenEdgeShort = 0;
-// SHDN watch: low on SHDN (or VDD < 2.5 V) resets the chip's internal counter to 0. INT only fires
-// when that counter passes 1024 steps (~15-30 s at 1-2 mV), so drops more often than that keep a
-// good chip from ever ticking, and a meter can't see them. Same edge trick as INT
-volatile uint32_t shdnDrops = 0, shdnShortDrops = 0;  // drops; of those, over before the ISR could look (< ~5 us)
-volatile uint32_t shdnLowSinceUs = 0, shdnLastWidthUs = 0, shdnLongestUs = 0;
-// POL watch: POL shows the direction of the most recent charge the chip saw whenever INT is high
-// (low = out of the pack), so its share of time high vs low says which way the current really nets
-volatile uint32_t polFlips = 0, polSinceUs = 0;
-volatile uint64_t polHighUs = 0, polLowUs = 0;
-volatile bool polLevel = true;
-uint32_t polLastReport = 0, polSeenFlips = 0;
-uint32_t shdnSeenDrops = 0, shdnSeenShort = 0, shdnLastReport = 0, shdnLastDropMs = 0;
-uint32_t coulClearTries = 0;                         // clears in a row that didn't release INT
-bool coulEdgeOn = false;
-SemaphoreHandle_t coulModeLock = nullptr;
-
-void IRAM_ATTR coulIsr() {
-  uint32_t now = micros();
-  // plain register reads: an ISR mustn't call into flash (LittleFS writes switch the flash cache off)
-  bool low = !((REG_READ(GPIO_IN_REG) >> COUL_INT) & 1);
-  bool pol = (REG_READ(GPIO_IN1_REG) >> (COUL_POL - 32)) & 1;
-  if (low) {
-    if (!coulLowSinceUs) {  // a new pulse
-      coulLowSinceUs = now | 1;
-      if (pol) coulEdgeA++; else coulEdgeB++;
-      coulClearPending = true;
-    }
-  } else if (coulLowSinceUs) {  // released
-    coulLastWidthUs = now - coulLowSinceUs;
-    coulLastByClear = coulClearing;
-    coulLowSinceUs = 0;
-  } else {  // the edge latched but INT is high again already: a pulse shorter than the ISR's latency
-    if (pol) coulEdgeA++; else coulEdgeB++;
-    coulEdgeShort++;
-    coulLastWidthUs = 0;
-    coulLastByClear = false;
+// "startS.cause.reset.awakeMs.wifiMs.syncMs.syncs.syncOk.added.presses.draws.fullDraws.rssi.test.k.steps"
+void wakeLogFile() {
+  if (!fsReady) return;
+  wakeNow.awakeMs = millis();
+  if (wakeNow.test == 0) wakeNow.test = '-';
+  const WakeRec& w = wakeNow;
+  String line = String(w.startS) + "." + w.cause + "." + w.reset + "." + w.awakeMs + "." + w.wifiMs + "." + w.syncMs + "." +
+                w.syncs + "." + w.syncOk + "." + w.added + "." + w.presses + "." + w.draws + "." + w.fullDraws + "." +
+                w.rssi + "." + w.test + "." + (w.clockKnown ? 1 : 0) + "." + w.steps + "\n";
+  File f = LittleFS.open(WAKE_LOG_PATH, "a");
+  if (!f) return;
+  bool full = f.size() + line.length() > WAKE_LOG_MAX_BYTES;
+  f.print(line);
+  f.close();
+  if (full) {  // keep the newest half (rare: only when syncs keep failing)
+    File in = LittleFS.open(WAKE_LOG_PATH, "r");
+    String all = in ? in.readString() : String();
+    if (in) in.close();
+    int cut = all.indexOf('\n', all.length() / 2);
+    File out = LittleFS.open(WAKE_LOG_PATH, "w");
+    if (out) { out.print("D\n"); out.print(all.substring(cut + 1)); out.close(); }  // "D": lines were dropped here
   }
 }
-
-void coulombPoll();
-uint32_t readTegMv();
-
-void IRAM_ATTR shdnIsr() {
-  uint32_t now = micros();
-  bool low = !((REG_READ(GPIO_IN_REG) >> COUL_SHDN_WATCH) & 1);
-  if (low) {
-    if (!shdnLowSinceUs) { shdnLowSinceUs = now | 1; shdnDrops++; }
-  } else if (shdnLowSinceUs) {
-    shdnLastWidthUs = now - shdnLowSinceUs;
-    if (shdnLastWidthUs > shdnLongestUs) shdnLongestUs = shdnLastWidthUs;
-    shdnLowSinceUs = 0;
-  } else {  // dropped and came back before the ISR looked
-    shdnDrops++; shdnShortDrops++; shdnLastWidthUs = 0;
-  }
-}
-
-void IRAM_ATTR polIsr() {
-  uint32_t now = micros();
-  bool lvl = (REG_READ(GPIO_IN1_REG) >> (COUL_POL - 32)) & 1;
-  if (lvl == polLevel) { polFlips += 2; return; }  // flipped and back before we looked: count it, time unknown
-  uint32_t dt = now - polSinceUs;
-  if (polLevel) polHighUs += dt; else polLowUs += dt;
-  polLevel = lvl; polSinceUs = now; polFlips++;
-}
-
-int coulPin(gpio_num_t p) { return coulEdgeOn ? gpio_get_level(p) : rtc_gpio_get_level(p); }
-
-void coulombEdgeStart() {
-  if (!coulModeLock) coulModeLock = xSemaphoreCreateMutex();
-  xSemaphoreTake(coulModeLock, portMAX_DELAY);
-  if (!coulEdgeOn) {
-    CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // pause the ULP
-    delay(5);                                                                // let a run in progress finish
-    coulombPoll();                                                           // take what it counted
-    for (gpio_num_t p : { COUL_INT, COUL_POL, COUL_CLR }) rtc_gpio_deinit(p);
-    pinMode(COUL_CLR, OUTPUT);
-    digitalWrite(COUL_CLR, HIGH);
-    pinMode(COUL_INT, INPUT_PULLDOWN);  // same pull-down as the ULP side (the board's pull-up wins)
-    pinMode(COUL_POL, INPUT);
-    coulLowSinceUs = 0;
-    coulClearPending = false;
-    coulClearTries = 0;
-    coulEdgeOn = true;
-    attachInterrupt(COUL_INT, coulIsr, CHANGE);
-    if (!digitalRead(COUL_INT)) coulIsr();  // already latched: count it once and clear it
-    ltcOut("LTC: edge mode on (hardware interrupt on INT while the monitor is connected or drain mode is on; catches pulses of any length)\n");
-    polLevel = digitalRead(COUL_POL); polSinceUs = micros(); polHighUs = polLowUs = 0; polFlips = 0;
-    polSeenFlips = 0; polLastReport = millis();
-    attachInterrupt(COUL_POL, polIsr, CHANGE);
-    pinMode(COUL_SHDN_WATCH, INPUT_PULLDOWN);  // no jumper in = reads low, so a missing wire can't pass for a healthy SHDN
-    shdnLowSinceUs = 0;
-    attachInterrupt(COUL_SHDN_WATCH, shdnIsr, CHANGE);
-    shdnLastReport = millis();
-    ltcOut("LTC SHDN watch on (SDA/GPIO21): SHDN reads %s\n", digitalRead(COUL_SHDN_WATCH)
-                  ? "HIGH (chip enabled)" : "LOW: the chip is shut down, or the SDA jumper isn't in the SHDN row");
-  }
-  xSemaphoreGive(coulModeLock);
-}
-
-void coulombEdgeStop() {
-  if (!coulModeLock) return;
-  xSemaphoreTake(coulModeLock, portMAX_DELAY);
-  if (coulEdgeOn) {
-    detachInterrupt(COUL_INT);
-    detachInterrupt(COUL_SHDN_WATCH);
-    detachInterrupt(COUL_POL);
-    coulombPoll();
-    coulEdgeOn = false;
-    coulombStartUlp();  // re-takes the pins for the RTC side and restarts the poller
-    ltcOut("LTC: edge mode off, back to the ULP poller\n");
-  }
-  xSemaphoreGive(coulModeLock);
-}
-
-// edge mode's CLR pulse, from the TEG task (every 20 ms): 1 ms low, like the ULP's
-void coulombEdgeService() {
-  if (!coulEdgeOn) return;
-  uint32_t now = millis();
-  // POL watch report every 5 s: share of time the chip saw current into vs out of the pack
-  if (now - polLastReport >= 5000) {
-    noInterrupts();
-    uint32_t t = micros();
-    uint64_t hi = polHighUs, lo = polLowUs;
-    if (polLevel) hi += t - polSinceUs; else lo += t - polSinceUs;
-    polHighUs = polLowUs = 0; polSinceUs = t;
-    uint32_t flips = polFlips;
-    interrupts();
-    uint32_t nf = flips - polSeenFlips; polSeenFlips = flips;
-    float tot = (float)(hi + lo);
-    float inPct = tot > 0 ? 100.0f * hi / tot : 0;
-    bool in = COUL_POL_HIGH_IS_CHARGE;
-    ltcOut("LTC POL last %.0f s: into pack %.1f%% / out of pack %.1f%% | %u flips (%.1f/s) | POL now %d | INT %d | TEG %u mV | up %u s\n",
-                  tot / 1e6, in ? inPct : 100 - inPct, in ? 100 - inPct : inPct, (unsigned)nf, nf / max(1.0f, tot / 1e6f),
-                  gpio_get_level(COUL_POL), gpio_get_level(COUL_INT), (unsigned)readTegMv(), (unsigned)(now / 1000));
-    polLastReport = now;
-  }
-  // SHDN watch report: every batch of drops at once, plus an all-clear once a minute
-  uint32_t d = shdnDrops, ds = shdnShortDrops;
-  if (d != shdnSeenDrops) {
-    uint32_t n = d - shdnSeenDrops, ns = ds - shdnSeenShort;
-    String gap = shdnLastDropMs ? String((now - shdnLastDropMs) / 1000.0f, 1) + " s since the last drop" : String("first drop");
-    ltcOut("LTC SHDN DROPPED x%u (%u shorter than ~5 us) | last one %s | longest %.1f us | %s | SHDN now %s | INT %d | TEG %u mV | up %u s | each drop resets the chip's counter\n",
-                  (unsigned)n, (unsigned)ns, shdnLowSinceUs ? "STILL LOW" : (String((float)shdnLastWidthUs, 1) + " us").c_str(),
-                  (float)shdnLongestUs, gap.c_str(), gpio_get_level(COUL_SHDN_WATCH) ? "high" : "LOW",
-                  gpio_get_level(COUL_INT), (unsigned)readTegMv(), (unsigned)(now / 1000));
-    shdnSeenDrops = d; shdnSeenShort = ds; shdnLastDropMs = now; shdnLastReport = now;
-  } else if (now - shdnLastReport >= 60000) {
-    shdnLastReport = now;
-    ltcOut("LTC SHDN watch: no drops in the last 60 s, SHDN %s (%u drops since the watch started)\n",
-                  gpio_get_level(COUL_SHDN_WATCH) ? "high" : "LOW (shut down, or the jumper isn't in)", (unsigned)d);
-  }
-  bool low = !gpio_get_level(COUL_INT);
-  if (!coulClearPending && !low) { coulClearTries = 0; return; }
-  coulClearPending = false;
-  coulClearing = true;
-  digitalWrite(COUL_CLR, LOW);
-  delay(1);
-  digitalWrite(COUL_CLR, HIGH);
-  delayMicroseconds(50);
-  coulClearing = false;
-  if (!gpio_get_level(COUL_INT)) {
-    if (++coulClearTries == 3) ltcOut("LTC: INT still low after 3 clears (edge mode): CLR isn't releasing it\n");
-  } else {
-    coulClearTries = 0;
-  }
-}
-
-// "LTC TEST" from the monitor page: pauses the ULP, drives the pins by hand and
-// prints what INT, POL and CLR do, with a verdict, to find why INT sticks low
-void coulombTest() {
-  coulombEdgeStop();  // the test drives the pins through the RTC side; the TEG task turns edge mode back on after
-  CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // pause the ULP
-  delay(5);
-  auto rd = [](gpio_num_t p) { return rtc_gpio_get_level(p); };
-  int intDown = rd(COUL_INT);  // INT's normal pull-down: high here = the board's pull-up (VIO) is there
-  rtc_gpio_pulldown_dis(COUL_INT); rtc_gpio_pullup_en(COUL_INT); delay(1);
-  int intUp = rd(COUL_INT);
-  rtc_gpio_pullup_dis(COUL_INT); rtc_gpio_pulldown_en(COUL_INT); delay(1);
-  int pol = rd(COUL_POL);
-  rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_INPUT_OUTPUT);  // so the pad's real level can be read back
-  rtc_gpio_set_level(COUL_CLR, 1); delay(1);
-  int clrHigh = rd(COUL_CLR);
-  rtc_gpio_set_level(COUL_CLR, 0); delay(5);
-  int clrLow = rd(COUL_CLR), intInClr = rd(COUL_INT), polInClr = rd(COUL_POL);
-  rtc_gpio_set_level(COUL_CLR, 1); delay(2);
-  int intAfter = rd(COUL_INT);
-  delay(300);
-  int intLater = rd(COUL_INT);
-  // time the pulses: clear, then wait for INT to latch again (up to 1.5 s, 5 times, well under the monitor's heartbeat timeout)
-  uint32_t gaps[5]; int pols[5], nGaps = 0;
-  for (int k = 0; k < 5; k++) {
-    rtc_gpio_set_level(COUL_CLR, 0); delay(1); rtc_gpio_set_level(COUL_CLR, 1);
-    uint32_t t0 = millis();
-    while (rd(COUL_INT) && millis() - t0 < 1500) delayMicroseconds(200);
-    if (rd(COUL_INT)) break;  // no pulse within 1.5 s: normal below ~0.6 A
-    gaps[nGaps] = millis() - t0; pols[nGaps++] = rd(COUL_POL);
-  }
-  rtc_gpio_set_direction(COUL_CLR, RTC_GPIO_MODE_OUTPUT_ONLY);
-  RTC_SLOW_MEM[COUL_SLOT_PREV] = rd(COUL_INT);  // so the ULP doesn't count the test
-  RTC_SLOW_MEM[COUL_SLOT_STUCK] = 0;
-  SET_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN);  // resume
-  if (tegLastHeartbeat) tegLastHeartbeat = millis() | 1;  // the page's heartbeats queued up while this ran
-
-  Serial.println("LTC test: counter paused during the test");
-  Serial.printf("LTC test: INT %d with ESP pull-up, %d with ESP pull-down; POL %d\n", intUp, intDown, pol);
-  Serial.printf("LTC test: CLR pad reads %d driven high, %d driven low\n", clrHigh, clrLow);
-  Serial.printf("LTC test: CLR held low 5 ms: INT %d, POL %d\n", intInClr, polInClr);
-  Serial.printf("LTC test: CLR back high: INT %d after 2 ms, %d after 300 ms\n", intAfter, intLater);
-  if (nGaps) {
-    uint32_t sum = 0;
-    for (int k = 0; k < nGaps; k++) { sum += gaps[k]; Serial.printf("LTC test: pulse %d came %u ms after the clear, POL %d\n", k + 1, (unsigned)gaps[k], pols[k]); }
-    float gapS = max(0.001f, sum / 1000.0f / nGaps);
-    // f = 32.55 Hz per volt across the sense resistor
-    Serial.printf("LTC test: %.1f pulses/s = %.0f mV across the sense resistor = %.0f mA if it's 0.05 ohm (a healthy chip tops out at 1.6/s, 50 mV)\n",
-                  1 / gapS, 1000 / (32.55f * gapS), 1000 / (32.55f * gapS * 0.05f));
-  } else {
-    Serial.println("LTC test: no pulse within 1.5 s of a clear: the current is below ~0.6 A, as expected");
-  }
-  const char* verdict;
-  if (!clrHigh) verdict = "CLR (A4) can't go high: it's shorted to GND or something holds it down";
-  else if (clrLow) verdict = "CLR (A4) can't go low: it's tied to 3V3 or to something that drives it high";
-  else if (!intUp && !intDown && !intInClr) verdict = "INT is held low even while CLR is low, so it isn't the latch. Likely: VIO not at 3.3 V (the board pull-up then pulls INT to 0 V), INT shorted to GND, the chip unpowered (no pack voltage on the board), or in shutdown (tie SHDN to 3V3)";
-  else if (intInClr && !intAfter) verdict = "CLR releases INT but it latches again at once: the chip sees pulses nonstop. Check the sense side: pack on IN, BQ on OUT, both GNDs common";
-  else if (intInClr && intAfter && !intLater) verdict = "CLR works, but the chip pulses far faster than a TEG could make it: it sees a large voltage across its sense resistor. Feel the board and pack for heat; check nothing from USB/VCC reaches the pack, BQ or LTC side, and read the sense resistor's marking";
-  else if (intInClr && intLater) verdict = intUp ? "INT and CLR both behave: the counter should work now" : "CLR releases INT and it stays released: the old 50 us clear was too short for this board, fixed by the 1 ms clear";
-  else verdict = "unexpected combination, send me these lines";
-  Serial.printf("LTC test: %s\n", verdict);
-}
-
-// INT has read low for several polls in a row: the LTC4150 isn't being cleared
-uint32_t readTegMv();
-
-bool coulombStuck() { return coulEdgeOn ? coulClearTries >= 3 : (RTC_SLOW_MEM[COUL_SLOT_STUCK] & 0xFFFF) >= COUL_STUCK_POLLS; }
-
-// "sync running 4 s" / "last sync 312 s ago" and the same for the panel, for the tick log
-String coulActivity(const char* what, uint32_t start, uint32_t end) {
-  uint32_t now = millis();
-  if (!start) return String(what) + " none yet";
-  if (start > end) return String(what) + " RUNNING " + (now - start) / 1000 + " s";
-  return String(what) + " ended " + (now - end) / 1000 + " s ago";
-}
-
-// adds what the ULP counted since the last call to the totals, and logs every tick and
-// glitch with what the lamp was doing at the time (checked every 20 ms while the
-// monitor page is connected, so the time is close)
-void coulombPoll() {
-  uint16_t a = RTC_SLOW_MEM[COUL_SLOT_A] & 0xFFFF, b = RTC_SLOW_MEM[COUL_SLOT_B] & 0xFFFF;
-  uint16_t g = RTC_SLOW_MEM[COUL_SLOT_GLITCH] & 0xFFFF;
-  portENTER_CRITICAL(&coulMux);
-  uint16_t da = a - rtcCoulSeenA, db = b - rtcCoulSeenB;  // 16-bit wrap is fine: never 65 k pulses between reads
-  uint16_t dg = g - rtcCoulSeenGlitch;
-  rtcCoulSeenA = a; rtcCoulSeenB = b; rtcCoulSeenGlitch = g;
-  uint32_t ea = coulEdgeA, eb = coulEdgeB, es = coulEdgeShort;  // edge mode's ticks (0 while the ULP has the pins)
-  da += ea - coulSeenEdgeA; db += eb - coulSeenEdgeB;
-  uint32_t dShort = es - coulSeenEdgeShort;
-  coulSeenEdgeA = ea; coulSeenEdgeB = eb; coulSeenEdgeShort = es;
-  uint16_t dIn = COUL_POL_HIGH_IS_CHARGE ? da : db, dOut = COUL_POL_HIGH_IS_CHARGE ? db : da;
-  rtcCoulIn += dIn;
-  rtcCoulOut += dOut;
-  rtcCoulGlitches += dg;
-  portEXIT_CRITICAL(&coulMux);
-  static bool logStarted = false;  // whatever the first poll after a boot finds was counted before the log ran
-  if (!logStarted) {
-    logStarted = true;
-    if (dIn || dOut || dg) ltcOut("LTC: counted before this log started (around the restart): in %u out %u glitches %u\n", dIn, dOut, dg);
-    return;
-  }
-  if (!dIn && !dOut && !dg) return;
-
-  // "LTC tick: ..." / "LTC glitch: ...", one line each; the monitor page keeps them and relays them
-  uint32_t now = millis();
-  String ctx = String("TEG ") + readTegMv() + " mV | WiFi " +
-               (WiFi.getMode() == WIFI_OFF ? "off" : WiFi.status() == WL_CONNECTED ? "connected" : "on, not connected") +
-               " | " + coulActivity("sync", actSyncStart, actSyncEnd) + " | " + coulActivity("panel", actPanelStart, actPanelEnd) +
-               " | INT " + coulPin(COUL_INT) + " POL " + coulPin(COUL_POL) +
-               " | up " + now / 1000 + " s | " +
-               (coulEdgeOn ? String("edge mode") : String("ULP polls ") + (RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF));
-  if (coulEdgeOn && (dIn || dOut)) {
-    // how the pulse ended: tells latched pulses (our clear releases them) from short ones (released by themselves)
-    String w;
-    if (dShort) w = String("SHORT pulse x") + dShort + ": INT was back high before the interrupt could look (< ~5 us), released by itself";
-    else if (coulLowSinceUs) w = "INT still low, clear coming";
-    else w = String("INT held low ") + String(coulLastWidthUs / 1000.0f, 2) + " ms, released " +
-             (coulLastByClear ? "by our clear (latched pulse, normal)" : "BY ITSELF before our clear");
-    ctx = w + " | " + ctx;
-  }
-  if (dIn || dOut) {
-    String gap = coulLastTickMs ? String((now - coulLastTickMs) / 1000.0f, 1) + " s" : String("first");
-    // the TEG gives tens of mA at most, a tick every ~15 s or slower; under 3 s needs > ~0.3 A
-    bool fast = coulLastTickMs && now - coulLastTickMs < 3000;
-    ltcOut("LTC tick: %s%s%s | gap %s%s | totals in %u out %u | %s\n",
-                  dIn ? (String("in x") + dIn).c_str() : "", dIn && dOut ? " + " : "", dOut ? (String("out x") + dOut).c_str() : "",
-                  gap.c_str(), fast || dIn + dOut > 1 ? " | TOO FAST, can't be real current" : "",
-                  (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, ctx.c_str());
-    coulLastTickMs = now;
-  }
-  if (dg) ltcOut("LTC glitch: INT dropped and came back by itself x%u (not counted) | glitches total %u | %s\n",
-                        dg, (unsigned)rtcCoulGlitches, ctx.c_str());
+// the unsent lines, comma separated, for &wl=
+String wakeLogQuery() {
+  if (!fsReady) return "";
+  File f = LittleFS.open(WAKE_LOG_PATH, "r");
+  if (!f) return "";
+  String all = f.readString();
+  f.close();
+  all.trim();
+  all.replace("\n", ",");
+  return all;
 }
 
 // manifest.json is an array, oldest first, one entry per stored image:
@@ -1239,11 +867,22 @@ SyncResult syncBundle(int& added) {
   bool tank = psramFound();
   uint32_t tGet = millis();
   long bodyLen;
-  // [PROTOTYPE-ONLY: LTC4150] the coulomb counter's totals ride along on the sync request; shipping: plain "/lamp/<id>/sync"
-  coulombPoll();
-  String syncPath = String("/lamp/") + LAMP_ID + "/sync?cin=" + rtcCoulIn + "&cout=" + rtcCoulOut + "&mpt=" + String(COUL_MAH_PER_TICK, 6);
+  String syncPath = String("/lamp/") + LAMP_ID + "/sync";
+  String q;
+  auto param = [&](const String& kv) { q += (q.isEmpty() ? "?" : "&") + kv; };
+  // [PROTOTYPE-ONLY: WAKE TEST] the measured wake's timing, once; and whether this is the measured wake
+  String wtSent = wtPending();
+  if (!wtSent.isEmpty()) param("wt=" + wtSent);
+  if (wtThisWake) param("wtw=1");
+  // [PROTOTYPE-ONLY: WAKE LOG] earlier wakes' summaries, the clock to place them by, and this wake so far
+  String wlSent = wakeLogQuery();
+  if (!wlSent.isEmpty()) param("wl=" + wlSent);
+  param(String("wln=") + rtcSeconds() + "&wlk=" + (rtcClockSet ? 1 : 0) + "&fw=" + FW_VERSION + "&rssi=" + (int)WiFi.RSSI() + "&cause=" + String(wakeNow.cause));
+  syncPath += q;
   int code = rawRequest(client, "GET", syncPath, "", bodyLen);
   Serial.printf("Request to response headers %u ms (WiFi signal %d dBm)\n", (unsigned)(millis() - tGet), (int)WiFi.RSSI());
+  if (code == 200 && !wtSent.isEmpty()) wtSetPending("");  // [PROTOTYPE-ONLY: WAKE TEST] delivered
+  if (code == 200 && !wlSent.isEmpty()) LittleFS.remove(WAKE_LOG_PATH);  // [PROTOTYPE-ONLY: WAKE LOG] delivered (lines are only added at sleep, so these are all of them)
   if (code != 200) {
     Serial.printf("Bundle sync: HTTP %d\n", code);
     return SYNC_FALLBACK;
@@ -1259,13 +898,17 @@ SyncResult syncBundle(int& added) {
   }
   workerFwVersion = head["firmware"]["version"] | "";
   workerFwSize = head["firmware"]["size"] | 0;
-  // [PROTOTYPE-ONLY: LTC4150] drain mode: the worker says whether to keep going (no "drain": off)
-  bool wasDraining = drainOn;
-  drainOn = head["drain"]["on"] | false;
-  drainHeardAt = millis();
-  if (drainOn || wasDraining)
-    Serial.printf("Drain mode %s: %.0f of %.0f mAh out of the pack\n", drainOn ? "on" : "finished",
-                  head["drain"]["mah"] | 0.0f, head["drain"]["target"] | 0.0f);
+  wakeLogSetClock(head["time"] | 0.0);  // [PROTOTYPE-ONLY: WAKE LOG]
+  // [PROTOTYPE-ONLY: WAKE TEST] a new wake test: sent once by the worker
+  if (head["waketest"].is<JsonObject>()) {
+    rtcWtSleepS = constrain(head["waketest"]["sleepS"] | 15, 5, 600);
+    const char* m = head["waketest"]["mode"] | "sync";
+    rtcWtMode = !strcmp(m, "bare") ? 'b' : !strcmp(m, "press") ? 'p' : 's';
+    rtcWtArmed = true;
+    wtArmedNow = true;
+    Serial.printf("Wake test armed: sleeping %u s as soon as this sync is done, then a %s wake to measure\n",
+                  (unsigned)rtcWtSleepS, rtcWtMode == 's' ? "syncing" : rtcWtMode == 'b' ? "bare" : "button-press");
+  }
   int count = head["count"] | 0;
   Serial.printf("Bundle: %d item(s) waiting (header after %u ms)\n", count, (unsigned)(millis() - tStart));
   passMoreComing = count > 0;
@@ -1525,10 +1168,9 @@ void drawBadge(Adafruit_GFX& g, int n) {
   drawBoxedText(g, txt, 6, -6);
 }
 
-// top-left corner: feedback that the 5 s sync hold registered, otherwise
-// "Draining" while drain mode is on ([PROTOTYPE-ONLY: LTC4150])
-void drawSyncBadge(Adafruit_GFX& g, bool syncing) {
-  drawBoxedText(g, syncing ? "Syncing..." : "Draining", 6, 6);
+// top-left corner: feedback that the 5 s sync hold registered
+void drawSyncBadge(Adafruit_GFX& g) {
+  drawBoxedText(g, "Syncing...", 6, 6);
 }
 
 // bottom-left corner: where and when the image on screen was sent (the 2 s
@@ -1639,7 +1281,7 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
   if (img.bpp == 2) {
     ditherToMono(img, frameBuf, monoBuf);
     bitmap = monoBuf;
-  } else if (img.bpp == 1 && badge <= 0 && !syncBadge && !drainOn && !info) {
+  } else if (img.bpp == 1 && badge <= 0 && !syncBadge && !info) {
     bitmap = frameBuf;
   } else if (img.bpp == 1) {
     memcpy(monoBuf, frameBuf, sizeof(monoBuf));  // a badge goes on a copy, the frame stays as read
@@ -1647,16 +1289,15 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
   } else {
     return false;
   }
-  if (badge > 0 || syncBadge || drainOn || info) {
+  if (badge > 0 || syncBadge || info) {
     MonoCanvas canvas(monoBuf, W, H);
     if (badge > 0) drawBadge(canvas, badge);
-    if (syncBadge || drainOn) drawSyncBadge(canvas, syncBadge);
+    if (syncBadge) drawSyncBadge(canvas);
     if (info) drawInfoBox(canvas, info, badge > 0);
   }
   lastBuildMs = millis() - t0;
 
   uint32_t t1 = millis();
-  actPanelStart = t1 | 1;  // [PROTOTYPE-ONLY: LTC4150] for the tick log
   auto& e = display.epd2;
   if (partial) {
     e.writeImage(bitmap, 0, 0, W, H);
@@ -1669,14 +1310,13 @@ bool drawDirect(const EpdImage& img, bool partial, int badge, bool syncBadge, co
     e.powerOff();
   }
   lastPanelMs = millis() - t1;
-  actPanelEnd = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150]
   return true;
 }
 
 // fingerprint of what drawFrame would put up: the frame and everything drawn over it
 uint32_t pictureHash(const EpdImage& img, int badge, bool syncBadge, const char* info) {
   uint32_t h = crc32_le(0, frameBuf, epdFrameBytes(img));
-  int32_t extras[] = { img.w, img.h, img.bpp, badge, syncBadge, drainOn };
+  int32_t extras[] = { img.w, img.h, img.bpp, badge, syncBadge, 0 };  // the 0 was drain mode's badge: kept so the fingerprints of pictures on screen still match
   h = crc32_le(h, (const uint8_t*)extras, sizeof(extras));
   if (info) h = crc32_le(h, (const uint8_t*)info, strlen(info));
   return h;
@@ -1693,6 +1333,8 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
   }
   if (FULL_REFRESH_ON_WAKE && wokeFromSleep && !drewThisWake) partial = false;
   drewThisWake = true;
+  wakeNow.draws++;                    // [PROTOTYPE-ONLY: WAKE LOG]
+  if (!partial) wakeNow.fullDraws++;
   display.setRotation(img.w < img.h ? 1 : 0);  // portrait images (300x400) rotate the panel
   if (display.width() != img.w || display.height() != img.h) {
     Serial.printf("Image is %ux%u but panel is %dx%d, skipping\n", img.w, img.h, display.width(), display.height());
@@ -1710,7 +1352,6 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
   else display.setFullWindow();
   uint32_t tBuild = 0, tPanel = 0;
   bool more;
-  actPanelStart = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150] for the tick log
   display.firstPage();
   do {
     uint32_t t0 = millis();
@@ -1721,7 +1362,7 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
       }
     }
     if (badge > 0) drawBadge(display, badge);
-    if (syncBadge || drainOn) drawSyncBadge(display, syncBadge);
+    if (syncBadge) drawSyncBadge(display);
     if (info) drawInfoBox(display, info, badge > 0);
     tBuild += millis() - t0;
     uint32_t t1 = millis();
@@ -1730,13 +1371,13 @@ void drawFrame(const EpdImage& img, bool partial, int badge = 0, bool syncBadge 
   } while (more);
   lastBuildMs = tBuild;
   lastPanelMs = tPanel;
-  actPanelEnd = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150]
   rtcScreenHash = hash;
   rtcScreenMagic = SCREEN_MAGIC;
 }
 
 // set by buttonTask on each press of the NEXT button, cleared when consumed
 volatile bool nextPressed = false;
+volatile bool buttonDown = false;   // NEXT or BOOT is being held: the idle window stays open, so a long hold can finish
 // set by buttonTask when the NEXT button is held for SYNC_HOLD_MS, cleared when handled
 volatile bool syncRequested = false;
 // set by buttonTask when NEXT is held for REPLAY_HOLD_MS..SYNC_HOLD_MS and released
@@ -1937,7 +1578,7 @@ void tegTask(void*) {
   analogSetPinAttenuation(TEG_PIN, ADC_11db);
   analogSetPinAttenuation(BAT_PIN, ADC_11db);
   String cmd;
-  uint32_t lastSample = 0, lastBat = 0, lastCoul = 0;  // lastCoul: [PROTOTYPE-ONLY: LTC4150]
+  uint32_t lastSample = 0, lastBat = 0;
   for (;;) {
     while (Serial.available()) {
       char c = Serial.read();
@@ -1949,8 +1590,6 @@ void tegTask(void*) {
           tegLastHeartbeat = millis() | 1;  // never 0
         } else if (cmd == "SYNC") {  // the monitor page's "sync now": same as a 5 s NEXT hold
           syncRequested = true;
-        } else if (cmd == "LTC TEST") {  // [PROTOTYPE-ONLY: LTC4150]
-          coulombTest();
         } else if (cmd == "TEG OFF") {
           if (tegLastHeartbeat) Serial.println("TEG monitor off");
           tegLastHeartbeat = 0;
@@ -1967,19 +1606,7 @@ void tegTask(void*) {
         lastBat = millis();
         Serial.printf("BAT,%u\n", (unsigned)readBatMv());
       }
-      if (millis() - lastCoul >= 1000) {  // [PROTOTYPE-ONLY: LTC4150] coulomb totals once a second: "COUL,<ticks in>,<ticks out>,<mAh per tick>,<INT>,<POL>,<stuck>"
-        lastCoul = millis();
-        coulombPoll();
-        // then the raw INT and POL levels and the stuck flag, for wiring checks: "...,<INT>,<POL>,<stuck>",
-        // then glitches (not counted) and the ULP's 16-bit poll counter: "...,<glitches>,<polls>"
-        Serial.printf("COUL,%u,%u,%.6f,%d,%d,%d,%u,%u\n", (unsigned)rtcCoulIn, (unsigned)rtcCoulOut, COUL_MAH_PER_TICK,
-                      coulPin(COUL_INT), coulPin(COUL_POL), coulombStuck() ? 1 : 0,
-                      (unsigned)rtcCoulGlitches, (unsigned)(RTC_SLOW_MEM[COUL_SLOT_POLLS] & 0xFFFF));
-      }
     }
-    // [PROTOTYPE-ONLY: LTC4150] edge mode while the page is connected, the ULP otherwise; poll every 20 ms so each tick's log line has a close time
-    if (tegMonitoring() || drainOn) { coulombEdgeStart(); coulombEdgeService(); coulombPoll(); }
-    else coulombEdgeStop();
     delay(20);
   }
 }
@@ -2085,6 +1712,7 @@ void buttonTask(void*) {
     } else {
       heldSince = 0;
     }
+    buttonDown = nextHeldSince || heldSince;
     delay(50);
   }
 }
@@ -2242,8 +1870,6 @@ bool connectForSync(bool portalIfUnconfigured) {
 // firmware the worker reported is installed only at the end of the wake (see
 // updateBeforeSleep), so nobody waits for it. False if it couldn't get online
 bool doSync(bool portalIfUnconfigured, int& added) {
-  actSyncStart = millis() | 1;  // [PROTOTYPE-ONLY: LTC4150] for the tick log
-  struct SyncEnd { ~SyncEnd() { actSyncEnd = millis() | 1; } } syncEnd;
   added = 0;
   waitForWriter();  // an earlier sync this wake may still be storing
   passQueue.clear();  // the pass shows only what this sync brings
@@ -2254,7 +1880,13 @@ bool doSync(bool portalIfUnconfigured, int& added) {
   for (MemImage& m : memImages) free(m.data);
   memImages.clear();
   saveSeenFlags();  // the sync rewrites the manifest from flash (and callers reload it even when it fails), so save our changes first
-  if (!connectForSync(portalIfUnconfigured)) return false;
+  uint32_t tWifi = millis();
+  bool online = connectForSync(portalIfUnconfigured);
+  wtWifiMs = millis() - tWifi;  // [PROTOTYPE-ONLY: WAKE TEST]
+  wakeNow.wifiMs += wtWifiMs;   // [PROTOTYPE-ONLY: WAKE LOG]
+  wakeNow.syncs++;
+  if (online) wakeNow.rssi = (int8_t)WiFi.RSSI();
+  if (!online) return false;
   cycleOk = true;
   uint32_t tSync = millis();
   SyncResult sr = syncBundle(added);
@@ -2262,6 +1894,10 @@ bool doSync(bool portalIfUnconfigured, int& added) {
     Serial.println(sr == SYNC_FALLBACK ? "Falling back to the per-image sync" : "Finishing with the per-image sync");
     added += syncQueue();
   }
+  wtSyncMs = millis() - tSync;  // [PROTOTYPE-ONLY: WAKE TEST]
+  wakeNow.syncMs += wtSyncMs;   // [PROTOTYPE-ONLY: WAKE LOG]
+  wakeNow.syncOk++;
+  wakeNow.added += added;
   Serial.printf("Sync took %u ms (%u ms since wake)\n", (unsigned)(millis() - tSync), (unsigned)millis());
   if (!writerBusy) {
     WiFi.disconnect(true);
@@ -2537,81 +2173,18 @@ void quietSync() {
   if (added > 0 && !storedIds.empty()) quickPass();
 }
 
-// [PROTOTYPE-ONLY: LTC4150] keeps WiFi connected between drain reports (a sync turns it off)
-void drainKeepWiFi() {
-  if (WiFi.status() != WL_CONNECTED) connectForSync(false);  // connects with power save off
-}
-
-// [PROTOTYPE-ONLY: LTC4150] drain mode: posts the LTC log ring (POL / SHDN / tick lines) and the TEG
-// reading to the TEG relay as session "drain-<lamp>", so they can be read with GET /teg/<lamp> while
-// USB is unplugged. "at" is the lamp's uptime in ms, not a clock time
-void drainPostLtcLog() {
-  drainKeepWiFi();
-  if (WiFi.status() != WL_CONNECTED) return;
-  JsonDocument doc;
-  doc["session"] = String("drain-") + LAMP_ID;
-  doc["start"] = 0;
-  JsonArray smp = doc["samples"].to<JsonArray>();
-  JsonArray one = smp.add<JsonArray>();
-  one.add(millis() / 1000.0); one.add(readTegMv());
-  JsonArray lg = doc["ltcLog"].to<JsonArray>();
-  if (!ltcRingLock) ltcRingLock = xSemaphoreCreateMutex();
-  xSemaphoreTake(ltcRingLock, portMAX_DELAY);
-  for (const LtcLine& l : ltcRing) { JsonObject o = lg.add<JsonObject>(); o["at"] = l.ms; o["text"] = l.text; }
-  xSemaphoreGive(ltcRingLock);
-  JsonObject c = doc["coulomb"].to<JsonObject>();
-  c["in"] = rtcCoulIn; c["out"] = rtcCoulOut; c["baseIn"] = 0; c["baseOut"] = 0; c["mahPerTick"] = COUL_MAH_PER_TICK;
-  String body; serializeJson(doc, body);
-  // one connection kept open between posts (every DRAIN_LTC_POST_MS); a fresh one only when it dropped
-  static ResumableTLS* client = nullptr;
-  if (!client) client = new ResumableTLS;
-  if (!client->connected()) {
-    client->stop();
-    if (!connectWorker(*client, "LTC log")) return;
-  }
-  long len;
-  int code = rawRequest(*client, "POST", String("/teg/") + LAMP_ID, body, len, 4000);
-  if (len > 0) { uint8_t junk[64]; long left = len; uint32_t t0 = millis();  // read the reply body so the next request starts clean
-    while (left > 0 && millis() - t0 < 2000) { int n = client->read(junk, min(left, (long)sizeof(junk))); if (n > 0) left -= n; else delay(1); } }
-  if (code != 200) { client->stop(); Serial.printf("Drain mode: LTC log post failed, HTTP %d\n", code); }
-}
-
-// [PROTOTYPE-ONLY: LTC4150] drain mode's report is a quiet sync
-void drainReport() {
-  Serial.println("Drain mode: reporting to the worker");
-  quietSync();
-}
-
-
 const uint32_t SEEN_SAVE_MS = 3000;  // the seen flags are written this long after the last press
 
 // stays awake until AWAKE_IDLE_MS after the last activity so the NEXT button
 // can step through the images; a 2 s hold replays an animation (on a still it
 // toggles the info box), a 5 s hold syncs
 void idleWindow() {
-  uint32_t last = millis(), lastSync = millis(), lastLtcPost = 0;
-  while (millis() - last < AWAKE_IDLE_MS || tegMonitoring() || drainOn) {  // the TEG monitor page and drain mode keep the lamp up
-    if (drainOn) {  // [PROTOTYPE-ONLY: LTC4150]
-      if (cycleOk) otaguard::markValid();
-      if (millis() - drainHeardAt >= DRAIN_LOST_S * 1000UL) {
-        Serial.printf("Drain mode: no word from the worker for %u min, stopping\n", (unsigned)(DRAIN_LOST_S / 60));
-        drainOn = false;
-      } else if (millis() - lastSync >= DRAIN_REPORT_S * 1000UL) {
-        drainReport();
-        last = lastSync = millis();
-        installUpdateNow();  // a newer firmware the report found goes in now (reboots), as with the monitor page
-      } else if (millis() - lastLtcPost >= DRAIN_LTC_POST_MS) {
-        lastLtcPost = millis();
-        drainPostLtcLog();
-      } else {
-        drainKeepWiFi();
-      }
-    }
-    if (drainOn != rtcDrainShown) {  // [PROTOTYPE-ONLY: LTC4150] put up or take down the "Draining" badge
-      rtcDrainShown = drainOn;
-      if (drainOn) Serial.printf("Drain mode on: staying awake with WiFi up, reporting every %u min\n", (unsigned)(DRAIN_REPORT_S / 60));
-      redrawCurrent(false);
-    }
+  uint32_t last = millis(), lastSync = millis();
+  // a held button counts as activity: the 5 s sync hold, the 8 s BOOT "forget WiFi" hold and a hold
+  // that began as the wake-up press all finish however short AWAKE_IDLE_MS is
+  while (buttonDown || millis() - last < AWAKE_IDLE_MS || tegMonitoring()) {  // the TEG monitor page keeps the lamp up
+    if (buttonDown) last = millis();
+    if (wtArmedNow) break;  // [PROTOTYPE-ONLY: WAKE TEST] a test was armed: sleep now, so the page's countdown holds
     if (tegMonitoring()) {
       if (cycleOk) otaguard::markValid();  // a sleep would have done it by now (only acts once)
       // held awake, it keeps the sync schedule it would have kept asleep
@@ -2630,6 +2203,7 @@ void idleWindow() {
     if (seenDirty) wait = min(wait, SEEN_SAVE_MS);
     bool pressed = waitForNext(wait);
     if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
+    if (syncRequested || replayRequested || pressed) wakeNow.presses++;  // [PROTOTYPE-ONLY: WAKE LOG]
     if (syncRequested) {
       manualSync();
       last = lastSync = millis();
@@ -2647,14 +2221,14 @@ void idleWindow() {
       last = millis();
     } else if (pressed) {
       if (rtcInfoShown) toggleInfo();  // the press after the info box only takes it away
-      else if (!storedIds.empty()) stepNext();
+      else if (!storedIds.empty()) { stepNext(); wakeNow.steps++; }  // [PROTOTYPE-ONLY: WAKE LOG]
       last = millis();
     }
   }
 }
 
 [[noreturn]] void goToSleep() {
-  if (tegMonitoring() || drainOn) idleWindow();  // the TEG monitor is connected, or drain mode is on: stay up (buttons work)
+  if (tegMonitoring() && !wtArmedNow) idleWindow();  // the TEG monitor is connected: stay up (buttons work)
   waitForWriter();                     // the images must be on flash (and acked) before sleep wipes PSRAM
   if (cycleOk) otaguard::markValid();  // the cycle did its job: keep this firmware
   else otaguard::beforeSleep();        // it didn't (say, no WiFi): a rollback proves nothing about it
@@ -2668,14 +2242,25 @@ void idleWindow() {
 
   if (displayReady) display.hibernate();
   WiFi.mode(WIFI_OFF);
-  coulombEdgeStop();  // [PROTOTYPE-ONLY: LTC4150] the ULP must have the pins in sleep
   esp_sleep_enable_ext0_wakeup((gpio_num_t)NEXT_BUTTON, 0);
   rtc_gpio_pullup_en((gpio_num_t)NEXT_BUTTON);
   rtc_gpio_pulldown_dis((gpio_num_t)NEXT_BUTTON);
-  esp_sleep_enable_timer_wakeup((uint64_t)SYNC_INTERVAL_S * 1000000ULL);
-  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);  // [PROTOTYPE-ONLY: LTC4150] the ULP's pins and pull-ups stay live in sleep
-  Serial.printf("Sleeping (next sync in %us, or press the button)\n", (unsigned)SYNC_INTERVAL_S);
+  // [PROTOTYPE-ONLY: WAKE TEST] the test's own sleep length while one runs; shipping: SYNC_INTERVAL_S only
+  uint32_t sleepS = rtcWtArmed && rtcWtMode != 'p' ? rtcWtSleepS : SYNC_INTERVAL_S;  // a press test just waits for the press
+  esp_sleep_enable_timer_wakeup((uint64_t)sleepS * 1000000ULL);
+  if (rtcWtArmed) Serial.println(rtcWtMode == 'p' ? "Wake test: your next NEXT press is the measured wake" : "Wake test: the next timer wake is the measured one");
+  Serial.printf("Sleeping (next sync in %us, or press the button)\n", (unsigned)sleepS);
   Serial.flush();
+  // [PROTOTYPE-ONLY: WAKE TEST] the measured wake's time, boot to here (the ~0.2-0.4 s before the firmware
+  // starts isn't in millis()); to NVS, because the lamp loses power when the wires go back to normal
+  if (wtArmedNow) wakeNow.test = 'a';  // [PROTOTYPE-ONLY: WAKE LOG]
+  else if (wtThisWake) wakeNow.test = rtcWtMode;
+  wakeLogFile();
+  if (wtThisWake) {
+    uint32_t ms = millis();
+    wtSetPending(String(ms) + ":" + wtWifiMs + ":" + wtSyncMs + ":" + String(rtcWtMode) + ":" + FW_VERSION + ":" +
+                 wakeNow.steps + ":" + wakeNow.draws + ":" + wakeNow.fullDraws);  // the version says which timings (idle window etc.) it ran with
+  }
   esp_deep_sleep_start();
 }
 
@@ -2697,6 +2282,11 @@ void setup() {
   bool buttonWake = cause == ESP_SLEEP_WAKEUP_EXT0;
   bool timerWake = cause == ESP_SLEEP_WAKEUP_TIMER;
   wokeFromSleep = buttonWake || timerWake;
+  // [PROTOTYPE-ONLY: WAKE LOG] what woke us
+  wakeNow.startS = rtcSeconds();
+  wakeNow.clockKnown = rtcClockSet;
+  wakeNow.reset = (uint8_t)esp_reset_reason();
+  wakeNow.cause = timerWake ? 'T' : buttonWake ? 'B' : esp_reset_reason() == ESP_RST_POWERON ? 'P' : 'R';
   if (esp_reset_reason() == ESP_RST_POWERON) {  // RTC memory also survives soft resets (e.g. after an update)
     forgetScreen();  // RTC_NOINIT: whatever was in it at power-up is garbage
     rtcViewIdx = 0;
@@ -2707,12 +2297,12 @@ void setup() {
   Serial.printf("Wake: %s (reset reason %d), PSRAM %u KB free\n", buttonWake ? "button" : timerWake ? "timer" : "power-up/reset",
                 (int)esp_reset_reason(), (unsigned)(ESP.getFreePsram() / 1024));  // 1 power-on, 3 software (update), 4/5/6/7 crash/watchdog, 9 brownout
   if (buttonWake) rtc_gpio_deinit((gpio_num_t)NEXT_BUTTON);
-  coulombBegin(wokeFromSleep);  // [PROTOTYPE-ONLY: LTC4150]
 
   if (!LittleFS.begin(true)) {  // true = format on first boot
     Serial.println("LittleFS mount failed");
     goToSleep();
   }
+  fsReady = true;
   // after deep sleep the panel still holds its image, so partial refreshes keep working
   display.init(115200, !wokeFromSleep);
   displayReady = true;
@@ -2727,6 +2317,16 @@ void setup() {
   loadStoredIds();
   if (rtcViewIdx >= (int)storedIds.size()) rtcViewIdx = 0;
 
+  // [PROTOTYPE-ONLY: WAKE TEST] the measured wake: a button-press test waits for a real NEXT press from
+  // sleep (timer wakes before it don't count); the others take the next timer wake. A syncing one
+  // carries on as a normal timer wake, a bare one goes straight back to sleep
+  if (rtcWtArmed && (rtcWtMode == 'p' ? buttonWake : timerWake)) {
+    rtcWtArmed = false;
+    wtThisWake = true;
+    Serial.printf("Wake test: this is the measured wake (%s)\n", rtcWtMode == 's' ? "syncing" : rtcWtMode == 'b' ? "bare" : "button press");
+    if (rtcWtMode == 'b') goToSleep();
+  }
+
   if (buttonWake) {  // no WiFi, just step through what's stored
     idleWindow();
     goToSleep();
@@ -2739,10 +2339,12 @@ void setup() {
   loadStoredIds();
 
   // power-up always shows something (the panel's state is unknown); a timer wake only when images arrived
-  if (!storedIds.empty() && (!timerWake || added > 0 || passDrawn > 0)) {  // a pass the sync started must end on image 1
+  // [PROTOTYPE-ONLY: WAKE TEST] a power-up that just took a wake test draws nothing new: it goes to sleep at once
+  bool wtSkip = wtArmedNow && added == 0 && passDrawn == 0;
+  if (!wtSkip && !storedIds.empty() && (!timerWake || added > 0 || passDrawn > 0)) {  // a pass the sync started must end on image 1
     quickPass();
     idleWindow();
-  } else if (otaguard::updatePending() && !storedIds.empty()) {
+  } else if (!wtSkip && otaguard::updatePending() && !storedIds.empty()) {
     // first run of a new firmware with nothing new to show: still prove the display path
     Serial.println("First run of a new firmware: proving the display path before keeping it");
     drawIndex(rtcViewIdx, rtcBadge, rtcViewIdx == 0);

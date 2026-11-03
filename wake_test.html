@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#050607">
+<title>Wake Test</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..400,100&display=swap">
+<style>
+/* [PROTOTYPE-ONLY: WAKE TEST] Same look as teg_monitor.html: flat dark field, hairlines, monospace. */
+@font-face { font-family: "JetBrains Mono Local"; src: url("fonts/JetBrainsMono-Regular.ttf") format("truetype"); font-display: swap; }
+:root {
+  --bg: #050607; --line: #14171a; --fg: #ece4d4; --muted: #6c7074; --dim: #34383c;
+  --gold: #ffd98a; --teal: #62d6ca; --ember: #ff6a3d;
+  --mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, "JetBrains Mono Local", Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 400 13px/1.55 var(--mono); padding: 18px 16px 48px; -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 18px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 20px; }
+h1 { font: 300 26px/1.1 "Fraunces", Georgia, serif; margin: 0; }
+.status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); }
+.dot.on { background: var(--gold); box-shadow: 0 0 8px var(--gold); }
+section { border-top: 1px solid var(--line); padding-top: 14px; display: grid; gap: 10px; }
+.label { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+button, input { font: inherit; color: inherit; }
+.link { background: none; border: 0; padding: 2px 0; cursor: pointer; color: var(--fg); text-decoration: underline; text-decoration-color: var(--dim); text-underline-offset: 4px; }
+.link:hover { color: var(--gold); text-decoration-color: var(--gold); }
+.link:disabled { color: var(--dim); cursor: default; text-decoration-color: var(--line); }
+.link:focus-visible, input:focus-visible { outline: 1px solid var(--gold); outline-offset: 3px; }
+.row { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: end; }
+label.f { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+input[type=number], input[type=text] { background: transparent; border: 0; border-bottom: 1px solid var(--dim); padding: 3px 0; }
+input[type=number] { width: 7em; }
+.opt { display: flex; gap: 8px; align-items: baseline; cursor: pointer; }
+input[type=radio] { accent-color: var(--gold); }
+.big { font: 300 76px/1 "Fraunces", Georgia, serif; font-variant-numeric: tabular-nums; text-shadow: 0 0 26px rgba(255, 205, 130, .22); }
+.big.awake { color: var(--teal); text-shadow: 0 0 26px rgba(98, 214, 202, .35); }
+.phase { font-size: 15px; }
+.todo { border-left: 2px solid var(--gold); padding: 6px 12px; }
+.todo.now { border-color: var(--teal); color: var(--teal); font-size: 16px; }
+.asleep { justify-self: start; display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px;
+  background: rgba(143, 211, 255, .14); border: 1px solid #8fd3ff; color: #8fd3ff; font-size: 14px; letter-spacing: .08em; text-transform: uppercase; }
+.asleep::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #8fd3ff; box-shadow: 0 0 8px #8fd3ff; }
+.muted { color: var(--muted); }
+.err { color: var(--ember); }
+ol { margin: 0; padding-left: 22px; display: grid; gap: 6px; }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 960px; }
+th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th.l, td.l { text-align: left; }
+th { font-weight: 400; color: var(--muted); font-size: 11px; }
+td input[type=number] { width: 5.5em; text-align: right; }
+td input[type=text] { width: 14em; }
+tr.fresh td { background: rgba(98, 214, 202, .08); }
+tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
+.saved { color: var(--teal); font-size: 11px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+.stat { background: var(--bg); padding: 10px 12px; display: grid; gap: 2px; }
+.stat .v { font: 300 26px/1.1 "Fraunces", Georgia, serif; }
+.budget { font: 300 34px/1.1 "Fraunces", Georgia, serif; }
+.console { height: 300px; overflow-y: auto; border: 1px solid var(--line); padding: 8px 10px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.console .t { color: var(--muted); }
+.console .sync { color: var(--muted); }
+.console .day { color: var(--dim); margin-top: 6px; }
+.console .warn { color: var(--ember); }
+.console .test { color: var(--teal); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Wake test</h1>
+    <span class="status"><span class="dot" id="dot"></span><span id="conn">connecting to the worker…</span></span>
+  </header>
+
+  <section>
+    <div class="label">1 · pick a test and arm it (lamp wired as normal)</div>
+    <label class="opt"><input type="radio" name="mode" value="sync" checked> <span><b>Syncing wake</b>: the normal 10-minute wake. WiFi on, check the worker, back to sleep.</span></label>
+    <label class="opt"><input type="radio" name="mode" value="bare"> <span><b>Bare wake</b>: boots and goes straight back to sleep, no WiFi. Its reading is the <b>local current</b>, used to split the syncing wake.</span></label>
+    <label class="opt"><input type="radio" name="mode" value="press"> <span><b>Button press</b>: your next NEXT press from sleep is the measured wake. Step through as many images as you like; it goes back to sleep 10 s after your last press. Logs how many presses stepped an image and how many refreshes were full vs partial. No countdown for this one.</span></label>
+    <div class="row">
+      <label class="f">countdown before the measured wake, s (not used for a button press)<input type="number" id="sleepS" min="5" max="600" step="5" value="10"></label>
+      <button class="link" id="arm">arm the test</button><button class="link" id="cancel">cancel</button><span id="armMsg" class="muted"></span>
+    </div>
+  </section>
+
+  <section>
+    <div class="label">2 · wire the meter in, then power on</div>
+    <ol>
+      <li><b>Cut the power.</b> Unplug USB from the FireBeetle too (on USB the meter reads nothing). Candle out.</li>
+      <li>Take the wire to the FireBeetle's <b>VCC</b> pin out of the BAT row and put it in an <b>empty row</b> (row X).</li>
+      <li>Red probe in the <b>10A</b> jack, dial on <b>10A</b>. Black probe in <b>COM</b>.</li>
+      <li>Hold the red probe on a jumper from the <b>BAT row</b> (pack +), the black probe on a jumper from <b>row X</b>.</li>
+      <li><b>Power back on.</b> The lamp boots, syncs, takes the test and goes to sleep. The countdown below starts then. Ignore the meter until it reaches 0.</li>
+    </ol>
+  </section>
+
+  <section>
+    <div class="label">3 · countdown</div>
+    <div class="big" id="big">—</div>
+    <div class="phase" id="phase">Not armed.</div>
+    <div class="asleep" id="asleep" hidden>Asleep · safe to let go</div>
+    <div class="todo" id="todo" hidden></div>
+    <div class="muted" id="note"></div>
+  </section>
+
+  <section>
+    <div class="label">lamp console · every wake, on battery too</div>
+    <div class="console" id="console" aria-live="polite"><span class="t">loading…</span></div>
+    <div class="muted">A line for every wake: what woke it, how long it was up, WiFi and sync time, new images, button presses, screen refreshes, signal. The lamp sends these with its next sync, so a wake shows up one sync later (button wakes wait for the next 10-minute sync). The dim "→ sync" lines appear live, as each sync reaches the worker. The lines are kept in the lamp's flash until sent, so a power cut doesn't lose them. A time with ~ is approximate: that wake came after a power cut and before the lamp could sync its clock.</div>
+  </section>
+
+  <section>
+    <div class="label">4 · log</div>
+    <div class="muted">Every measured wake lands here by itself with its type, firmware and timings. The lamp sends them at its next sync, normally the power-up after you wire it back. Type the meter's steadiest reading into its row, in mA (0.09 on the 10A dial = 90). Pack volts and a note are optional. Each field saves when you leave it. The log is kept on the worker, not in this browser.</div>
+    <div class="tbl"><table>
+      <thead><tr><th class="l">when</th><th class="l">test</th><th class="l">fw</th><th>awake s</th><th>local s</th><th>WiFi on s</th><th>steps</th><th>refreshes full / partial</th><th>meter mA</th><th>pack V</th><th class="l">note</th><th></th></tr></thead>
+      <tbody id="rows"><tr><td colspan="12" class="muted l">loading…</td></tr></tbody>
+    </table></div>
+    <div class="row">
+      <span class="label" style="align-self:center">add a sleep reading</span>
+      <label class="f">mA (mA jack, e.g. 0.05)<input type="number" id="slMa" min="0" step="0.001"></label>
+      <label class="f">pack V<input type="number" id="slV" min="0" step="0.01"></label>
+      <label class="f">note<input type="text" id="slNote" maxlength="300"></label>
+      <button class="link" id="slAdd">add</button><span id="slMsg" class="muted"></span>
+    </div>
+  </section>
+
+  <section>
+    <div class="label">5 · numbers so far (medians of the readings)</div>
+    <div class="stats" id="stats"></div>
+    <div class="row">
+      <label class="f">normal wake interval, s<input type="number" id="interval" min="60" step="60" value="600"></label>
+      <label class="f">button presses a day<input type="number" id="presses" min="0" step="1" value="5"></label>
+    </div>
+    <div><div class="label">daily use</div><div class="budget" id="budget">—</div><div class="muted" id="budgetHint"></div></div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const BASE = "https://candlelight.daniloinfinite.workers.dev/teg/test-lamp-1";
+  const $ = id => document.getElementById(id);
+  const BOOT_S = 0.3;    // before the firmware's clock starts (ROM + bootloader), not in the lamp's timing
+  const SETTLE_S = 1.5;  // from the sync request reaching the worker to the lamp asleep
+  const AWAKE_GUESS = { sync: 4, bare: 0.8, press: 13 };  // rough, for the prompt only; the real length comes back afterwards
+  const NAMES = { sync: "syncing wake", bare: "bare wake", press: "button press", sleep: "sleep" };
+  let st = null, log = [], skew = 0;
+
+  const mode = () => document.querySelector("input[name=mode]:checked").value;
+  const json = async (url, body) => {
+    const r = await fetch(url, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : { cache: "no-store" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    return j;
+  };
+
+  async function poll() {
+    try {
+      const [s, l, w] = await Promise.all([json(BASE + "/waketest"), json(BASE + "/drawlog"), json(BASE + "/wakelog")]);
+      if (s.now) skew = s.now - Date.now();
+      st = s; setLog(l); renderConsole(w.entries || []);
+      $("dot").className = "dot on"; $("conn").textContent = "worker ok";
+    } catch (e) { $("dot").className = "dot"; $("conn").textContent = "can't reach the worker"; }
+  }
+
+  async function arm(body) {
+    $("armMsg").textContent = "…"; $("armMsg").className = "muted";
+    try { st = await json(BASE + "/waketest", body); if (st.now) skew = st.now - Date.now(); $("armMsg").textContent = body.stop ? "cancelled" : "armed"; }
+    catch (e) { $("armMsg").textContent = String(e.message || e); $("armMsg").className = "err"; }
+  }
+  $("arm").onclick = () => arm({ sleepS: +$("sleepS").value, mode: mode() });
+  $("cancel").onclick = () => arm({ stop: true });
+
+  // ---- countdown ----
+  function show(big, phase, todo, now, note, awake, asleep) {
+    $("asleep").hidden = !asleep;
+    $("big").textContent = big; $("big").className = "big" + (awake ? " awake" : "");
+    $("phase").textContent = phase;
+    $("todo").hidden = !todo; $("todo").textContent = todo || ""; $("todo").className = "todo" + (now ? " now" : "");
+    $("note").textContent = note || "";
+  }
+  function tick() {
+    const now = Date.now() + skew;
+    $("arm").disabled = !!(st && st.armed && st.pickedUpAt && !st.reportedAt);
+    $("cancel").disabled = !(st && st.armed && !st.pickedUpAt);
+    if (!st || !st.armed) return show("—", "Not armed.", "", false, "");
+    const type = NAMES[st.mode];
+    if (!st.pickedUpAt) return show("…", `Armed (${type}). Waiting for the lamp to power on and check in.`,
+      "Follow step 2. The countdown starts when the lamp takes the test.", false,
+      "If the lamp is already running on the meter, hold NEXT 5 s to make it check in instead.");
+    if (st.reportedAt) return show("done", "Logged.", "Type the meter reading into the highlighted row below.", false, "");
+    if (st.mode === "press") return show("press", "Asleep, waiting for your NEXT press.",
+      "Press NEXT when ready, step through images if you like, and read the meter in the quiet stretches after each screen change. It goes back to sleep 10 s after your last press: the meter drops to 0.00. Let go then.", false,
+      "The timing, steps and refresh counts arrive with the lamp's next sync (the power-up after rewiring) and show up in the log.");
+    const wakeAt = st.pickedUpAt + (SETTLE_S + st.sleepS) * 1000;
+    const left = (wakeAt - now) / 1000;
+    const note = "± about 2 s: the lamp's sleep timer runs on its own clock.";
+    if (left > 0) {
+      return show(left >= 60 ? `${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}` : left.toFixed(1),
+        `Asleep. Measured ${type} in`, left <= 5 ? "Watch the meter." : "Keep holding the probes.", left <= 5, note);
+    }
+    // when it's surely back asleep: a syncing wake checks in at its sync request and sleeps ~1-2 s later
+    // (3 s allowed); without a check-in, WiFi gives up after 20 s. A bare wake is up under a second,
+    // so the wake time plus the timer's ±2 s and a margin
+    const asleepAt = st.mode === "sync" ? (st.wokeAt ? st.wokeAt + 3000 : wakeAt + 25000) : wakeAt + 4000;
+    if (now < asleepAt) {
+      const seen = st.wokeAt ? ` It checked in at ${new Date(st.wokeAt).toLocaleTimeString()}.` : "";
+      return show("awake", `The lamp is up (${type}).${seen}`, "Read the meter now: note its steadiest number. Keep holding.", true,
+        st.mode === "sync" && !st.wokeAt && now > wakeAt + 8000 ? "No check-in yet: it may be struggling with WiFi (it gives up after 20 s)." : note, true);
+    }
+    show("✓", "The measured wake is over. Let go and wire the lamp back to normal.",
+      "Its timing arrives with the lamp's next sync (the power-up after rewiring) and shows up in the log.", false,
+      (st.mode === "sync" && !st.wokeAt ? "The measured wake never checked in (WiFi failed?). " : "") + "Check: the meter reads 0.00 when it's asleep.", false, true);
+  }
+
+  // ---- log ----
+  const split = e => {
+    const total = e.awakeMs / 1000 + BOOT_S, wifi = e.kind === "sync" ? (e.wifiMs + e.syncMs) / 1000 : 0;
+    return { total, wifi, local: total - wifi };
+  };
+  let sig = "";
+  function setLog(l) {
+    log = (l && l.entries) || [];
+    const s = log.map(e => e.id).join() + "|" + (st && st.entryId);
+    if (s === sig) return renderStats();  // rebuilding would drop the focus from a field being typed in
+    sig = s;
+    const tb = $("rows");
+    tb.innerHTML = log.length ? "" : `<tr><td colspan="12" class="muted l">nothing logged yet</td></tr>`;
+    log.slice().reverse().forEach(e => {
+      const tr = document.createElement("tr");
+      if (st && e.id === st.entryId && e.ma == null) tr.className = "fresh";
+      const t = e.kind === "sleep" ? null : split(e);
+      tr.innerHTML = `<td class="l">${new Date(e.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</td>` +
+        `<td class="l">${NAMES[e.kind] || e.kind}</td><td class="l muted">${e.fw ? String(e.fw).slice(0, 7) : "—"}</td>` +
+        `<td>${t ? t.total.toFixed(2) : "—"}</td><td>${t ? t.local.toFixed(2) : "—"}</td><td>${t && e.kind === "sync" ? t.wifi.toFixed(2) : "—"}</td>` +
+        `<td>${e.steps ?? "—"}</td><td>${e.draws == null ? "—" : `${e.fullDraws} / ${e.draws - e.fullDraws}`}</td>` +
+        `<td><input type="number" data-f="ma" min="0" step="any" aria-label="meter mA"></td>` +
+        `<td><input type="number" data-f="packV" min="0" step="0.01" aria-label="pack volts"></td>` +
+        `<td class="l"><input type="text" data-f="note" maxlength="300" aria-label="note"> <span class="saved"></span></td>` +
+        `<td><button class="link" title="delete this entry" aria-label="delete">×</button></td>`;
+      const ok = tr.querySelector(".saved");
+      tr.querySelectorAll("input").forEach(inp => {
+        const f = inp.dataset.f;
+        inp.value = e[f] ?? "";
+        inp.onchange = async () => {
+          ok.textContent = "…";
+          try { const l = await json(BASE + "/drawlog", { id: e.id, [f]: f === "note" ? inp.value : (inp.value === "" ? null : +inp.value) });
+                log = l.entries; e[f] = f === "note" ? inp.value : (inp.value === "" ? null : +inp.value);
+                ok.textContent = "saved"; if (f === "ma") tr.className = ""; renderStats(); }
+          catch (err) { ok.textContent = String(err.message || err); ok.className = "saved err"; }
+        };
+      });
+      tr.querySelector("button").onclick = async () => {
+        if (!confirm(`Delete this ${NAMES[e.kind] || e.kind} entry?`)) return;
+        try { setLog(await json(BASE + "/drawlog", { delete: e.id })); } catch (err) { alert(err.message || err); }
+      };
+      tb.appendChild(tr);
+    });
+    renderStats();
+  }
+  $("slAdd").onclick = async () => {
+    $("slMsg").textContent = "…"; $("slMsg").className = "muted";
+    try {
+      setLog(await json(BASE + "/drawlog", { add: { kind: "sleep", ma: +$("slMa").value, packV: $("slV").value === "" ? null : +$("slV").value, note: $("slNote").value } }));
+      $("slMa").value = $("slV").value = $("slNote").value = ""; $("slMsg").textContent = "added";
+    } catch (e) { $("slMsg").textContent = String(e.message || e); $("slMsg").className = "err"; }
+  };
+
+  // ---- console ----
+  const CAUSE = { T: "timer wake", B: "button wake", P: "power-up" };
+  const RESET = { 3: "restart (software or update)", 4: "restart after a crash", 5: "restart after a crash", 6: "restart (watchdog)", 7: "restart (watchdog)", 9: "BROWNOUT restart (pack sagged)" };
+  const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  let consoleSig = "";
+  function consoleLine(e) {
+    const t = (e.clockKnown === false ? "~" : "") + new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    if (e.kind === "sync") {
+      const test = e.test === "armed" ? " · took the wake test" : e.test === "measured" ? " · the measured wake" : "";
+      return `<div class="sync"><span class="t">${t}</span>  → sync request (${CAUSE[e.cause] || "restart"}) · ${e.waiting} image${e.waiting === 1 ? "" : "s"} waiting${Number.isFinite(e.rssi) && e.rssi ? ` · ${e.rssi} dBm` : ""}${esc(test)}</div>`;
+    }
+    if (e.kind === "dropped") return `<div class="warn"><span class="t">${t}</span>  older wake lines dropped here (the lamp's log filled up before a sync could send it)</div>`;
+    const name = CAUSE[e.cause] || RESET[e.reset] || `restart (reason ${e.reset})`;
+    const bits = [`${(e.awakeMs / 1000).toFixed(2)} s awake`];
+    if (e.syncs) {
+      if (e.syncOk) bits.push(`WiFi ${(e.wifiMs / 1000).toFixed(2)} s`, `sync ${(e.syncMs / 1000).toFixed(2)} s`, `${e.added} new image${e.added === 1 ? "" : "s"}`);
+      else bits.push(`WiFi FAILED after ${(e.wifiMs / 1000).toFixed(1)} s`);
+      if (e.syncs > 1) bits.push(`${e.syncs} syncs`);
+    } else bits.push("no WiFi");
+    if (e.presses) bits.push(`${e.presses} press${e.presses === 1 ? "" : "es"}${e.steps != null ? ` (${e.steps} stepped an image)` : ""}`);
+    if (e.draws) bits.push(`${e.draws} screen refresh${e.draws === 1 ? "" : "es"}: ${e.fullDraws} full, ${e.draws - e.fullDraws} partial`);
+    if (e.rssi) bits.push(`${e.rssi} dBm`);
+    const test = e.test === "a" ? "took the wake test" : { s: "measured: syncing wake", b: "measured: bare wake", p: "measured: button press" }[e.test];
+    const cls = e.reset === 9 || (e.syncs && !e.syncOk) ? "warn" : test ? "test" : "";
+    return `<div class="${cls}"><span class="t">${t}</span>  ${esc(name)} · ${esc(bits.join(" · "))}${test ? ` · ${esc(test)}` : ""}</div>`;
+  }
+  function renderConsole(entries) {
+    const shown = entries.slice(-300);
+    const sig = shown.length + "|" + (shown.length ? shown[shown.length - 1].at : "");
+    if (sig === consoleSig) return;
+    consoleSig = sig;
+    const box = $("console");
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    let day = "", html = "";
+    for (const e of shown) {
+      const d = new Date(e.at).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+      if (d !== day) { day = d; html += `<div class="day">— ${d} —</div>`; }
+      html += consoleLine(e);
+    }
+    box.innerHTML = html || `<span class="t">nothing yet: the lamp starts logging with the new firmware</span>`;
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  // ---- numbers ----
+  const median = a => { if (!a.length) return null; const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const read = k => log.filter(e => e.kind === k && e.ma > 0);
+  function renderStats() {
+    const bare = read("bare"), sync = read("sync"), press = read("press"), sleep = read("sleep");
+    const localMa = median(bare.map(e => e.ma));
+    const syncMah = sync.map(e => { const t = split(e); return localMa === null ? e.ma * t.total / 3600 : (localMa * t.local + e.ma * t.wifi) / 3600; });
+    const pressMah = press.map(e => e.ma * split(e).total / 3600);
+    const tile = (label, v, hint) => `<div class="stat"><div class="label">${label}</div><div class="v">${v}</div><div class="muted">${hint}</div></div>`;
+    const n = a => `${a.length} reading${a.length === 1 ? "" : "s"}`;
+    const ms = a => { const m = median(a.map(e => split(e).total)); return m === null ? "" : `, awake ${m.toFixed(2)} s`; };
+    $("stats").innerHTML =
+      tile("local current (bare)", localMa === null ? "—" : `${localMa} mA`, n(bare) + ms(bare)) +
+      tile("syncing wake", syncMah.length ? `${median(syncMah).toFixed(4)} mAh` : "—", n(sync) + ms(sync) + (sync.length && localMa === null ? ", priced at its reading for the whole wake until a bare reading exists" : "")) +
+      tile("button press", pressMah.length ? `${median(pressMah).toFixed(4)} mAh` : "—", n(press) + ms(press)) +
+      tile("sleep", sleep.length ? `${median(sleep.map(e => e.ma))} mA` : "—", n(sleep));
+    const iv = Math.max(60, +$("interval").value || 600), wakes = 86400 / iv, presses = Math.max(0, +$("presses").value || 0);
+    if (!syncMah.length) { $("budget").textContent = "—"; $("budgetHint").textContent = "Needs a syncing wake with a meter reading."; return; }
+    const parts = [[`${wakes.toFixed(0)} syncing wakes`, median(syncMah) * wakes]];
+    if (pressMah.length) parts.push([`${presses} presses`, median(pressMah) * presses]);
+    if (sleep.length) parts.push(["sleep", median(sleep.map(e => e.ma)) * 24]);
+    const total = parts.reduce((a, p) => a + p[1], 0);
+    $("budget").textContent = `${total.toFixed(1)} mAh / day`;
+    const missing = [!pressMah.length && "button presses", !sleep.length && "sleep"].filter(Boolean);
+    $("budgetHint").textContent = parts.map(p => `${p[0]} ${p[1].toFixed(1)} mAh`).join(" + ") +
+      (missing.length ? `. Not measured yet: ${missing.join(", ")}.` : ".") + " Put the total in the TEG page's \"use\" setting.";
+  }
+  $("interval").oninput = $("presses").oninput = renderStats;
+
+  poll(); setInterval(poll, 2000); setInterval(tick, 100);
+})();
+</script>
+</body>
+</html>

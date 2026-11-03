@@ -125,7 +125,15 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - **User doubts these are real ticks, and the trace agrees:** TEG loaded 1.2-1.58 V from t ~240 s to ~780 s (9 min, strongest harvest, legs 1-2 at ~1-2 mV) gave **zero ticks**, where ~30 were expected. The pairs only came once the harvest was falling (TEG 1.06 V and dropping). So they follow the current *changing* (falling toward zero, maybe flipping direction around the BQ's bursts), not the charge passed. A steady charge current produces no counts.
 - **INT-stuck banner showed afterwards; LTC test (13:20) passed** (INT high, CLR works, no pulses). The banner stayed up until tapped, so it may have been left over from earlier. Likely the 2.7 s pair: by the ULP's logic a tick pair is INT going low (tick 1), staying low through several CLR pulses (stuck >= 3 polls = banner), briefly high, then low again (tick 2). If so, each "pair" is one long INT-low episode that CLR can't release, during falling current. Page now clears the banner on release and logs the episode's time and length to the console (891eb9b).
 
-### 2026-11-02 night: wake test built (RESUME HERE)
+### 2026-11-03 bookmark (RESUME HERE)
+
+- **Live:** firmware a4ad56f (lamp updated, first wakelog entry 00:47 = its restart), worker eeb9203f, page https://studstudio.github.io/candlelight/wake_test.html (compact layout, ASLEEP badge fixed in 8543cd8; before that the badge showed all the time, but no test had run yet).
+- **No tests run yet.** Next (user): run the four tests on the page: syncing wake, bare wake (local current), button press (real NEXT press), sleep (typed in, mA jack). Meter on 10A between the BAT row and row X (FireBeetle VCC wire), USB unplugged, arm first, power on holding the probes. Type each reading into its log row.
+- **Then (me):** pull `/teg/test-lamp-1/drawlog` and `/wakelog`, check the numbers, set the TEG page's "use" from the daily mAh; keep collecting over days/weeks.
+- **Pack voltage on A1:** user asked; needs the divider (3 NiMH up to ~4.35 V > ESP32 pin max ~3.6 V, ADC tops at ~3.1 V). Advised 2 x 1 Mohm (2 uA vs 20 uA for 100k/100k) + 100 nF A1-GND; firmware BAT_DIVIDER 2.0 already fits. Not wired yet.
+- Optional: refresh `fw/merged.bin` from the a4ad56f CI run (offered, not done).
+
+### 2026-11-02 night: wake test built
 
 - **Live 2026-11-03:** worker version eeb9203f (live worker matched the previous commit before deploying); page https://studstudio.github.io/candlelight/wake_test.html. Firmware via CI from this push.
 

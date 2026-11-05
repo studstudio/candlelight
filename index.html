@@ -1824,7 +1824,16 @@ function updateToolbarBlank() {
   bar.classList.toggle('blank', blank);
 }
 // preview / duplicate / apply to all / clear all only show once a frame actually exists
+// duplicate frame + apply to all are for working with a cycle of photos; a shader or video cycle already has its frames built in
+function updatePhotoCycleTools() {
+  const hasShader = [currentStack(), ...frames].some(st => st && st.some(l => l && l.shader));
+  const hasVideo = typeof videoSrcs !== 'undefined' && videoSrcs.some(Boolean);
+  const on = mode === 'cycle' && !hasShader && !hasVideo;
+  document.getElementById('applyAllBtn').style.display = on ? '' : 'none';
+  document.getElementById('duplicateFrameBtn').style.display = on ? '' : 'none';
+}
 function updateAnimControlsVisibility() {
+  updatePhotoCycleTools();
   updateToolbarBlank();
   const cyc = mode === 'cycle' && frames.some(frameIsFilled);
   animControls.style.display = cyc ? 'block' : 'none';
@@ -2006,7 +2015,7 @@ function setMode(next) {
   modeCycleBtn.classList.toggle('active', mode === 'cycle');
   frameFilmstrip.style.display = mode === 'cycle' ? 'flex' : 'none';
   updateAnimControlsVisibility();
-  document.getElementById('applyAllBtn').style.display = mode === 'cycle' ? '' : 'none'; // frames only exist in cycle
+  updatePhotoCycleTools();   // duplicate / apply to all only for a cycle built from photos
   document.getElementById('clearAllBtn').style.display = mode === 'cycle' ? '' : 'none';
   saveImageBtn.textContent = 'save';
 

@@ -236,6 +236,8 @@
   .shader-card canvas { display: block; width: 100%; height: auto; background: #000; }
   .shader-card span { display: block; padding: 6px 9px; font-size: 15px; letter-spacing: 0.12em; }
   .shader-card .st-del { padding: 0; letter-spacing: 0; }
+  .shader-strip .shader-card.remove-card { display: flex; align-items: center; justify-content: center; border-style: dashed; }
+  .shader-strip .shader-card.remove-card span { padding: 8px; font-size: 14px; letter-spacing: 0.12em; }
   .shader-name { font-size: 14px; letter-spacing: 0.12em; }
   body.crop-collapsed #cropHint { display: none !important; }
   .empty-state {
@@ -4091,8 +4093,27 @@ function drawShaderThumb(preset, thumb) {
 function refreshPhotoThumbs() { // the picture may have changed since the cards were drawn
   shaderGrid.querySelectorAll('canvas[data-pid]').forEach(c => { const p = shaderPreset(c.dataset.pid); if (p && p.photo) drawShaderThumb(p, c); });
 }
+function removeShader() {
+  const stack = currentStack(), l = stack[0];
+  if (!l || !l.shader) return;
+  stopShaderPlay();
+  const photo = l.shader.photo;
+  if (photo) { const c = newShaderCanvas(); c.getContext('2d').drawImage(photo, 0, 0); l.img = c; delete l.shader; }   // your photo comes back as the base
+  else { stack[0] = null; hasPhoto = false; }                                                                         // a sample-only shader just goes
+  activeLayerIdx = 0;
+  loadLayerStateToGlobals(0);
+  updateLayerTabs();
+  updateFrameFilmstrip();
+  render();
+  updateSendState();
+}
 function buildShaderStrip() {
   shaderGrid.innerHTML = '';
+  const rm = document.createElement('button');
+  rm.type = 'button'; rm.className = 'shader-card remove-card'; rm.id = 'removeShaderCard'; rm.setAttribute('aria-label', 'remove shader');
+  const rmBody = document.createElement('span'); rmBody.textContent = 'remove shader'; rm.appendChild(rmBody);
+  rm.onclick = () => { shaderBackdrop.classList.remove('open'); removeShader(); };
+  shaderGrid.appendChild(rm);
   SHADERS.forEach(preset => {
     const card = document.createElement('button');
     card.type = 'button'; card.className = 'shader-card';
@@ -4115,6 +4136,7 @@ function openShaderSheet() {
   if (!ensureGL()) { flashStatus("shaders need WebGL, which isn't available here", 'fail'); return; }
   if (shaderStripKey !== SHADERS.map(p => p.id).join(',')) buildShaderStrip(); // thumbnails are drawn once, then reused
   refreshPhotoThumbs();
+  { const b = currentStack()[0], rc = document.getElementById('removeShaderCard'); if (rc) rc.style.display = (b && b.shader) ? '' : 'none'; }
   shaderGrid.scrollLeft = 0;
   shaderBackdrop.classList.add('open');
 }

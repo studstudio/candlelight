@@ -2719,7 +2719,7 @@ mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
 
 const SHADERS = [
   {
-    id: 'rifogfog', name: '░ ▒ ░ ˚', label: 'riso fog',
+    id: 'rifogfog', name: '░ ▒ ░ ˚', label: 'riso fog', photo: true,
     params: [
       { label: 'fog scale', min: 0.6, max: 4.0, value: 1.8 }, { label: 'dot size', min: 20, max: 90, value: 46 },
       { label: 'screen angle', min: 0.0, max: 1.0, value: 0.125 }, { label: 'density', min: 0.0, max: 1.0, value: 0.5 },
@@ -2730,17 +2730,20 @@ float screenDots(vec2 uv, float amount, float freq, float angle){
   vec2 l = fract(c) - 0.5;
   float d = length(l);
   float rad = sqrt(clamp(amount, 0.0, 1.0)) * 0.72;
-  float aa = 0.5 / (freq * 1.0) * u_res.y * 0.0 + 0.08;
+  float aa = 0.08;
   return 1.0 - smoothstep(rad - aa, rad, d);
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 q = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
+  float dark = 1.0 - clamp((lum(q) - 0.5) * 1.25 + 0.5, 0.0, 1.0);   // the photo is the ink: darker = more of it
   float fogA = lfbm(uv * u_p0 + u_p5 * 1.9, T, 0.9);
   float fogB = lfbm(uv * u_p0 * 1.3 + vec2(11.0, 4.0) + u_p5, T + 2.0, 1.0);
-  float lev = mix(1.35, 0.65, u_p3);
-  float a = clamp((fogA - 0.28) * lev * 1.6, 0.0, 1.0);
-  float b = clamp((fogB - 0.34) * lev * 1.6, 0.0, 1.0) * u_p4;
+  float bias = mix(-0.28, 0.22, u_p3);
+  // the fog drifts through the picture, thickening and thinning the ink so the photo surfaces and dissolves
+  float a = clamp(dark * 1.35 + bias + (fogA - 0.5) * 1.0, 0.0, 1.0);
+  float b = clamp((fogB - 0.40) * 1.7, 0.0, 1.0) * (0.30 + 0.70 * dark) * u_p4;
   float dotsA = screenDots(uv, a, u_p1, u_p2 * TAU);
   float dotsB = screenDots(uv, b, u_p1 * 1.18, u_p2 * TAU + 0.52);
   float ink = max(dotsA, dotsB);
@@ -2749,7 +2752,7 @@ void main(){
 }`
   },
   {
-    id: 'moire', name: '◌ ◍ ◌', label: 'moire thread',
+    id: 'moire', name: '◌ ◍ ◌', label: 'moire thread', photo: true,
     params: [
       { label: 'line density', min: 8, max: 70, value: 26 }, { label: 'angle spread', min: 0.0, max: 0.6, value: 0.05 },
       { label: 'curvature', min: 0.0, max: 2.0, value: 0.8 }, { label: 'weight', min: 0.08, max: 0.6, value: 0.34 },
@@ -2757,7 +2760,11 @@ void main(){
     code: `
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 q = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
+  vec2 e = vec2(3.0) / u_res;
+  // the photo bends the threads like a lens: they swerve around its bright and dark shapes
+  vec2 lens = vec2(lum(q + vec2(e.x, 0.0)) - lum(q - vec2(e.x, 0.0)), lum(q + vec2(0.0, e.y)) - lum(q - vec2(0.0, e.y)));
   float g = 1.0;
   for (int i = 0; i < 4; i++) {
     if (float(i) >= u_p4 - 0.01) break;
@@ -2765,9 +2772,12 @@ void main(){
     float a = u_p5 * 0.31 + fi * u_p1 * 3.0 + 0.10 * sin(T + fi * 2.1);
     vec2 w = uv + 0.16 * u_p2 * vec2(sin(uv.y * 3.1 + T + fi * 1.3), cos(uv.x * 2.7 - T + fi * 0.7));
     w += 0.10 * u_p2 * (vec2(lnoise(uv * 2.0 + fi * 5.0, T, fi, 0.8), lnoise(uv * 2.0 + 9.0 + fi * 5.0, T, fi + 1.0, 0.8)) - 0.5);
+    w += lens * (0.05 + 0.03 * u_p2);
     vec2 pr = rot(a) * w;
-    float stripe = abs(fract(pr.x * u_p0) - 0.5) * 2.0;      // 0 on the line center .. 1 between lines
-    float line = 1.0 - smoothstep(u_p3 - 0.10, u_p3 + 0.10, stripe);
+    float L = lum(q + vec2(0.004, 0.003) * fi);
+    float wt = clamp(u_p3 * (0.10 + 2.0 * (1.0 - L)), 0.02, 0.97);   // dark parts of the photo get fat threads, light parts hair-thin ones
+    float stripe = abs(fract(pr.x * u_p0) - 0.5) * 2.0;
+    float line = 1.0 - smoothstep(wt - 0.10, wt + 0.10, stripe);
     g *= 1.0 - 0.92 * line;
   }
   g = 0.05 + 0.90 * g;
@@ -2775,7 +2785,7 @@ void main(){
 }`
   },
   {
-    id: 'glitter', name: '☾ ⋆ ✧ ˚', label: 'moon glitter',
+    id: 'glitter', name: '☾ ⋆ ✧ ˚', label: 'moon glitter', photo: true,
     params: [
       { label: 'wave scale', min: 1.0, max: 8.0, value: 3.2 }, { label: 'sparkle', min: 6.0, max: 120.0, value: 45 },
       { label: 'chop', min: 0.1, max: 1.5, value: 0.7 }, { label: 'moon height', min: 0.1, max: 0.9, value: 0.62 },
@@ -2783,6 +2793,7 @@ void main(){
     code: `
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 q = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   vec2 p = uv * u_p0;
   // a few crossing wave trains (whole-number speeds, so it loops) → analytic slope of the surface
@@ -2798,27 +2809,30 @@ void main(){
     slope += d * cos(ph) * amp * fr;
   }
   slope *= u_p2 * 0.16;
-  // glitter appears where the facet normal tips toward the moon, so it forms a path to it
+  // your photo lies under the water: the ripples bend it as they pass over, and the glitter lands mostly on its bright parts
+  vec2 qq = clamp(q + slope * vec2(u_res.y / u_res.x, 1.0) * 0.16, 0.0, 1.0);
+  float L = lum(qq);
   vec2 moon = vec2(0.0, u_p3 - 0.5);
   vec2 toMoon = (moon - uv) * vec2(0.55, 1.0);
   vec2 want = toMoon * 0.42;
   float sparkle = exp(-dot(slope - want, slope - want) * u_p1 * 6.0);
-  float horizon = smoothstep(0.55, 0.0, uv.y + 0.5 - (u_p3 * 0.0 + 0.05)); // thins out toward the far shore
   float glow = exp(-dot(uv - moon, uv - moon) * 5.0) * u_p4;
-  float path = exp(-pow((uv.x - moon.x) * 3.2, 2.0)) * smoothstep(0.1, 0.9, 1.0 - (uv.y - moon.y + 0.0)*0.0);
-  float g = 0.04 + 0.90 * sparkle * (0.35 + 0.65*path) + glow * 0.45 + 0.05 * lfbm(uv*3.0, T, 0.5);
+  float path = exp(-pow((uv.x - moon.x) * 3.2, 2.0));
+  float lit = 0.35 + 1.15 * smoothstep(0.25, 0.85, L);
+  float g = 0.02 + 0.74 * L + 0.95 * sparkle * (0.35 + 0.65 * path) * lit + glow * 0.40;
   gl_FragColor = vec4(vec3(clamp(g,0.0,1.0)), 1.0);
 }`
   },
   {
-    id: 'phyllo', name: '✿ ❁ ✿', label: 'sunflower bloom', grow: true, phase: 0.75,
+    id: 'phyllo', name: '✿ ❁ ✿', label: 'sunflower bloom', photo: true, grow: true, phase: 0.75,
     params: [
       { label: 'divergence°', min: 136.0, max: 139.0, value: 137.508 }, { label: 'seed size', min: 0.4, max: 1.0, value: 0.78 },
-      { label: 'seed count', min: 100, max: 800, value: 520 }, { label: 'pointiness', min: 0.0, max: 1.0, value: 0.4 },
+      { label: 'seed count', min: 100, max: 800, value: 680 }, { label: 'pointiness', min: 0.0, max: 1.0, value: 0.4 },
       { label: 'hollow', min: 0.0, max: 1.0, value: 0.5 }, { label: 'spin', min: 0.0, max: 1.0, value: 0.12 } ],
     code: `
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  float asp = u_res.x / u_res.y;
   float N = floor(u_p2);
   float c = 0.5 / sqrt(N);
   float r = length(uv);
@@ -2837,11 +2851,14 @@ void main(){
     float ri = c * sqrt(i);
     float ai = i * gold + spin;
     vec2 pos = ri * vec2(cos(ai), sin(ai));
-    vec2 e = pos / max(ri, 1e-4);
+    // each seed reads the photo under it: dark parts grow fat seeds that nearly touch, light parts get small ones
+    float L = lum(vec2(pos.x / asp + 0.5, pos.y + 0.5));
+    float dk = 1.0 - clamp((L - 0.5) * 1.35 + 0.5, 0.0, 1.0);
+    vec2 e = ri > 1e-4 ? pos / ri : vec2(1.0, 0.0);
     vec2 dl = uv - pos;
     float al = dot(dl, e), pe = dot(dl, vec2(-e.y, e.x));
     float d = length(vec2(al * (1.0 - 0.5 * u_p3), pe));
-    float rad = 0.90 * c * u_p1 * s * (1.0 + 0.25 * u_p3);
+    float rad = 0.90 * c * u_p1 * s * (1.0 + 0.25 * u_p3) * mix(0.30, 1.32, dk);
     float cov = 1.0 - smoothstep(rad - px, rad, d);
     float hole = 1.0 - smoothstep(rad * u_p4 * 0.55 - px, rad * u_p4 * 0.55 + 1e-5, d);
     float sv = mix(0.94, 0.07 + 0.88 * hole, cov);
@@ -2851,7 +2868,7 @@ void main(){
 }`
   },
   {
-    id: 'cloudveil', name: '☁ ･ ✧ ☁', label: 'cloud drift', phase: 0.0,
+    id: 'cloudveil', name: '☁ ･ ✧ ☁', label: 'cloud drift', photo: true, phase: 0.0,
     params: [
       { label: 'coverage', min: 0.0, max: 1.0, value: 0.55 }, { label: 'softness', min: 0.05, max: 0.5, value: 0.22 },
       { label: 'scale', min: 0.8, max: 4.0, value: 1.7 }, { label: 'drift direction', min: 0.0, max: 1.0, value: 0.08 },
@@ -2868,6 +2885,7 @@ float cloudS(vec2 p, vec2 dir, float f1, float f2, float w1, float T){
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   float ang = u_p3 * TAU;
   vec2 dir = vec2(cos(ang), sin(ang));
@@ -2880,22 +2898,23 @@ void main(){
   float cov = smoothstep(th - u_p1 * 0.5, th + u_p1 * 0.5, s0);
   float lit = clamp(0.55 + (s0 - s1) * 9.0 * u_p5, 0.0, 1.0);
   float body = mix(0.55, 0.98, lit) * (0.78 + 0.22 * smoothstep(th, th + 0.25, s0) * 0.0 + 0.22 * (1.0 - smoothstep(th, th + 0.3, s0)));
-  float sky = 0.10 + 0.10 * (uv.y + 0.5) - 0.06 * dot(uv, uv);
-  float v = mix(sky, body, cov);
+  float sky = 0.03 + 0.92 * lum(pq);
+  float v = mix(sky, body, cov * 0.88);
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'rainpane', name: '｡ ˚ ༄ ˚ ｡', label: 'rain on glass', phase: 0.0,
+    id: 'rainpane', name: '｡ ˚ ༄ ˚ ｡', label: 'rain on glass', photo: true, phase: 0.0,
     params: [
       { label: 'drop density', min: 3.0, max: 14.0, value: 7.0 }, { label: 'drop size', min: 0.5, max: 1.6, value: 1.0 },
       { label: 'mist', min: 0.0, max: 1.0, value: 0.55 }, { label: 'slide length', min: 0.0, max: 1.5, value: 0.7 },
       { label: 'blur light', min: 0.0, max: 1.0, value: 0.6 }, { label: 'seed', min: 0, max: 20, value: 4 } ],
     code: `
-float bgl(vec2 p){ // soft out-of-focus lights seen through the glass
-  float b = smoothstep(0.50, 0.78, fbm(p * 2.2 + u_p5)) * 0.85;
-  b += 0.5 * smoothstep(0.62, 0.80, fbm(p * 5.0 + 3.0 + u_p5)) * u_p4;
-  return 0.10 + 0.55 * b * (0.4 + 0.6 * u_p4) + 0.08 * fbm(p * 1.3);
+float bgl(vec2 p){ // your photo seen through wet glass, softly out of focus
+  vec2 q = vec2(p.x / (u_res.x / u_res.y) + 0.5, p.y + 0.5);
+  float r = 0.004 + 0.016 * u_p4;
+  float l = 0.30 * lum(q) + 0.175 * (lum(q + vec2(r, 0.0)) + lum(q - vec2(r, 0.0)) + lum(q + vec2(0.0, r)) + lum(q - vec2(0.0, r)));
+  return 0.04 + 0.92 * l;
 }
 // returns (alpha, shade) of the drops from one cell grid
 vec2 drops(vec2 uv, float G, float sizeK, float slideK, float seed, float fadeK){
@@ -2919,7 +2938,7 @@ vec2 drops(vec2 uv, float G, float sizeK, float slideK, float seed, float fadeK)
       float spec = pow(max(dot(normalize(vec3(n, z)), normalize(vec3(-0.45, 0.65, 0.6))), 0.0), 24.0);
       float rim = smoothstep(0.55, 1.0, dd);
       float refr = bgl(uv - n * (0.030 / G * 7.0) * 1.0 * vec2(1.0, -1.0));
-      float sv = clamp(refr * 1.5 + 0.12 - 0.45 * rim + 0.85 * spec, 0.0, 1.0);
+      float sv = clamp(refr * 0.95 + 0.03 - 0.30 * rim + 0.55 * spec, 0.0, 1.0);
       alpha = max(alpha, inside * amp); shade = mix(shade, sv, inside * amp);
     }
     // wet trail left above a sliding drop
@@ -2932,7 +2951,7 @@ vec2 drops(vec2 uv, float G, float sizeK, float slideK, float seed, float fadeK)
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
   float haze = 0.55 + 0.45 * u_p2;
-  float base = bgl(uv + 0.0) * (1.0 - 0.35 * haze) + 0.20 * haze * (0.4 + fbm(uv * 3.0));
+  float base = bgl(uv) * (1.0 - 0.30 * haze) + 0.16 * haze * (0.4 + fbm(uv * 3.0));
   float v = base;
   // fine mist beads
   vec2 m = drops(uv, u_p0 * 5.5, 0.55, 0.0, u_p5 + 11.0, 1.0 - u_p2);
@@ -2945,7 +2964,7 @@ void main(){
 }`
   },
   {
-    id: 'leafshade', name: '❦ ❧ ❦', label: 'leaf shadows', phase: 0.0,
+    id: 'leafshade', name: '❦ ❧ ❦', label: 'leaf shadows', photo: true, phase: 0.0,
     params: [
       { label: 'leaf size', min: 0.5, max: 2.0, value: 1.0 }, { label: 'density', min: 3.0, max: 10.0, value: 5.0 },
       { label: 'breeze', min: 0.0, max: 1.0, value: 0.5 }, { label: 'softness', min: 0.01, max: 0.3, value: 0.09 },
@@ -2976,18 +2995,19 @@ float leafLayer(vec2 uv, float G, float sizeK, float soft, float seed, float T){
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   float far = leafLayer(uv + 0.03 * vec2(sin(T), cos(T)) * u_p2, u_p1 * 0.55, u_p0 * 1.5, 0.35, 7.0, T);
   float near = leafLayer(uv, u_p1, u_p0, u_p3, 1.0, T);
   float breathe = 1.0 + 0.10 * u_p2 * sin(T + 2.0 * fbm(uv * 1.5));
   float shade = clamp(near * u_p4 + far * u_p5 * 0.5 * u_p4 * breathe, 0.0, 1.0);
   float ground = 0.93 - 0.10 * fbm(uv * 3.0 + 4.0) - 0.04 * dot(uv, uv);
-  float v = ground * (1.0 - shade * 0.92);
+  float v = (0.04 + 0.96 * lum(pq)) * (0.88 + 0.12 * ground) * (1.0 - shade * 0.85);
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'windfield', name: '≈ ⌇ ≈', label: 'wind over wheat', phase: 0.0,
+    id: 'windfield', name: '≈ ⌇ ≈', label: 'wind over wheat', photo: true, phase: 0.0,
     params: [
       { label: 'gust strength', min: 0.0, max: 1.0, value: 0.85 }, { label: 'gust size', min: 1.0, max: 5.0, value: 2.0 },
       { label: 'blade fineness', min: 80.0, max: 360.0, value: 220.0 }, { label: 'blade length', min: 2.0, max: 14.0, value: 6.0 },
@@ -3000,6 +3020,7 @@ float gustAt(vec2 sx, float per){
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   vec2 sx = vec2(uv.x / (u_res.x / u_res.y) + 0.5, uv.y + 0.5);   // x in 0..1 spans exactly one tile
   float per = floor(u_p1 + 0.5);
   float g = gustAt(sx, per);
@@ -3013,11 +3034,13 @@ void main(){
   float v = 0.22 + 0.34 * b + 0.50 * sheen * (0.35 + 0.65 * b);
   v = 0.5 + (v - 0.5) * (0.6 + u_p4 * 1.0);
   v *= 0.85 + 0.25 * (1.0 - sx.y) * 0.5 + 0.1 * sx.y;
+  float ph = lum(pq + vec2(bend * 0.006, 0.0));
+  v = clamp(ph * (0.12 + 0.95 * v) + 0.05 * sheen * b, 0.0, 1.0);
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'smoke', name: '∿ ༄ ∿', label: 'incense smoke', phase: 0.0,
+    id: 'smoke', name: '∿ ༄ ∿', label: 'incense smoke', photo: true, phase: 0.0,
     params: [
       { label: 'ribbons', min: 1, max: 3, value: 2 }, { label: 'spread', min: 0.2, max: 1.5, value: 0.8 },
       { label: 'curl', min: 0.2, max: 2.0, value: 1.0 }, { label: 'wispiness', min: 0.0, max: 1.0, value: 0.6 },
@@ -3046,17 +3069,18 @@ float smokeD(vec2 uv, float ph, float T){
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   float f1 = fract(u_phase), f2 = fract(u_phase + 0.5);
   float w1 = 1.0 - abs(2.0 * f1 - 1.0);
   float d = w1 * smokeD(uv, f1, T) + (1.0 - w1) * smokeD(uv, f2, T);
-  float v = 0.05 + 0.92 * (1.0 - exp(-d * 1.6));
-  v += 0.03 * (1.0 - length(uv)) ;
+  float bgv = 0.03 + 0.55 * lum(pq);
+  float v = mix(bgv, 0.97, 0.85 * (1.0 - exp(-d * 1.6)));
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'candle', name: '✧ ❂ ✧', label: 'candle flame', phase: 0.0,
+    id: 'candle', name: '✧ ❂ ✧', label: 'candle flame', photo: true, phase: 0.0,
     params: [
       { label: 'candles', min: 1, max: 5, value: 1 }, { label: 'flame height', min: 0.12, max: 0.6, value: 0.44 },
       { label: 'flicker', min: 0.0, max: 1.0, value: 0.5 }, { label: 'halo', min: 0.0, max: 1.0, value: 0.8 },
@@ -3064,6 +3088,7 @@ void main(){
     code: `
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   float n = floor(u_p0 + 0.5);
   float halo = 0.0, cov = 0.0, bright = 0.0, wickM = 0.0, waxM = 0.0, waxV = 0.0;
@@ -3096,7 +3121,7 @@ void main(){
     waxM = max(waxM, wax);
     waxV = max(waxV, wax * (0.10 + 0.55 * clamp(halo, 0.0, 1.0)) * (1.0 - smoothstep(0.0, 0.5, -p.y - 0.045)));
   }
-  float bg = 0.02 + 0.55 * clamp(halo, 0.0, 1.4) * (1.0 - 0.3 * length(uv));
+  float bg = 0.012 + clamp(halo, 0.0, 1.4) * (0.06 + 0.88 * lum(pq)) * (1.0 - 0.3 * length(uv));
   float v = mix(bg, waxV, waxM);
   v = mix(v, 0.03 + 0.97 * bright, cov);
   v = mix(v, 0.02, wickM * 0.9);
@@ -3104,7 +3129,7 @@ void main(){
 }`
   },
   {
-    id: 'candlewall', name: '· ☼ ·', label: 'candlelit wall', phase: 0.0,
+    id: 'candlewall', name: '· ☼ ·', label: 'candlelit wall', photo: true, phase: 0.0,
     params: [
       { label: 'light x', min: -0.7, max: 0.7, value: 0.12 }, { label: 'light height', min: 0.15, max: 0.9, value: 0.38 },
       { label: 'plaster relief', min: 0.0, max: 1.0, value: 0.6 }, { label: 'grain scale', min: 1.0, max: 8.0, value: 3.5 },
@@ -3113,6 +3138,7 @@ void main(){
 float plaster(vec2 p){ return 0.62 * fbm(p) + 0.38 * fbm(p * 3.1 + 7.0); }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   vec2 jit = 0.020 * u_p4 * vec2(lnoise(vec2(1.0, 2.0), 2.0 * T, 0.0, 1.0) - 0.5, lnoise(vec2(5.0, 3.0), 3.0 * T, 1.0, 1.0) - 0.5) * 2.0;
   vec3 Lp = vec3(u_p0 + jit.x, -0.08 + jit.y, u_p1);
@@ -3128,13 +3154,13 @@ void main(){
   float fl = 1.0 + 0.30 * u_p4 * (lnoise(vec2(9.0, 9.0), 2.0 * T, 0.5, 1.0) - 0.5) * 2.0
                  + 0.12 * u_p4 * (lnoise(vec2(4.0, 1.0), 5.0 * T, 2.5, 1.0) - 0.5) * 2.0;
   float att = fl / (1.0 + u_p5 * 4.5 * r2);
-  float v = 0.02 + 1.5 * diff * att * (0.80 + 0.5 * (h0 - 0.5));
+  float v = 0.02 + 1.5 * diff * att * (0.80 + 0.5 * (h0 - 0.5)) * (0.12 + 1.15 * lum(pq));
   v = pow(clamp(v, 0.0, 1.0), 0.9);
   gl_FragColor = vec4(vec3(v), 1.0);
 }`
   },
   {
-    id: 'embers', name: '· ✦ ˖ ✧ ·', label: 'embers rising', phase: 0.0,
+    id: 'embers', name: '· ✦ ˖ ✧ ·', label: 'embers rising', photo: true, phase: 0.0,
     params: [
       { label: 'sparks', min: 6, max: 40, value: 22 }, { label: 'spark size', min: 0.5, max: 3.0, value: 2.0 },
       { label: 'drift', min: -1.0, max: 1.0, value: 0.3 }, { label: 'glow', min: 0.0, max: 1.0, value: 0.55 },
@@ -3142,8 +3168,10 @@ void main(){
     code: `
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   float v = 0.02;
+  float lit = 0.0;
   float n = floor(u_p0 + 0.5);
   float px = 1.0 / u_res.y;
   for (int i = 0; i < 40; i++) {
@@ -3162,6 +3190,7 @@ void main(){
     float core = exp(-dd / (r * r));
     float gl = exp(-dd / (r * r * 38.0)) * 0.30 * u_p3;
     v += (core * 1.6 + gl * 1.5) * life * tw;
+    lit += exp(-dd / (r * r * 500.0)) * life * tw;
   }
   // bed of coals: dark crust with glowing cracks that slowly breathe
   float yb = uv.y + 0.5;
@@ -3171,11 +3200,13 @@ void main(){
   float bed = bedMask * (0.06 + 0.80 * crack * breathe) * u_p4;
   bed += 0.20 * u_p4 * u_p3 * exp(-yb * 5.0);
   v += bed;
+  float Lp = lum(pq);
+  v += Lp * (1.0 * clamp(lit, 0.0, 1.6) * (0.35 + 0.65 * u_p3) + 0.55 * bedMask * u_p4 * (0.4 + 0.6 * breathe) + 0.03);
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'hearth', name: '♨ ✹ ♨', label: 'hearth fire', phase: 0.0,
+    id: 'hearth', name: '♨ ✹ ♨', label: 'hearth fire', photo: true, phase: 0.0,
     params: [
       { label: 'fire width', min: 0.1, max: 0.6, value: 0.28 }, { label: 'fire height', min: 0.4, max: 1.2, value: 0.6 },
       { label: 'turbulence', min: 0.0, max: 1.0, value: 0.55 }, { label: 'flow speed', min: 0.4, max: 6.0, value: 1.2 },
@@ -3197,6 +3228,7 @@ float fireF(vec2 uv, float ph, float T, float flip){
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   float f1 = fract(u_phase), f2 = fract(u_phase + 0.5);
   float w1 = 1.0 - abs(2.0 * f1 - 1.0);
@@ -3209,11 +3241,13 @@ void main(){
   float br = smoothstep(0.35, 1.5, f);
   float v = 0.03 + 0.97 * (body * (0.10 + 0.50 * br) + 0.55 * hot * (1.0 - 0.3 * y));
   v += 0.10 * exp(-pow(uv.x / (u_p0 * 1.8), 2.0)) * exp(-y * 3.0);   // glow at both bases
+  float glow = exp(-pow(uv.x / (u_p0 * 3.2), 2.0)) * exp(-y * 2.2) * (0.85 + 0.45 * (lnoise(vec2(1.0, 2.0), 2.0 * T, 0.0, 1.0) - 0.5)) + 0.5 * body;
+  v += lum(pq) * (0.04 + 0.60 * clamp(glow, 0.0, 1.3));
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'touchripples', name: '◌ ◎ ◉', label: 'touch ripples', grow: true, touch: true, phase: 0.0,
+    id: 'touchripples', name: '◌ ◎ ◉', label: 'touch ripples', photo: true, grow: true, touch: true, phase: 0.0,
     demo: [[0.32, 0.58, 0.04], [0.68, 0.42, 0.14], [0.5, 0.3, 0.26]],
     params: [
       { label: 'wavelength', min: 20, max: 80, value: 46 }, { label: 'fade', min: 0.5, max: 4.0, value: 1.4 },
@@ -3247,6 +3281,7 @@ float rippleH(vec2 p){
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float e = 0.003;
   float h0 = rippleH(uv), hx = rippleH(uv + vec2(e, 0.0)), hy = rippleH(uv + vec2(0.0, e));
   float k = 0.035 * u_p5;
@@ -3254,13 +3289,14 @@ void main(){
   vec3 L = normalize(vec3(-0.5, 0.6, 0.65));
   float diff = dot(n, L);
   float spec = pow(max(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0), 36.0);
-  float base = 0.34 + 0.06 * fbm(uv * 2.5) - 0.05 * dot(uv, uv);
-  float v = base + 0.46 * (diff - 0.65) + 0.55 * spec;
+  vec2 qq = pq + n.xy * vec2(u_res.y / u_res.x, 1.0) * 0.07;
+  float base = 0.05 + 0.80 * lum(qq);
+  float v = base * (0.62 + 0.9 * (diff - 0.65) + 0.4) + 0.5 * spec;
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'touchink', name: '◍ ◐ ◍', label: 'ink bloom', grow: true, touch: true, phase: 0.0,
+    id: 'touchink', name: '◍ ◐ ◍', label: 'ink bloom', photo: true, grow: true, touch: true, phase: 0.0,
     demo: [[0.3, 0.55, 0.05], [0.62, 0.45, 0.18], [0.5, 0.7, 0.3]],
     params: [
       { label: 'bloom size', min: 0.3, max: 2.0, value: 1.0 }, { label: 'bleed', min: 0.0, max: 1.0, value: 0.6 },
@@ -3281,6 +3317,7 @@ float inkAt(vec2 uv, vec2 c, float age, float seed){
 }
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 pq = gl_FragCoord.xy / u_res;
   float asp = u_res.x / u_res.y;
   float ink = 0.0;
   for (int i = 0; i < 16; i++) {
@@ -3300,12 +3337,14 @@ void main(){
     ink = 1.0 - (1.0 - ink) * (1.0 - dd);
   }
   float paper = 0.93 - 0.07 * u_p4 * fbm(uv * 38.0) - 0.03 * dot(uv, uv);
-  float v = paper * (1.0 - 0.93 * ink);
+  float inkv = 0.05 + 0.90 * lum(pq);
+  float v = mix(paper, inkv * 0.96, ink);
+  v -= 0.22 * ink * (1.0 - ink) * 4.0 * 0.5;
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
   {
-    id: 'touchglow', name: '✧ ˚ ⟡ ˚ ✧', label: 'firefly lantern', grow: true, touch: true, phase: 0.0,
+    id: 'touchglow', name: '✧ ˚ ⟡ ˚ ✧', label: 'firefly lantern', photo: true, grow: true, touch: true, phase: 0.0,
     demo: [[0.4, 0.5, 0.08], [0.62, 0.55, 0.3]],
     params: [
       { label: 'fireflies', min: 4, max: 28, value: 14 }, { label: 'wander', min: 0.2, max: 2.0, value: 1.0 },
@@ -3314,9 +3353,12 @@ void main(){
     code: `
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
+  vec2 q = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
   float asp = u_res.x / u_res.y;
-  float v = 0.03 + 0.04 * (1.0 - length(uv));
+  float L = lum(q);                      // your photo: it only shows where a firefly's light falls on it
+  float light = 0.0, core = 0.0;
+  float pool = 0.0035 + 0.0085 * u_p3;     // how far each lantern glow reaches
   float n = floor(u_p0 + 0.5);
   for (int i = 0; i < 28; i++) {
     if (float(i) >= n) break;
@@ -3342,7 +3384,8 @@ void main(){
     float r = 0.0055 + 0.004 * h1;
     vec2 d = uv - pos;
     float dd2 = dot(d, d);
-    v += inten * (exp(-dd2 / (r * r)) + 0.45 * u_p3 * exp(-dd2 / (r * r * 32.0)));
+    light += inten * exp(-dd2 / pool);
+    core  += inten * exp(-dd2 / (r * r));
   }
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t];
@@ -3352,8 +3395,10 @@ void main(){
     vec2 d = uv - (tc.xy - 0.5) * vec2(asp, 1.0);
     float dd = dot(d, d);
     float life = exp(-age * (3.5 / u_p2));
-    v += u_p4 * life * (0.35 * exp(-dd / 0.006) + 0.12 * exp(-dd / 0.05));
+    light += u_p4 * life * 0.9 * exp(-dd / 0.012);
+    core  += u_p4 * life * 0.35 * exp(-dd / 0.006);
   }
+  float v = 0.015 + L * (0.05 + 1.0 * clamp(light, 0.0, 1.3)) + 0.8 * clamp(core, 0.0, 1.2);
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   }
@@ -3569,6 +3614,13 @@ void main(){
   }
 ];
 SHADERS.unshift(...PHOTO_SHADERS);   // up front, so they're the first thing in the picker
+(function(){
+  const NAMES = {"ph_halftone": "halftone", "ph_topo": "contours", "ph_sketch": "sketch", "ph_smudge": "smudge", "ph_dust": "dust", "rifogfog": "riso fog", "moire": "moire", "glitter": "moon glitter", "phyllo": "sunflower", "touchglow": "fireflies", "cloudveil": "clouds", "rainpane": "rain", "leafshade": "leaf shadows", "windfield": "wind", "smoke": "smoke", "candle": "candle", "candlewall": "candlelight", "embers": "embers", "hearth": "fire", "touchripples": "ripples", "touchink": "ink"};
+  const ORDER = ["ph_halftone", "ph_topo", "ph_sketch", "ph_smudge", "ph_dust", "rifogfog", "moire", "glitter", "phyllo", "touchglow", "cloudveil", "rainpane", "leafshade", "windfield", "smoke", "candle", "candlewall", "embers", "hearth", "touchripples", "touchink"];
+  SHADERS.forEach(sh => { if (NAMES[sh.id]) { sh.name = NAMES[sh.id]; sh.label = NAMES[sh.id]; } });
+  const rank = id => { const k = ORDER.indexOf(id); return k < 0 ? 999 : k; };
+  SHADERS.sort((a, b) => rank(a.id) - rank(b.id));
+})();
 
 const glState = { gl: null, canvas: null, programs: {}, buf: null, failed: false, v2: false, lastError: '', noiseTex: null };
 function ensureGL() {

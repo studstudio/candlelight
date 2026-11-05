@@ -253,6 +253,7 @@
   .tap-target { position: absolute; inset: 0; z-index: 3; }
   .photo-wrap.has-photo .tap-target { z-index: 1; pointer-events: none; }
 
+  .crop-box.touch-on { cursor: crosshair; }
   .crop-box {
     position: absolute; border: 2px solid var(--ember); background: rgba(232,131,74,0.08);
     box-shadow: 0 0 0 2000px rgba(0,0,0,0.55);
@@ -1486,7 +1487,7 @@ function loadLayerStateToGlobals(idx) {
   if (!layer) return;
   activeLayerIdx = idx;
   naturalW = layer.naturalW; naturalH = layer.naturalH;
-  sourceImg.src = (layer.shader || layer.img.tagName === 'CANVAS') ? layer.img.toDataURL() : layer.img.src; // shader layers draw into a canvas, not an <img>
+  sourceImg.src = layer.shader ? shaderCropSrc(layer) : (layer.img.tagName === 'CANVAS') ? layer.img.toDataURL() : layer.img.src; // shader layers draw into a canvas, not an <img>
   sourceImg.style.display = 'block';
   emptyState.style.display = 'none';
   photoWrap.classList.add('has-photo');
@@ -4241,7 +4242,7 @@ function setShaderTouchMode(on) {
   shaderTouchMode = !!on;
   shaderTouchBtn.classList.toggle('on', shaderTouchMode);
   shaderTouchBtn.textContent = shaderTouchMode ? 'touching…' : 'touch off';
-  previewWrap.classList.toggle('touch-on', shaderTouchMode);
+  cropBox.classList.toggle('touch-on', shaderTouchMode);
 }
 function syncShaderTouch() { // touch is simply always on for a touch shader (and off for the rest)
   const l = activeShaderLayer();
@@ -4262,9 +4263,13 @@ document.getElementById('shaderTouchClear').onclick = () => {
 function shaderTouchAt(clientX, clientY, isMove) {
   const layer = activeShaderLayer(); if (!layer || !shaderTouchMode) return;
   if (animPlaying) { previewPending = null; stopAnimPreview(); }   // touching the shader hands over from the .5s cycle preview to the live shader
-  const r = liveCanvas.getBoundingClientRect();
-  const u = (clientX - r.left) / r.width, v = 1 - (clientY - r.top) / r.height;
-  if (u < 0 || u > 1 || v < 0 || v > 1) return;
+  // touches land on the crop box (the preview stays free for tone curve / filter gestures); map the spot inside the box to the shader's own 0..1 space
+  const r = cropBox.getBoundingClientRect();
+  const fx = (clientX - r.left) / r.width, fy = (clientY - r.top) / r.height;
+  if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+  const sx = (box.left - layer.coverX0) / layer.coverScale, sy = (box.top - layer.coverY0) / layer.coverScale;
+  const sw = box.width / layer.coverScale, sh = box.height / layer.coverScale;
+  const u = (sx + fx * sw) / layer.naturalW, v = 1 - (sy + fy * sh) / layer.naturalH;
   const list = layer.shader.touches || (layer.shader.touches = []);
   if (isMove && shaderTouchLast && Math.hypot(u - shaderTouchLast[0], (v - shaderTouchLast[1]) * 0.75) < 0.035) return;
   shaderTouchLast = [u, v];
@@ -4274,10 +4279,8 @@ function shaderTouchAt(clientX, clientY, isMove) {
   setBaked(false);   // a new touch is new motion that isn't in the bake
   if (!shaderPlayTimer) startShaderPlay();
 }
-previewWrap.addEventListener('touchstart', (e) => { if (!shaderTouchMode || !activeShaderLayer()) return; e.preventDefault(); shaderTouchLast = null; shaderTouchAt(e.touches[0].clientX, e.touches[0].clientY, false); }, { passive: false });
-previewWrap.addEventListener('touchmove', (e) => { if (!shaderTouchMode || !activeShaderLayer()) return; e.preventDefault(); shaderTouchAt(e.touches[0].clientX, e.touches[0].clientY, true); }, { passive: false });
 let shaderMouseDown = false;
-previewWrap.addEventListener('mousedown', (e) => { if (!shaderTouchMode || !activeShaderLayer()) return; shaderMouseDown = true; shaderTouchLast = null; shaderTouchAt(e.clientX, e.clientY, false); });
+cropBox.addEventListener('mousedown', (e) => { if (e.target.classList.contains('handle') || !shaderTouchMode || !activeShaderLayer()) return; shaderMouseDown = true; shaderTouchLast = null; shaderTouchAt(e.clientX, e.clientY, false); });
 window.addEventListener('mousemove', (e) => { if (shaderMouseDown) shaderTouchAt(e.clientX, e.clientY, true); });
 window.addEventListener('mouseup', () => { shaderMouseDown = false; });
 
@@ -4306,7 +4309,15 @@ function updateShaderPanel() {
   updateAnimControlsVisibility();
 }
 let shaderSrcPending = false;
+const shaderCropCache = new WeakMap();
+function shaderCropSrc(layer) { // the crop view shows your photo in colour when the shader has one (the shader's own grey output otherwise)
+  const ph = layer.shader && layer.shader.photo;
+  if (!ph) return layer.img.toDataURL();
+  let u = shaderCropCache.get(ph); if (!u) { u = ph.toDataURL(); shaderCropCache.set(ph, u); }
+  return u;
+}
 function refreshShaderSource(layer) { // keeps the crop view's picture in step with the shader
+  if (layer.shader && layer.shader.photo) { if (activeShaderLayer() === layer) { const u = shaderCropSrc(layer); if (sourceImg.src !== u) sourceImg.src = u; } return; }   // a colour photo doesn't change as the shader plays
   if (shaderSrcPending) return;
   shaderSrcPending = true;
   requestAnimationFrame(() => { shaderSrcPending = false; if (activeShaderLayer() === layer) sourceImg.src = layer.img.toDataURL(); });
@@ -5098,10 +5109,14 @@ cropBox.addEventListener('touchstart', (e) => {
   if (e.touches.length !== 1) return;
   e.preventDefault();
   const t = e.touches[0];
+  if (shaderTouchMode && activeShaderLayer()) { shaderTouchLast = null; shaderTouchAt(t.clientX, t.clientY, false); return; }   // a touch shader: this is where you play it
   dragState = { startX: t.clientX, startY: t.clientY, startLeft: box.left, startTop: box.top };
 }, { passive: false });
 cropBox.addEventListener('touchmove', (e) => {
-  if (!dragState) return;
+  if (!dragState) {
+    if (shaderTouchMode && activeShaderLayer() && e.touches.length === 1) { e.preventDefault(); shaderTouchAt(e.touches[0].clientX, e.touches[0].clientY, true); }
+    return;
+  }
   e.preventDefault();
   const t = e.touches[0];
   const vis = visibleImageBounds();
@@ -5824,7 +5839,7 @@ previewWrap.addEventListener('touchstart', (e) => {
     previewPending = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
     return;
   }
-  if (shaderTouchMode && activeShaderLayer()) return; // the preview is a touch pad right now
+  // (shader touches now live on the crop box, so the preview keeps its normal gestures)
   if (!naturalW || e.touches.length !== 1) return;
   const t = e.touches[0];
   scrubState = {

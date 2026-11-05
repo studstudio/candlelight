@@ -2741,10 +2741,21 @@ void main(){
   float fogA = lfbm(uv * u_p0 + u_p5 * 1.9, T, 0.9);
   float fogB = lfbm(uv * u_p0 * 1.3 + vec2(11.0, 4.0) + u_p5, T + 2.0, 1.0);
   float bias = mix(-0.28, 0.22, u_p3);
+  float wipe = 0.0;
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    float d = length(uv - c);
+    float life = smoothstep(0.0, 0.03, age) * exp(-age * 1.0);
+    wipe = max(wipe, (1.0 - smoothstep(0.09, 0.20 + 0.08 * age, d)) * life);
+  }
   // the fog drifts through the picture, thickening and thinning the ink so the photo surfaces and dissolves
   float a = clamp(dark * 1.35 + bias + (fogA - 0.5) * 1.0, 0.0, 1.0);
-  float b = clamp((fogB - 0.40) * 1.7, 0.0, 1.0) * (0.30 + 0.70 * dark) * u_p4;
-  float dotsA = screenDots(uv, a, u_p1, u_p2 * TAU);
+  a = mix(a, clamp(dark * 1.25, 0.0, 1.0), wipe);
+  float b = clamp((fogB - 0.40) * 1.7, 0.0, 1.0) * (0.30 + 0.70 * dark) * u_p4 * (1.0 - wipe);
+  float dotsA = screenDots(uv, a, u_p1 * (1.0 + 0.9 * wipe), u_p2 * TAU);
   float dotsB = screenDots(uv, b, u_p1 * 1.18, u_p2 * TAU + 0.52);
   float ink = max(dotsA, dotsB);
   float g = mix(0.95, 0.07, ink);
@@ -2758,6 +2769,27 @@ void main(){
       { label: 'curvature', min: 0.0, max: 2.0, value: 0.8 }, { label: 'weight', min: 0.08, max: 0.6, value: 0.34 },
       { label: 'layers', min: 2, max: 4, value: 2 }, { label: 'seed', min: 0, max: 20, value: 1 } ],
     code: `
+vec2 pinch(vec2 w, vec2 uv){
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    float env = exp(-dot(uv - c, uv - c) / 0.035) * exp(-age * 1.5) * smoothstep(0.0, 0.02, age);
+    w = c + rot(6.0 * env * cos(age * 8.0)) * (w - c) * (1.0 + 0.5 * env);
+  }
+  return w;
+}
+float pressAt(vec2 uv){
+  float asp = u_res.x / u_res.y, m = 0.0;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    m = max(m, exp(-dot(uv - c, uv - c) / 0.03) * exp(-age * 1.5) * smoothstep(0.0, 0.02, age));
+  }
+  return m;
+}
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
   vec2 q = gl_FragCoord.xy / u_res;
@@ -2773,9 +2805,10 @@ void main(){
     vec2 w = uv + 0.16 * u_p2 * vec2(sin(uv.y * 3.1 + T + fi * 1.3), cos(uv.x * 2.7 - T + fi * 0.7));
     w += 0.10 * u_p2 * (vec2(lnoise(uv * 2.0 + fi * 5.0, T, fi, 0.8), lnoise(uv * 2.0 + 9.0 + fi * 5.0, T, fi + 1.0, 0.8)) - 0.5);
     w += lens * (0.05 + 0.03 * u_p2);
+    w = pinch(w, uv);
     vec2 pr = rot(a) * w;
     float L = lum(q + vec2(0.004, 0.003) * fi);
-    float wt = clamp(u_p3 * (0.10 + 2.0 * (1.0 - L)), 0.02, 0.97);   // dark parts of the photo get fat threads, light parts hair-thin ones
+    float wt = clamp(u_p3 * (0.10 + 2.0 * (1.0 - L)) + 0.35 * pressAt(uv), 0.02, 0.97);   // dark parts of the photo get fat threads, light parts hair-thin ones
     float stripe = abs(fract(pr.x * u_p0) - 0.5) * 2.0;
     float line = 1.0 - smoothstep(wt - 0.10, wt + 0.10, stripe);
     g *= 1.0 - 0.92 * line;
@@ -2809,6 +2842,17 @@ void main(){
     slope += d * cos(ph) * amp * fr;
   }
   slope *= u_p2 * 0.16;
+  float splash = 0.0;
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec2 dv = uv - c; float d = length(dv), R = age * 0.9;
+    float env = exp(-pow((d - R) / 0.075, 2.0)) * exp(-age * 1.8) * smoothstep(0.0, 0.02, age);
+    slope += dv / (d + 1e-3) * cos((d - R) * 48.0) * env * 0.42;
+    splash += env * (0.5 + 0.5 * cos((d - R) * 48.0)) * 0.30 + exp(-d * d / 0.003) * exp(-age * 7.0) * 1.2;
+  }
   // your photo lies under the water: the ripples bend it as they pass over, and the glitter lands mostly on its bright parts
   vec2 qq = clamp(q + slope * vec2(u_res.y / u_res.x, 1.0) * 0.16, 0.0, 1.0);
   float L = lum(qq);
@@ -2819,7 +2863,7 @@ void main(){
   float glow = exp(-dot(uv - moon, uv - moon) * 5.0) * u_p4;
   float path = exp(-pow((uv.x - moon.x) * 3.2, 2.0));
   float lit = 0.35 + 1.15 * smoothstep(0.25, 0.85, L);
-  float g = 0.02 + 0.74 * L + 0.95 * sparkle * (0.35 + 0.65 * path) * lit + glow * 0.40;
+  float g = 0.02 + 0.74 * L + 0.95 * sparkle * (0.35 + 0.65 * path) * lit + glow * 0.40 + splash * (0.3 + 0.7 * L);
   gl_FragColor = vec4(vec3(clamp(g,0.0,1.0)), 1.0);
 }`
   },
@@ -2854,11 +2898,21 @@ void main(){
     // each seed reads the photo under it: dark parts grow fat seeds that nearly touch, light parts get small ones
     float L = lum(vec2(pos.x / asp + 0.5, pos.y + 0.5));
     float dk = 1.0 - clamp((L - 0.5) * 1.35 + 0.5, 0.0, 1.0);
+    float bump = 0.0; vec2 push = vec2(0.0);
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec2 dc = pos - c; float d2 = dot(dc, dc);
+    float env = exp(-d2 / 0.012) * smoothstep(0.0, 0.03, age) * exp(-age * 1.2);
+    bump += env; push += dc / (sqrt(d2) + 1e-3) * env * 0.035;
+  }
+    pos += push;
     vec2 e = ri > 1e-4 ? pos / ri : vec2(1.0, 0.0);
     vec2 dl = uv - pos;
     float al = dot(dl, e), pe = dot(dl, vec2(-e.y, e.x));
     float d = length(vec2(al * (1.0 - 0.5 * u_p3), pe));
-    float rad = 0.90 * c * u_p1 * s * (1.0 + 0.25 * u_p3) * mix(0.30, 1.32, dk);
+    float rad = 0.90 * c * u_p1 * s * (1.0 + 0.25 * u_p3) * mix(0.30, 1.32, dk) * (1.0 + 1.3 * bump);
     float cov = 1.0 - smoothstep(rad - px, rad, d);
     float hole = 1.0 - smoothstep(rad * u_p4 * 0.55 - px, rad * u_p4 * 0.55 + 1e-5, d);
     float sv = mix(0.94, 0.07 + 0.88 * hole, cov);
@@ -2891,15 +2945,26 @@ void main(){
   vec2 dir = vec2(cos(ang), sin(ang));
   float f1 = fract(u_phase), f2 = fract(u_phase + 0.5);
   float w1 = 1.0 - abs(2.0 * f1 - 1.0);
-  float s0 = cloudS(uv, dir, f1, f2, w1, T);
+  vec2 uvw = uv; float hole = 0.0;
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec2 dv = uv - c; float d = length(dv);
+    float life = smoothstep(0.0, 0.04, age) * exp(-age * 0.8);
+    uvw -= dv / (d + 0.02) * exp(-d * d / 0.03) * life * 0.22;
+    hole = max(hole, (1.0 - smoothstep(0.05, 0.20, d)) * life);
+  }
+  float s0 = cloudS(uvw, dir, f1, f2, w1, T);
   vec2 L = normalize(vec2(-0.6, 0.8));
-  float s1 = cloudS(uv + L * 0.035, dir, f1, f2, w1, T);
+  float s1 = cloudS(uvw + L * 0.035, dir, f1, f2, w1, T);
   float th = mix(0.66, 0.40, u_p0);
   float cov = smoothstep(th - u_p1 * 0.5, th + u_p1 * 0.5, s0);
   float lit = clamp(0.55 + (s0 - s1) * 9.0 * u_p5, 0.0, 1.0);
   float body = mix(0.55, 0.98, lit) * (0.78 + 0.22 * smoothstep(th, th + 0.25, s0) * 0.0 + 0.22 * (1.0 - smoothstep(th, th + 0.3, s0)));
-  float sky = 0.03 + 0.92 * lum(pq);
-  float v = mix(sky, body, cov * 0.88);
+  float sky = (0.03 + 0.92 * lum(pq)) * (1.0 + 0.9 * hole);
+  float v = mix(sky, body, cov * 0.88 * (1.0 - hole));
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
@@ -2960,6 +3025,19 @@ void main(){
   v = mix(v, d2.y, d2.x);
   vec2 d1 = drops(uv, u_p0, u_p1, u_p3, u_p5, 0.0);
   v = mix(v, d1.y, d1.x);
+  vec2 pq = gl_FragCoord.xy / u_res;
+  float wipe = 0.0, bead = 0.0;
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    float d = length(uv - c);
+    float life = smoothstep(0.0, 0.03, age) * exp(-age * 0.7);
+    wipe = max(wipe, (1.0 - smoothstep(0.07, 0.11, d)) * life);
+    bead = max(bead, exp(-pow((d - 0.105) / 0.012, 2.0)) * life);
+  }
+  v = mix(v, 0.03 + 0.95 * lum(pq), wipe) + 0.30 * bead;
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
@@ -2997,12 +3075,25 @@ void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
   vec2 pq = gl_FragCoord.xy / u_res;
   float T = u_phase * TAU;
-  float far = leafLayer(uv + 0.03 * vec2(sin(T), cos(T)) * u_p2, u_p1 * 0.55, u_p0 * 1.5, 0.35, 7.0, T);
-  float near = leafLayer(uv, u_p1, u_p0, u_p3, 1.0, T);
+  vec2 ug = uv; float spot = 0.0;
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec2 dv = uv - c; float d = length(dv);
+    float life = smoothstep(0.0, 0.03, age) * exp(-age * 1.3);
+    float env = exp(-d * d / 0.05) * life;
+    ug -= dv / (d + 0.02) * env * 0.26 + vec2(-dv.y, dv.x) / (d + 0.02) * env * 0.08 * sin(age * 9.0);
+    spot = max(spot, env);
+  }
+  float far = leafLayer(ug + 0.03 * vec2(sin(T), cos(T)) * u_p2, u_p1 * 0.55, u_p0 * 1.5, 0.35, 7.0, T);
+  float near = leafLayer(ug, u_p1, u_p0, u_p3, 1.0, T);
   float breathe = 1.0 + 0.10 * u_p2 * sin(T + 2.0 * fbm(uv * 1.5));
   float shade = clamp(near * u_p4 + far * u_p5 * 0.5 * u_p4 * breathe, 0.0, 1.0);
+  shade *= 1.0 - 0.85 * spot;
   float ground = 0.93 - 0.10 * fbm(uv * 3.0 + 4.0) - 0.04 * dot(uv, uv);
-  float v = (0.04 + 0.96 * lum(pq)) * (0.88 + 0.12 * ground) * (1.0 - shade * 0.85);
+  float v = (0.04 + 0.96 * lum(pq)) * (0.88 + 0.12 * ground) * (1.0 - shade * 0.85) + spot * 0.20 * lum(pq);
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
   },
@@ -3025,6 +3116,15 @@ void main(){
   float per = floor(u_p1 + 0.5);
   float g = gustAt(sx, per);
   float bend = (g - 0.5) * 2.0 * u_p0;                 // -1..1 gust push
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec2 dv = (sx - tc.xy) * vec2(asp, 1.0); float d = length(dv);
+    float env = (exp(-pow((d - age * 0.9) / 0.13, 2.0)) * exp(-age * 1.5) + exp(-d * d / 0.01) * exp(-age * 2.5)) * smoothstep(0.0, 0.02, age);
+    bend += sign(dv.x + 1e-4) * smoothstep(0.0, 0.05, abs(dv.x)) * env * 1.8;
+  }
   float F = floor(u_p2 + 0.5);
   float px = sx.x * F + (u_p5 * sx.y + 0.9 * bend * (0.25 + sx.y)) * F * 0.05;
   float blade = pnoise(vec2(px, sx.y * u_p3), F);
@@ -3034,7 +3134,7 @@ void main(){
   float v = 0.22 + 0.34 * b + 0.50 * sheen * (0.35 + 0.65 * b);
   v = 0.5 + (v - 0.5) * (0.6 + u_p4 * 1.0);
   v *= 0.85 + 0.25 * (1.0 - sx.y) * 0.5 + 0.1 * sx.y;
-  float ph = lum(pq + vec2(bend * 0.006, 0.0));
+  float ph = lum(pq + vec2(bend * 0.018, 0.0));
   v = clamp(ph * (0.12 + 0.95 * v) + 0.05 * sheen * b, 0.0, 1.0);
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
@@ -3067,6 +3167,21 @@ float smokeD(vec2 uv, float ph, float T){
   }
   return dens;
 }
+float puffD(vec2 uv){
+  float asp = u_res.x / u_res.y, dens = 0.0;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec2 pos = c + vec2(0.05 * sin(age * 9.0 + tc.x * 20.0), age * 0.45 * u_p5);
+    float sz = 0.07 + 0.16 * age;
+    vec2 dv = uv - pos;
+    dv += (vec2(fbm(uv * 6.0 + age * 2.0), fbm(uv * 6.0 + 7.0 - age * 2.0)) - 0.5) * 0.10 * age * u_p2;
+    float cloud = exp(-dot(dv, dv) / (sz * sz)) * (0.45 + 0.9 * fbm(uv * 13.0 + vec2(0.0, -age * 3.0)));
+    dens += cloud * smoothstep(0.0, 0.03, age) * exp(-age * 1.5) * 3.2;
+  }
+  return dens;
+}
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
   vec2 pq = gl_FragCoord.xy / u_res;
@@ -3074,6 +3189,7 @@ void main(){
   float f1 = fract(u_phase), f2 = fract(u_phase + 0.5);
   float w1 = 1.0 - abs(2.0 * f1 - 1.0);
   float d = w1 * smokeD(uv, f1, T) + (1.0 - w1) * smokeD(uv, f2, T);
+  d += puffD(uv);
   float bgv = 0.03 + 0.55 * lum(pq);
   float v = mix(bgv, 0.97, 0.85 * (1.0 - exp(-d * 1.6)));
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
@@ -3097,14 +3213,24 @@ void main(){
     float fk = float(k);
     float hb = hash(vec2(fk, 3.0));
     float x0 = (fk - (n - 1.0) * 0.5) * 0.30;
-    float H = u_p1 * (0.78 + 0.44 * hb) * (1.0 + 0.16 * u_p2 * (lnoise(vec2(fk * 3.7, 1.0), 3.0 * T, fk, 1.0) - 0.5));
+    float blow = 0.0, push = 0.0;
+    float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+      float d = length(c - vec2(x0, -0.05));
+      float life = smoothstep(0.0, 0.025, age) * exp(-age * 2.2) * exp(-d * d / 0.12);
+      blow = max(blow, life); push += clamp((x0 - c.x) * 5.0, -1.0, 1.0) * life;
+    }
+    float H = u_p1 * (0.78 + 0.44 * hb) * (1.0 + 0.16 * u_p2 * (lnoise(vec2(fk * 3.7, 1.0), 3.0 * T, fk, 1.0) - 0.5)) * (1.0 - 0.88 * blow);
     vec2 p = uv - vec2(x0, -0.16 - 0.04 * hb);
     float y = p.y / H;
     float fl = 1.0 + 0.45 * u_p2 * (lnoise(vec2(fk * 5.0, 2.0), 2.0 * T, fk + 1.0, 1.2) - 0.5);
     vec2 hc = p - vec2(0.0, 0.42 * H);
-    halo += u_p3 * fl * exp(-dot(hc, hc) / (H * H * 3.2 + 1e-4));
+    halo += u_p3 * (1.0 - 0.8 * blow) * fl * exp(-dot(hc, hc) / (H * H * 3.2 + 1e-4));
     float yy = clamp(y, 0.0, 1.0);
-    float sway = (u_p4 * 0.5 + 1.1 * u_p2 * (lnoise(vec2(yy * 1.4 + fk * 9.0, 0.5), 3.0 * T, fk, 1.2) - 0.5)) * yy * yy * H * 0.45;
+    float sway = (u_p4 * 0.5 + push * 1.5 + 1.1 * u_p2 * (lnoise(vec2(yy * 1.4 + fk * 9.0, 0.5), 3.0 * T, fk, 1.2) - 0.5)) * yy * yy * H * 0.45;
     float w = 0.19 * H * pow(max(sin(3.14159 * pow(yy, 0.70)), 0.0), 0.85);
     w *= 1.0 + 0.7 * u_p2 * (lnoise(vec2(yy * 5.0, fk * 3.0), 2.0 * T, fk, 1.3) - 0.5) * yy;
     float dx = (p.x - sway) / (w + 1e-4);
@@ -3154,7 +3280,19 @@ void main(){
   float fl = 1.0 + 0.30 * u_p4 * (lnoise(vec2(9.0, 9.0), 2.0 * T, 0.5, 1.0) - 0.5) * 2.0
                  + 0.12 * u_p4 * (lnoise(vec2(4.0, 1.0), 5.0 * T, 2.5, 1.0) - 0.5) * 2.0;
   float att = fl / (1.0 + u_p5 * 4.5 * r2);
-  float v = 0.02 + 1.5 * diff * att * (0.80 + 0.5 * (h0 - 0.5)) * (0.12 + 1.15 * lum(pq));
+  float tl = 0.0;
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec3 Ldt = vec3(c, u_p1 * 0.8) - P;
+    float dft = max(dot(nrm, normalize(Ldt)), 0.0);
+    float life = smoothstep(0.0, 0.03, age) * exp(-age * 0.8);
+    float flt = 1.0 + 0.22 * sin(age * 38.0 + tc.x * 17.0) + 0.10 * sin(age * 91.0 + tc.y * 9.0);
+    tl += dft * flt * life / (1.0 + u_p5 * 5.5 * dot(Ldt, Ldt));
+  }
+  float v = 0.02 + 1.5 * (diff * att + tl) * (0.80 + 0.5 * (h0 - 0.5)) * (0.12 + 1.15 * lum(pq));
   v = pow(clamp(v, 0.0, 1.0), 0.9);
   gl_FragColor = vec4(vec3(v), 1.0);
 }`
@@ -3192,6 +3330,27 @@ void main(){
     v += (core * 1.6 + gl * 1.5) * life * tw;
     lit += exp(-dd / (r * r * 500.0)) * life * tw;
   }
+  float asp = u_res.x / u_res.y;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    vec2 dv0 = uv - c;
+    float fl0 = exp(-dot(dv0, dv0) / 0.006) * exp(-age * 6.0);
+    v += 0.5 * fl0; lit += 1.6 * fl0;
+    for (int j = 0; j < 14; j++) {
+      float fj = float(j);
+      float h1 = hash(vec2(fj, tc.x * 13.0 + tc.y * 7.0)), h2 = hash(vec2(fj + 5.0, tc.y * 11.0 + 1.0));
+      float ang = 1.5708 + (h1 - 0.5) * 2.8, spd = 0.25 + 0.45 * h2;
+      vec2 pos = c + vec2(cos(ang), sin(ang)) * spd * 1.8 * (1.0 - exp(-age * 3.0)) - vec2(0.0, 0.5 * age * age);
+      vec2 dv = uv - pos;
+      float dd = dot(dv, dv);
+      float life = smoothstep(0.0, 0.02, age) * exp(-age * (2.0 + 2.0 * h1));
+      float r = 0.0028 + 0.002 * h2;
+      v += (exp(-dd / (r * r)) * 1.8 + exp(-dd / (r * r * 40.0)) * 0.5) * life;
+      lit += exp(-dd / (r * r * 500.0)) * life * 1.5;
+    }
+  }
   // bed of coals: dark crust with glowing cracks that slowly breathe
   float yb = uv.y + 0.5;
   float bedMask = 1.0 - smoothstep(0.10, 0.26 + 0.10 * (fbm(vec2(uv.x * 4.0, 1.0)) - 0.5), yb);
@@ -3226,6 +3385,23 @@ float fireF(vec2 uv, float ph, float T, float flip){
   float env = mask * hgt;
   return env * 1.5 + (n - 0.5) * (1.6 + 1.6 * u_p2) * (0.25 + env) - 0.10;
 }
+vec2 touchFire(vec2 uv){
+  float asp = u_res.x / u_res.y, f = -1.0, gl = 0.0;
+  for (int t = 0; t < 16; t++) {
+    vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
+    float life = smoothstep(0.0, 0.03, age) * exp(-age * 1.3);
+    vec2 dv = uv - c;
+    float h = max(0.45 * life, 0.05);
+    float n = fbm(vec2(dv.x * 8.0, dv.y * 3.5 - age * 4.5));
+    float wdt = max(0.10 * (1.0 - 0.75 * clamp(dv.y / h, 0.0, 1.0)), 0.015);
+    float mask = exp(-pow((dv.x + (n - 0.5) * 0.35 * dv.y) / wdt, 2.0)) * step(-0.02, dv.y) * (1.0 - smoothstep(0.0, h, dv.y));
+    f = max(f, mask * 1.5 * life + (n - 0.5) * 1.2 * mask - 0.1);
+    gl += exp(-dot(dv, dv) / 0.06) * life;
+  }
+  return vec2(f, gl);
+}
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*u_res) / u_res.y;
   vec2 pq = gl_FragCoord.xy / u_res;
@@ -3234,14 +3410,15 @@ void main(){
   float w1 = 1.0 - abs(2.0 * f1 - 1.0);
   float fb = w1 * fireF(uv, f1, T, 0.0) + (1.0 - w1) * fireF(uv, f2, T, 0.0);
   float ft = w1 * fireF(uv, f1, T, 1.0) + (1.0 - w1) * fireF(uv, f2, T, 1.0);
-  float f = max(fb, ft);
+  vec2 tf = touchFire(uv);
+  float f = max(max(fb, ft), tf.x);
   float body = smoothstep(0.42 - u_p4, 0.42 + u_p4, f);
   float hot = smoothstep(0.80, 1.5, f);
   float y = min(uv.y + 0.5, 0.5 - uv.y);   // distance from the nearest edge
   float br = smoothstep(0.35, 1.5, f);
   float v = 0.03 + 0.97 * (body * (0.10 + 0.50 * br) + 0.55 * hot * (1.0 - 0.3 * y));
   v += 0.10 * exp(-pow(uv.x / (u_p0 * 1.8), 2.0)) * exp(-y * 3.0);   // glow at both bases
-  float glow = exp(-pow(uv.x / (u_p0 * 3.2), 2.0)) * exp(-y * 2.2) * (0.85 + 0.45 * (lnoise(vec2(1.0, 2.0), 2.0 * T, 0.0, 1.0) - 0.5)) + 0.5 * body;
+  float glow = exp(-pow(uv.x / (u_p0 * 3.2), 2.0)) * exp(-y * 2.2) * (0.85 + 0.45 * (lnoise(vec2(1.0, 2.0), 2.0 * T, 0.0, 1.0) - 0.5)) + 0.5 * body + 1.2 * tf.y;
   v += lum(pq) * (0.04 + 0.60 * clamp(glow, 0.0, 1.3));
   gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
 }`
@@ -3617,6 +3794,7 @@ SHADERS.unshift(...PHOTO_SHADERS);   // up front, so they're the first thing in 
 (function(){
   const NAMES = {"ph_halftone": "halftone", "ph_topo": "contours", "ph_sketch": "sketch", "ph_smudge": "smudge", "ph_dust": "dust", "rifogfog": "riso fog", "moire": "moire", "glitter": "moon glitter", "phyllo": "sunflower", "touchglow": "fireflies", "cloudveil": "clouds", "rainpane": "rain", "leafshade": "leaf shadows", "windfield": "wind", "smoke": "smoke", "candle": "candle", "candlewall": "candlelight", "embers": "embers", "hearth": "fire", "touchripples": "ripples", "touchink": "ink"};
   const ORDER = ["ph_halftone", "ph_topo", "ph_sketch", "ph_smudge", "ph_dust", "rifogfog", "moire", "glitter", "phyllo", "touchglow", "cloudveil", "rainpane", "leafshade", "windfield", "smoke", "candle", "candlewall", "embers", "hearth", "touchripples", "touchink"];
+  SHADERS.forEach(sh => { if (sh.photo && !sh.touch) { sh.touch = true; sh.utouch = true; } });
   SHADERS.forEach(sh => { if (NAMES[sh.id]) { sh.name = NAMES[sh.id]; sh.label = NAMES[sh.id]; } });
   const rank = id => { const k = ORDER.indexOf(id); return k < 0 ? 999 : k; };
   SHADERS.sort((a, b) => rank(a.id) - rank(b.id));
@@ -3896,6 +4074,7 @@ function addShaderLayer(presetId) {
   updateSendState();
   if (photoWrap.classList.contains('collapsed')) setCropCollapsed(false); // a new base opens the crop area, like a photo does
   if (wantsPhoto && !photo) flashStatus('no photo yet, so this is using a sample. add a photo first, then pick it again', 'success');
+  startShaderPlay();   // shaders move as soon as they are added
 }
 
 // ----- picker sheet -----
@@ -3906,7 +4085,7 @@ let thumbPhoto = null;
 function drawShaderThumb(preset, thumb) {
   const ph = preset.photo ? (currentPhotoSource() || null) : null;
   if (preset.photo) thumbPhoto = ph;
-  if (drawShader(preset, preset.params.map(p => p.value), preset.touch ? 0.5 : (preset.phase ?? 0.25), preset.demo, ph)) thumb.getContext('2d').drawImage(glState.canvas, 0, 0, 200, 150);
+  if (drawShader(preset, preset.params.map(p => p.value), (preset.touch && !preset.utouch) ? 0.5 : (preset.phase ?? 0.25), preset.demo, ph)) thumb.getContext('2d').drawImage(glState.canvas, 0, 0, 200, 150);
 }
 function refreshPhotoThumbs() { // the picture may have changed since the cards were drawn
   shaderGrid.querySelectorAll('canvas[data-pid]').forEach(c => { const p = shaderPreset(c.dataset.pid); if (p && p.photo) drawShaderThumb(p, c); });

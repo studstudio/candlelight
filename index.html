@@ -98,6 +98,7 @@
 
   #duplicateFrameBtn, #duplicateFrameBtn:hover, #duplicateFrameBtn:active { border: none; background: transparent; box-shadow: none; flex: 0 0 40px; height: 38px; }
   .anim-controls .anim-btn-row { justify-content: flex-start; }
+  .frame-filmstrip:empty { display: none !important; }   /* an empty strip must not push the toolbar down when switching to cycle */
   .frame-filmstrip { display: flex; gap: 4px; padding: 8px 2px 4px; margin-top: -4px; touch-action: pan-y; }
   .frame-tab {
     flex: 1 1 0; min-width: 0; height: 20px; padding: 0; border-radius: 6px; border: 1px solid var(--line);

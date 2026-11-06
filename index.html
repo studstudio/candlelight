@@ -61,10 +61,14 @@
   }
   .pill.active { background: var(--ember); border-color: var(--ember); color: #1a1108; font-weight: 600; }
 
-  #clearBackdrop .clear-sheet p { margin: 0 0 14px; font-size: 12px; color: var(--cream-dim); line-height: 1.5; }
+  #clearBackdrop .clr-q { width: 18px; height: 18px; padding: 0; margin-left: 6px; border-radius: 50%; border: 1px solid var(--ember); background: transparent; color: var(--ember); font: 300 11px/16px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Courier New', monospace; vertical-align: 1px; cursor: pointer; }
+  #clearBackdrop .clr-q[aria-expanded="true"] { background: var(--ember); color: #fff; }
+  #clearBackdrop .clr-note { margin: 0; max-height: 0; opacity: 0; overflow: hidden; font: 200 11px/1.6 ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Courier New', monospace; color: var(--ember); transition: max-height .35s ease, opacity .3s ease, margin .3s ease; }
+  #clearBackdrop .clr-note.open { max-height: 200px; opacity: 1; margin: 0 0 14px; }
+  #clearBackdrop .clear-sheet h2 { margin-bottom: 14px; }
   #clearBackdrop .modal-actions button { font-size: 13px; font-weight: 400; padding: 12px 6px; white-space: nowrap; }
-  #clearBackdrop .clr-go { background: #d93a2f; color: #fff; border: 1px solid #d93a2f !important; }
-  #clearBackdrop .clr-cancel { background: #fff; color: #d93a2f; border: 1px solid #fff !important; }
+  #clearBackdrop .clr-go { background: #ff3b30; color: #fff; border: 1px solid #ff3b30 !important; }
+  #clearBackdrop .clr-cancel { background: #fff; color: #ff3b30; border: 1px solid #fff !important; }
   .layer-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
   .layer-row .layer-tabs { flex: 1 1 auto; }
   .reset-row { display: flex; align-items: baseline; margin: 8px 0 0; }
@@ -88,6 +92,8 @@
   }
   .mode-btn.active { background: var(--ember); border-color: var(--ember); color: #1a1108; }
 
+  #duplicateFrameBtn, #duplicateFrameBtn:hover, #duplicateFrameBtn:active { border: none; background: transparent; box-shadow: none; flex: 0 0 40px; height: 38px; }
+  .anim-controls .anim-btn-row { justify-content: flex-start; }
   .frame-filmstrip { display: flex; gap: 4px; padding: 8px 2px 4px; margin-top: -4px; touch-action: pan-y; }
   .frame-tab {
     flex: 1 1 0; min-width: 0; height: 20px; padding: 0; border-radius: 6px; border: 1px solid var(--line);
@@ -1039,6 +1045,10 @@ html, body { background-color: #fdd48d; background-image: none; }
   background-clip: content-box !important;
 }
 
+/* layer tabs (base / overlays) in the ember scheme */
+.layer-tab { color: var(--ember); }
+.layer-tab.active { color: var(--ember); border-color: var(--ember); }
+.layer-tab.layer-tab-add { border-color: rgba(232, 131, 74, 0.55); }
 </style>
 </head>
 <body>
@@ -1053,7 +1063,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 <div class="anim-controls" id="animControls" style="display:none; margin-bottom:10px;">
   <div class="anim-btn-row">
-    <button class="pill icon-only" id="duplicateFrameBtn" type="button" aria-label="duplicate frame" title="duplicate frame"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--ember)" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg></button>
+    <button class="pill icon-only" id="duplicateFrameBtn" type="button" aria-label="duplicate frame" title="duplicate frame"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="var(--ember)" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg></button>
   </div>
 </div>
 
@@ -1242,8 +1252,8 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 <div class="modal-backdrop" id="clearBackdrop">
   <div class="modal-sheet clear-sheet">
-    <h2>clear everything?</h2>
-    <p>this removes every frame, shader and video.</p>
+    <h2>clear everything? <button class="clr-q" id="clearQ" type="button" aria-label="more info" aria-expanded="false">?</button></h2>
+    <p class="clr-note" id="clearNote">this goes back to completely blank slate. press &amp; hold a frame to just delete individual frames. use ‘reset sliders’ and ‘apply to all’ if you want to remove all effects while keeping frames.</p>
     <div class="modal-actions">
       <button class="clr-cancel" id="clearCancel" type="button">cancel</button>
       <button class="clr-go" id="clearGo" type="button">clear all</button>
@@ -1927,7 +1937,16 @@ function updateFrameFilmstrip() {
     frameFilmstrip.appendChild(add);
   }
   updateBoomBtn(filledFrames.length);
+  requestAnimationFrame(placeDupBtn);
 }
+// the duplicate button sits centred under whichever frame is selected
+function placeDupBtn() {
+  const btn = document.getElementById('duplicateFrameBtn'), tab = frameFilmstrip.querySelector('.frame-tab.active');
+  if (!btn || !tab || !btn.offsetParent) return;
+  const row = btn.parentNode.getBoundingClientRect(), t = tab.getBoundingClientRect();
+  btn.style.marginLeft = Math.max(0, t.left + t.width / 2 - row.left - btn.offsetWidth / 2) + 'px';
+}
+window.addEventListener('resize', placeDupBtn);
 
 function duplicateActiveFrame() {
   if (mode !== 'cycle') return;
@@ -1996,7 +2015,8 @@ function clearAllFrames() {
   if (typeof updateShaderPanel === 'function') updateShaderPanel();
 }
 const clearBackdrop = document.getElementById('clearBackdrop');
-document.getElementById('clearAllBtn').onclick = () => clearBackdrop.classList.add('open');
+document.getElementById('clearAllBtn').onclick = () => { document.getElementById('clearNote').classList.remove('open'); document.getElementById('clearQ').setAttribute('aria-expanded', 'false'); clearBackdrop.classList.add('open'); };
+document.getElementById('clearQ').onclick = () => { const o = document.getElementById('clearNote').classList.toggle('open'); document.getElementById('clearQ').setAttribute('aria-expanded', o); };
 document.getElementById('clearCancel').onclick = () => clearBackdrop.classList.remove('open');
 document.getElementById('clearGo').onclick = () => { clearBackdrop.classList.remove('open'); clearAllFrames(); };
 clearBackdrop.addEventListener('click', (e) => { if (e.target === clearBackdrop) clearBackdrop.classList.remove('open'); });

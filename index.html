@@ -64,8 +64,9 @@
   #clearBackdrop .clr-q { width: 18px; height: 18px; padding: 0; margin-left: 6px; border-radius: 50%; border: 1px solid var(--ember); background: transparent; color: var(--ember); font: 300 11px/16px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Courier New', monospace; vertical-align: 1px; cursor: pointer; }
   #clearBackdrop .clr-q[aria-expanded="true"] { background: var(--ember); color: #fff; }
   #clearBackdrop .clr-note { margin: 0; max-height: 0; opacity: 0; overflow: hidden; font: 200 11px/1.6 ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Courier New', monospace; color: var(--ember); transition: max-height .35s ease, opacity .3s ease, margin .3s ease; }
+  #clearBackdrop .clr-note u { text-underline-offset: 2px; }
   #clearBackdrop .clr-note.open { max-height: 200px; opacity: 1; margin: 0 0 14px; }
-  #clearBackdrop .clear-sheet h2 { margin-bottom: 14px; }
+  #clearBackdrop .clear-sheet h2 { margin-bottom: 14px; font: 300 14px/1.3 ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Courier New', monospace; color: var(--ember); letter-spacing: 0.02em; }
   #clearBackdrop .modal-actions button { font-size: 13px; font-weight: 400; padding: 12px 6px; white-space: nowrap; }
   #clearBackdrop .clr-go { background: #ff3b30; color: #fff; border: 1px solid #ff3b30 !important; }
   #clearBackdrop .clr-cancel { background: #fff; color: #ff3b30; border: 1px solid #fff !important; }
@@ -273,7 +274,7 @@
   .crop-box {
     position: absolute; border: 2px solid var(--ember); background: rgba(232,131,74,0.08);
     box-shadow: 0 0 0 2000px rgba(0,0,0,0.55);
-    touch-action: none; z-index: 4;
+    touch-action: pan-y; z-index: 4;   /* pan-y: the 30px side strips scroll the page, like the preview's padding */
   }
   .crop-box .handle {
     position: absolute; width: 28px; height: 28px;
@@ -1045,6 +1046,8 @@ html, body { background-color: #fdd48d; background-image: none; }
   background-clip: content-box !important;
 }
 
+/* the shader's name stays out of the head row so bake motion and the boomerang always fit */
+.shader-head .shader-name { display: none; }
 /* layer tabs (base / overlays) in the ember scheme */
 .layer-tab { color: var(--ember); }
 .layer-tab.active { color: var(--ember); border-color: var(--ember); }
@@ -1252,8 +1255,8 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 <div class="modal-backdrop" id="clearBackdrop">
   <div class="modal-sheet clear-sheet">
-    <h2>clear everything? <button class="clr-q" id="clearQ" type="button" aria-label="more info" aria-expanded="false">?</button></h2>
-    <p class="clr-note" id="clearNote">this goes back to completely blank slate. press &amp; hold a frame to just delete individual frames. use ‘reset sliders’ and ‘apply to all’ if you want to remove all effects while keeping frames.</p>
+    <h2>clear everything <button class="clr-q" id="clearQ" type="button" aria-label="more info" aria-expanded="false">?</button></h2>
+    <p class="clr-note" id="clearNote"><u>clear all</u> sets page back to blank slate. press &amp; hold a frame to delete just individual frames. use <u>reset sliders</u> and <u>apply to all</u> to only clear effects while keeping frames.</p>
     <div class="modal-actions">
       <button class="clr-cancel" id="clearCancel" type="button">cancel</button>
       <button class="clr-go" id="clearGo" type="button">clear all</button>
@@ -5159,14 +5162,18 @@ let dragState = null;
 cropBox.addEventListener('touchstart', (e) => {
   if (e.target.classList.contains('handle')) return; // handled separately
   if (e.touches.length !== 1) return;
+  cropStripTouch = false; cropShaderTouch = false;
+  { const wr = photoWrap.getBoundingClientRect(), x = e.touches[0].clientX - wr.left;
+    if (x < 30 || x > wr.width - 30) { cropStripTouch = true; return; } }   // the side strips: leave the touch alone so the page scrolls
   e.preventDefault();
   const t = e.touches[0];
-  if (shaderTouchMode && activeShaderLayer()) { shaderTouchLast = null; shaderTouchAt(t.clientX, t.clientY, false); return; }   // a touch shader: this is where you play it
+  if (shaderTouchMode && activeShaderLayer()) { cropShaderTouch = true; shaderTouchLast = null; shaderTouchAt(t.clientX, t.clientY, false); return; }   // a touch shader: this is where you play it
   dragState = { startX: t.clientX, startY: t.clientY, startLeft: box.left, startTop: box.top };
 }, { passive: false });
+let cropStripTouch = false, cropShaderTouch = false;
 cropBox.addEventListener('touchmove', (e) => {
   if (!dragState) {
-    if (shaderTouchMode && activeShaderLayer() && e.touches.length === 1) { e.preventDefault(); shaderTouchAt(e.touches[0].clientX, e.touches[0].clientY, true); }
+    if (cropShaderTouch && shaderTouchMode && activeShaderLayer() && e.touches.length === 1) { e.preventDefault(); shaderTouchAt(e.touches[0].clientX, e.touches[0].clientY, true); }
     return;
   }
   e.preventDefault();

@@ -61,6 +61,16 @@
   }
   .pill.active { background: var(--ember); border-color: var(--ember); color: #1a1108; font-weight: 600; }
 
+  #clearBackdrop .clear-sheet p { margin: 0 0 14px; font-size: 12px; color: var(--cream-dim); line-height: 1.5; }
+  #clearBackdrop .modal-actions button { font-size: 13px; font-weight: 400; padding: 12px 6px; white-space: nowrap; }
+  #clearBackdrop .clr-go { background: #d93a2f; color: #fff; border: 1px solid #d93a2f !important; }
+  #clearBackdrop .clr-cancel { background: #fff; color: #d93a2f; border: 1px solid #fff !important; }
+  .layer-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .layer-row .layer-tabs { flex: 1 1 auto; }
+  .reset-row { display: flex; align-items: baseline; margin: 8px 0 0; }
+  .link-btn { background: none; border: none; padding: 0; font: inherit; font-size: 10px; opacity: .55; color: var(--neutral-grey); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; white-space: nowrap; -webkit-user-select: none; user-select: none; }
+  .layer-row .link-btn { margin-top: 12px; }
+  .link-btn.applied { opacity: 1; color: var(--ocean); }
   .layer-tabs { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
   .layer-tab {
     padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line);
@@ -236,8 +246,8 @@
   .shader-card canvas { display: block; width: 100%; height: auto; background: #000; }
   .shader-card span { display: block; padding: 6px 9px; font-size: 15px; letter-spacing: 0.12em; }
   .shader-card .st-del { padding: 0; letter-spacing: 0; }
-  .shader-strip .shader-card.remove-card { display: flex; align-items: center; justify-content: center; border-style: dashed; }
-  .shader-strip .shader-card.remove-card span { padding: 8px; font-size: 14px; letter-spacing: 0.12em; }
+  .shader-strip .shader-card.remove-card { display: flex; align-items: center; justify-content: center; }
+  .shader-strip .shader-card.remove-card span { padding: 8px; font: 300 11px/1.4 ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Courier New', monospace; letter-spacing: 0.04em; text-decoration: underline; text-underline-offset: 3px; }
   .shader-name { font-size: 14px; letter-spacing: 0.12em; }
   body.crop-collapsed #cropHint { display: none !important; }
   .empty-state {
@@ -1038,14 +1048,12 @@ html, body { background-color: #fdd48d; background-image: none; }
   <button class="mode-btn" id="modeCycleBtn">cycle</button>
 </div>
 
-<div class="layer-tabs" id="layerTabs"></div>
+<div class="layer-row"><div class="layer-tabs" id="layerTabs"></div><button class="link-btn" id="clearAllBtn" type="button" style="display:none;">clear all</button></div>
 <div class="frame-filmstrip" id="frameFilmstrip" style="display:none;"></div>
 
 <div class="anim-controls" id="animControls" style="display:none; margin-bottom:10px;">
   <div class="anim-btn-row">
-    <button class="pill icon-only" id="duplicateFrameBtn" type="button" aria-label="duplicate frame" title="duplicate frame"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg></button>
-    <button class="pill" id="applyAllBtn">apply to all</button>
-    <button class="pill" id="clearAllBtn" type="button">clear all</button>
+    <button class="pill icon-only" id="duplicateFrameBtn" type="button" aria-label="duplicate frame" title="duplicate frame"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--ember)" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg></button>
   </div>
 </div>
 
@@ -1199,7 +1207,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 <div class="moire-row"><span class="moire-label">contour</span><input type="range" id="contourSlider" min="0" max="100" value="0"></div>
 </div>
 </div>
-<div id="resetSlidersBtn" role="button" tabindex="0" style="margin:8px 0 0; text-align:right; font-size:10px; opacity:.55; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">reset sliders</div>
+<div class="reset-row"><button class="link-btn" id="applyAllBtn" type="button" style="display:none;">apply to all</button><div id="resetSlidersBtn" role="button" tabindex="0" style="margin:0 0 0 auto; text-align:right; font-size:10px; opacity:.55; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">reset sliders</div></div>
 <p id="activeFontLabel" style="display:none;font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
 
 <p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading · tap preview to cycle filter</p>
@@ -1231,6 +1239,17 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 
 
+
+<div class="modal-backdrop" id="clearBackdrop">
+  <div class="modal-sheet clear-sheet">
+    <h2>clear everything?</h2>
+    <p>this removes every frame, shader and video.</p>
+    <div class="modal-actions">
+      <button class="clr-cancel" id="clearCancel" type="button">cancel</button>
+      <button class="clr-go" id="clearGo" type="button">clear all</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-backdrop" id="modalBackdrop">
   <div class="modal-sheet">
@@ -1828,7 +1847,9 @@ function updateToolbarBlank() {
 function updatePhotoCycleTools() {
   const hasShader = [currentStack(), ...frames].some(st => st && st.some(l => l && l.shader));
   const hasVideo = typeof videoSrcs !== 'undefined' && videoSrcs.some(Boolean);
-  const on = mode === 'cycle' && !hasShader && !hasVideo;
+  const filled = mode === 'cycle' && frames.some(frameIsFilled);
+  const on = filled && !hasShader && !hasVideo;
+  document.getElementById('clearAllBtn').style.display = filled ? '' : 'none';
   if (hasVideo) document.getElementById('shaderBtn').classList.add('rolled-in');   // shaders and video don't mix: no shader button while a video is loaded
   document.getElementById('applyAllBtn').style.display = on ? '' : 'none';
   document.getElementById('duplicateFrameBtn').style.display = on ? '' : 'none';
@@ -1960,28 +1981,25 @@ function clearAllFrames() {
   clearVideo();
   snapshotActiveLayerState();
   heldFrameIdx = null;
-  const keep = frames[activeFrameIdx];
-  if (!frameIsFilled(keep)) {            // nothing to keep: back to a blank cycle
-    frames = [[null, null, null]];
-    activeFrameIdx = 0;
-    activeLayerIdx = 0;
-    cycleMirrorsStill = false;
-    sourceImg.style.display = 'none';
-    emptyState.style.display = 'flex';
-    cropBox.style.display = 'none';
-    cropHint.style.display = 'none';
-    updateLayerTabs();
-  } else {
-    frames = [keep];
-    activeFrameIdx = 0;
-    cycleMirrorsStill = false;
-  }
+  frames = [[null, null, null]];          // wipe everything: back to a blank cycle
+  activeFrameIdx = 0;
+  activeLayerIdx = 0;
+  cycleMirrorsStill = false;
+  sourceImg.style.display = 'none';
+  emptyState.style.display = 'flex';
+  cropBox.style.display = 'none';
+  cropHint.style.display = 'none';
+  updateLayerTabs();
   updateFrameFilmstrip();
   render();
   if (typeof updateSendState === 'function') updateSendState();
   if (typeof updateShaderPanel === 'function') updateShaderPanel();
 }
-document.getElementById('clearAllBtn').onclick = clearAllFrames;
+const clearBackdrop = document.getElementById('clearBackdrop');
+document.getElementById('clearAllBtn').onclick = () => clearBackdrop.classList.add('open');
+document.getElementById('clearCancel').onclick = () => clearBackdrop.classList.remove('open');
+document.getElementById('clearGo').onclick = () => { clearBackdrop.classList.remove('open'); clearAllFrames(); };
+clearBackdrop.addEventListener('click', (e) => { if (e.target === clearBackdrop) clearBackdrop.classList.remove('open'); });
 
 function setMode(next) {
   if (mode === next) return;
@@ -2017,7 +2035,6 @@ function setMode(next) {
   frameFilmstrip.style.display = mode === 'cycle' ? 'flex' : 'none';
   updateAnimControlsVisibility();
   updatePhotoCycleTools();   // duplicate / apply to all only for a cycle built from photos
-  document.getElementById('clearAllBtn').style.display = mode === 'cycle' ? '' : 'none';
   saveImageBtn.textContent = 'save';
 
   activeLayerIdx = 0;

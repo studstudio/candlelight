@@ -1371,7 +1371,7 @@ let pendingNewFrameIdx = null; // flag (null/true), set only by the filmstrip's 
 // single entry point for every file-picker open, so stale intent from a
 // cancelled pick (no 'change' event fires on cancel) can never leak into the next one
 function openFilePicker(targetLayer, opts = {}) {
-  document.getElementById('shaderBtn').classList.remove('rolled-in'); // rolls out while the picker opens
+  if (!videoSrcs.some(Boolean)) document.getElementById('shaderBtn').classList.remove('rolled-in'); // rolls out while the picker opens (not over a video)
   pendingUploadTargetLayer = targetLayer;
   pendingNewFrameIdx = opts.newFrame ? true : null;
   fileInput.multiple = !!opts.multiple;
@@ -1829,6 +1829,7 @@ function updatePhotoCycleTools() {
   const hasShader = [currentStack(), ...frames].some(st => st && st.some(l => l && l.shader));
   const hasVideo = typeof videoSrcs !== 'undefined' && videoSrcs.some(Boolean);
   const on = mode === 'cycle' && !hasShader && !hasVideo;
+  if (hasVideo) document.getElementById('shaderBtn').classList.add('rolled-in');   // shaders and video don't mix: no shader button while a video is loaded
   document.getElementById('applyAllBtn').style.display = on ? '' : 'none';
   document.getElementById('duplicateFrameBtn').style.display = on ? '' : 'none';
 }
@@ -4066,6 +4067,7 @@ function cloneLayer(layer) {
 
 // the shader becomes the new base layer (replacing any current base); overlays are kept
 function addShaderLayer(presetId) {
+  if (videoSrcs.some(Boolean)) { flashStatus('shaders are for photos, not video', 'fail'); return; }
   if (!ensureGL()) { flashStatus("shaders need WebGL, which isn't available here", 'fail'); return; }
   if (mode !== 'cycle') setMode('cycle');   // like a video, a shader is motion: it goes straight to cycle
   if (animPlaying) stopAnimPreview(true);
@@ -4318,18 +4320,22 @@ function updateShaderPanel() {
   updateAnimControlsVisibility();
 }
 let shaderSrcPending = false;
-const shaderCropCache = new WeakMap();
-function shaderCropSrc(layer) { // the crop view shows your photo in colour when the shader has one (the shader's own grey output otherwise)
+let shaderCropScratch = null;
+function shaderCropSrc(layer) { // the crop view shows the live shader (and your touches), in colour: the shader's light and dark carrying the photo's own hue
   const ph = layer.shader && layer.shader.photo;
   if (!ph) return layer.img.toDataURL();
-  let u = shaderCropCache.get(ph); if (!u) { u = ph.toDataURL(); shaderCropCache.set(ph, u); }
-  return u;
+  if (!shaderCropScratch) shaderCropScratch = document.createElement('canvas');
+  const c = shaderCropScratch; c.width = layer.img.width; c.height = layer.img.height;
+  const x = c.getContext('2d');
+  x.globalCompositeOperation = 'source-over'; x.drawImage(layer.img, 0, 0);
+  x.globalCompositeOperation = 'color'; x.drawImage(ph, 0, 0, c.width, c.height);
+  x.globalCompositeOperation = 'source-over';
+  return c.toDataURL();
 }
 function refreshShaderSource(layer) { // keeps the crop view's picture in step with the shader
-  if (layer.shader && layer.shader.photo) { if (activeShaderLayer() === layer) { const u = shaderCropSrc(layer); if (sourceImg.src !== u) sourceImg.src = u; } return; }   // a colour photo doesn't change as the shader plays
   if (shaderSrcPending) return;
   shaderSrcPending = true;
-  requestAnimationFrame(() => { shaderSrcPending = false; if (activeShaderLayer() === layer) sourceImg.src = layer.img.toDataURL(); });
+  requestAnimationFrame(() => { shaderSrcPending = false; if (activeShaderLayer() === layer) sourceImg.src = shaderCropSrc(layer); });
 }
 function applyShaderControls() {
   const layer = activeShaderLayer(); if (!layer) return;

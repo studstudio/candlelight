@@ -368,9 +368,9 @@ export default {
     }
 
     // ---- teg/{lampId}/drawlog: every measured draw, kept for analysis over weeks. [PROTOTYPE-ONLY: WAKE TEST]
-    // Entries {id, at, kind: sync|bare|press|sleep, awakeMs, wifiMs, syncMs, fw, ma, packV, note}.
+    // Entries {id, at, kind: sync|bare|press|sleep, awakeMs, wifiMs, syncMs, fw, ma, wifiLo?, wifiHi?, packV, note}.
     // Wake entries are filed by /sync from the lamp's report; the meter reading (ma), pack volts and a
-    // note are added from wake_test.html. GET reads all; POST {id, ma?, packV?, note?} edits one,
+    // note are added from wake_test.html. GET reads all; POST {id, ma?, wifiLo?+wifiHi?, packV?, note?} edits one,
     // POST {add: {kind: 'sleep', ma, packV?, note?}} adds a reading with no wake, POST {delete: id} removes one ----
     if (parts[0] === 'teg' && parts[1] && parts[2] === 'drawlog' && parts.length === 3) {
       const key = `teg/${parts[1]}/drawlog`;
@@ -394,6 +394,12 @@ export default {
           if (!e) return json({ error: 'no such entry' }, 404);
           if ('ma' in body) { const v = num(body.ma); if (v === undefined) return json({ error: 'bad ma' }, 400); e.ma = v; }
           if ('packV' in body) { const v = num(body.packV); if (v === undefined) return json({ error: 'bad packV' }, 400); e.packV = v; }
+          // syncing wakes: the meter's reading while the radio is on, as a range (wifiLo..wifiHi mA); ma is then the no-WiFi part
+          if ('wifiLo' in body || 'wifiHi' in body) {
+            const lo = num(body.wifiLo), hi = num(body.wifiHi);
+            if (lo === undefined || hi === undefined || (lo === null) !== (hi === null) || (lo !== null && hi < lo)) return json({ error: 'bad WiFi range' }, 400);
+            e.wifiLo = lo; e.wifiHi = hi;
+          }
           if ('note' in body) e.note = String(body.note || '').slice(0, 300);
           e.editedAt = Date.now();
         }

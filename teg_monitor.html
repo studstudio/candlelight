@@ -52,8 +52,10 @@ button, input, select { font: inherit; color: inherit; }
 
 .label { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
 
-.hero { display: grid; grid-template-columns: minmax(170px, 220px) minmax(0, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
-@media (max-width: 640px) { .hero { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.hero { display: grid; grid-template-columns: minmax(170px, 220px) minmax(150px, 200px) minmax(0, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+/* mid widths: the two readouts side by side, the stats on a full row below */
+@media (max-width: 900px) { .hero { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .hero .stats { grid-column: 1 / -1; } }
+@media (max-width: 640px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .readout { background: var(--bg); padding: 10px 14px; display: grid; gap: 2px; align-content: center; min-width: 0; }
 .big { display: flex; align-items: baseline; gap: 6px; }
 .big .v { font-family: "Fraunces", Georgia, serif; font-weight: 300; font-size: 44px; line-height: 1.05; text-shadow: 0 0 22px rgba(255, 205, 130, .22); white-space: nowrap; }
@@ -61,12 +63,6 @@ button, input, select { font: inherit; color: inherit; }
 .big .v .d { display: inline-block; width: .64em; text-align: center; }
 .big .v .p { display: inline-block; width: .26em; text-align: center; }
 .big .u { color: var(--muted); font-size: 13px; }
-/* TEG takes 3/4 of the width, the pack voltage 1/4 */
-.split { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); gap: 14px; }
-@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
-.teg { display: grid; gap: 14px; align-content: start; min-width: 0; }
-.batt { border: 1px solid var(--line); align-self: start; min-width: 0; }
-.pack { padding: 10px 14px; display: grid; gap: 2px; }
 .sub { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sub.oc { color: #ff9d6e; white-space: normal; }
 
@@ -121,14 +117,17 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
 
   <div class="banner" id="banner" hidden></div>
 
-  <div class="split">
-  <div class="teg">
   <section class="hero">
     <div class="readout">
       <div class="label">loaded · A0</div>
       <div class="big"><span class="v" id="vNow">0.000</span><span class="u">V</span></div>
       <div class="sub" id="vSub">waiting for data</div>
       <div class="sub oc" id="vocSub">open circuit: no spikes yet</div>
+    </div>
+    <div class="readout" aria-label="Battery pack">
+      <div class="label">pack · A1</div>
+      <div class="big"><span class="v" id="bNow">—</span><span class="u">V</span></div>
+      <div class="sub" id="bSub">no reading</div>
     </div>
     <div class="stats">
       <div class="s"><div class="label">charge in</div><div class="val" id="gMa">0.0 mA</div><div class="hint" id="gMaHint">mppt, after booster</div></div>
@@ -147,16 +146,6 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     </div>
     <canvas id="chart" aria-label="Live TEG voltage trace"></canvas>
   </section>
-  </div>
-
-  <section class="batt" aria-label="Battery pack">
-    <div class="pack">
-      <div class="label">pack · A1</div>
-      <div class="big"><span class="v" id="bNow">—</span><span class="u">V</span></div>
-      <div class="sub" id="bSub">no reading</div>
-    </div>
-  </section>
-  </div>
 
   <section class="bottom">
     <div class="box">
@@ -329,8 +318,8 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
     else if (b.dataset.alert !== "1") b.hidden = true;
   }
 
-  // 4x NiMH: about 1.0 V a cell empty, 1.2 V nominal, 1.3-1.45 V full or charging
-  const CELLS = 4;
+  // 3x NiMH: about 1.0 V a cell empty, 1.2 V nominal, 1.3-1.45 V full or charging
+  const CELLS = 3;
   function renderBattery() {
     const live = batLive && Date.now() - batLive.at < 10000;
     const cell = live ? batLive.mv / 1000 / CELLS : 0;
@@ -731,7 +720,7 @@ input:disabled { color: var(--muted); border-bottom-color: var(--line); }
       if (s > 1500) mv *= Math.exp(-(s - 1500) / 200);
       mv += (Math.random() - .5) * 14 + Math.sin(s / 7) * 6;
       addSample(Math.max(0, mv));
-      setBattery(5050 + Math.max(0, mv) * s / 20000);  // the pack creeps up while the demo candle burns
+      setBattery(3750 + Math.max(0, mv) * s / 20000);  // the pack creeps up while the demo candle burns
       if (s > 1500 && !outNoted) { outNoted = true; addNote("Candle out (demo)"); }
       if (s > 2400) stopDemo();
     }, 250);

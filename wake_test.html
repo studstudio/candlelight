@@ -94,6 +94,7 @@ th.l, td.l { text-align: left; }
 th { font-weight: 400; color: var(--muted); font-size: 10px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
 td input[type=number] { width: 4.8em; text-align: right; }
 td input[type=text] { width: 12em; }
+td input.rng { width: 6.5em; text-align: right; }
 tr.fresh td { background: rgba(98, 214, 202, .1); }
 tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
 .saved { color: var(--teal); font-size: 10px; }
@@ -153,12 +154,12 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
   </div>
 
   <div class="sec-head">
-    <span class="label">log <span class="tip" tabindex="0" aria-label="about the log">i<span class="tx">Every measured wake lands here by itself with its type, firmware and timings, sent at the lamp's next sync (normally the power-up after you rewire). Type the meter's steadiest reading in mA (0.09 on the 10A dial = 90). Pack V and note are optional. Fields save when you leave them. Kept on the worker: <code>/teg/test-lamp-1/drawlog</code>.</span></span></span>
+    <span class="label">log <span class="tip" tabindex="0" aria-label="about the log">i<span class="tx">Every measured wake lands here by itself with its type, firmware and timings, sent at the lamp's next sync (normally the power-up after you rewire). Type the meter's readings in mA, or straight off the 10A dial (0.04 becomes 40). A syncing wake gets two: <b>mA no WiFi</b> is the steady reading before and after the sync, <b>mA WiFi</b> the jump while it syncs, as a range if it moves (120-160). The page multiplies each by how long that part lasted (local s, WiFi s). Other tests take one reading. Pack V and note are optional. Fields save when you leave them. Kept on the worker: <code>/teg/test-lamp-1/drawlog</code>.</span></span></span>
     <span class="add">sleep reading <input type="number" id="slMa" min="0" step="0.001" placeholder="mA" aria-label="sleep mA"><input type="number" id="slV" min="0" step="0.01" placeholder="pack V" aria-label="pack volts"><input type="text" id="slNote" maxlength="300" placeholder="note" aria-label="note"><button class="link" id="slAdd">add</button><span id="slMsg"></span></span>
   </div>
   <div class="tbl"><table>
-    <thead><tr><th class="l">when</th><th class="l">test</th><th class="l">fw</th><th>awake s</th><th>local s</th><th>WiFi s</th><th>steps</th><th>refresh full/part</th><th>meter mA</th><th>pack V</th><th class="l">note</th><th></th></tr></thead>
-    <tbody id="rows"><tr><td colspan="12" class="muted l">loading…</td></tr></tbody>
+    <thead><tr><th class="l">when</th><th class="l">test</th><th class="l">fw</th><th>awake s</th><th>local s</th><th>WiFi s</th><th>steps</th><th>refresh full/part</th><th title="the steady reading with the radio off: boot, screen, before and after the sync">mA no WiFi</th><th title="syncing wakes only: the reading while it syncs, a range like 120-160">mA WiFi</th><th>pack V</th><th class="l">note</th><th></th></tr></thead>
+    <tbody id="rows"><tr><td colspan="13" class="muted l">loading…</td></tr></tbody>
   </table></div>
 
   <div class="sec-head"><span class="label">lamp console · every wake <span class="tip" tabindex="0" aria-label="about the console">i<span class="tx">A line per wake: cause, awake time, WiFi and sync time, new images, presses and image steps, refreshes (full/partial), signal. Lines are kept in the lamp's flash until a sync sends them, so a power cut doesn't lose them; a wake shows up one sync later (button wakes wait for the next 10-minute sync). Dim "→ sync" lines appear live. "~" = approximate time (a wake after a power cut, before the clock was synced). Red = brownout or WiFi failure.</span></span></span></div>
@@ -245,6 +246,17 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
     const total = e.awakeMs / 1000 + BOOT_S, wifi = e.kind === "sync" ? (e.wifiMs + e.syncMs) / 1000 : 0;
     return { total, wifi, local: total - wifi };
   };
+  // a wake never draws under 1 mA, so a reading below 1 came straight off the 10A dial (amps)
+  const toMa = v => v > 0 && v < 1 ? Math.round(v * 10000) / 10 : v;
+  const parseRange = t => {
+    t = t.trim(); if (t === "") return [null, null];
+    const m = t.match(/^(\d*\.?\d+)\s*(?:[-–to]+\s*(\d*\.?\d+))?$/); if (!m) return null;
+    let lo = toMa(+m[1]), hi = m[2] === undefined ? lo : toMa(+m[2]);
+    if (hi < lo) [lo, hi] = [hi, lo];
+    return [lo, hi];
+  };
+  const rangeText = e => e.wifiLo == null ? "" : e.wifiLo === e.wifiHi ? String(e.wifiLo) : `${e.wifiLo}-${e.wifiHi}`;
+  const wifiMid = e => e.wifiLo == null ? null : (e.wifiLo + e.wifiHi) / 2;
   let sig = "";
   function setLog(l) {
     log = (l && l.entries) || [];
@@ -252,7 +264,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
     if (s === sig) return renderStats();  // rebuilding would drop the focus from a field being typed in
     sig = s;
     const tb = $("rows");
-    tb.innerHTML = log.length ? "" : `<tr><td colspan="12" class="muted l">nothing logged yet</td></tr>`;
+    tb.innerHTML = log.length ? "" : `<tr><td colspan="13" class="muted l">nothing logged yet</td></tr>`;
     log.slice().reverse().forEach(e => {
       const tr = document.createElement("tr");
       if (st && e.id === st.entryId && e.ma == null) tr.className = "fresh";
@@ -261,18 +273,25 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
         `<td class="l">${NAMES[e.kind] || e.kind}</td><td class="l muted">${e.fw ? String(e.fw).slice(0, 7) : "—"}</td>` +
         `<td>${t ? t.total.toFixed(2) : "—"}</td><td>${t ? t.local.toFixed(2) : "—"}</td><td>${t && e.kind === "sync" ? t.wifi.toFixed(2) : "—"}</td>` +
         `<td>${e.steps ?? "—"}</td><td>${e.draws == null ? "—" : `${e.fullDraws} / ${e.draws - e.fullDraws}`}</td>` +
-        `<td><input type="number" data-f="ma" min="0" step="any" aria-label="meter mA"></td>` +
+        `<td><input type="number" data-f="ma" min="0" step="any" aria-label="mA no WiFi"></td>` +
+        (e.kind === "sync" ? `<td><input type="text" class="rng" data-f="wifi" placeholder="120-160" aria-label="mA WiFi, a range"></td>` : `<td class="muted">—</td>`) +
         `<td><input type="number" data-f="packV" min="0" step="0.01" aria-label="pack volts"></td>` +
         `<td class="l"><input type="text" data-f="note" maxlength="300" aria-label="note"> <span class="saved"></span></td>` +
         `<td><button class="link" title="delete this entry" aria-label="delete">×</button></td>`;
       const ok = tr.querySelector(".saved");
       tr.querySelectorAll("input").forEach(inp => {
         const f = inp.dataset.f;
-        inp.value = e[f] ?? "";
+        inp.value = f === "wifi" ? rangeText(e) : (e[f] ?? "");
         inp.onchange = async () => {
-          ok.textContent = "…";
-          try { const l = await json(BASE + "/drawlog", { id: e.id, [f]: f === "note" ? inp.value : (inp.value === "" ? null : +inp.value) });
-                log = l.entries; e[f] = f === "note" ? inp.value : (inp.value === "" ? null : +inp.value);
+          ok.textContent = "…"; ok.className = "saved";
+          let body;
+          if (f === "note") body = { note: inp.value };
+          else if (f === "wifi") { const r = parseRange(inp.value); if (!r) { ok.textContent = "type a number or a range like 120-160"; ok.className = "saved err"; return; }
+                                   body = { wifiLo: r[0], wifiHi: r[1] }; }
+          else body = { [f]: inp.value === "" ? null : (f === "ma" ? toMa(+inp.value) : +inp.value) };
+          try { const l = await json(BASE + "/drawlog", { id: e.id, ...body });
+                log = l.entries; Object.assign(e, body);
+                inp.value = f === "wifi" ? rangeText(e) : (e[f] ?? "");
                 ok.textContent = "saved"; if (f === "ma") tr.className = ""; renderStats(); }
           catch (err) { ok.textContent = String(err.message || err); ok.className = "saved err"; }
         };
@@ -340,20 +359,24 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
   const median = a => { if (!a.length) return null; const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
   const read = k => log.filter(e => e.kind === k && e.ma > 0);
   function renderStats() {
-    const bare = read("bare"), sync = read("sync"), press = read("press"), sleep = read("sleep");
-    const localMa = median(bare.map(e => e.ma));
-    const syncMah = sync.map(e => { const t = split(e); return localMa === null ? e.ma * t.total / 3600 : (localMa * t.local + e.ma * t.wifi) / 3600; });
+    // a syncing wake counts once both parts are in: no-WiFi mA over local s + WiFi mA (range middle) over WiFi s
+    const bare = read("bare"), sync = read("sync").filter(e => wifiMid(e) !== null), press = read("press"), sleep = read("sleep");
+    const halfDone = log.filter(e => e.kind === "sync" && (e.ma > 0) !== (wifiMid(e) !== null)).length;
+    const localSrc = bare.concat(sync);
+    const localMa = median(localSrc.map(e => e.ma));
+    const wifiMa = median(sync.map(wifiMid));
+    const syncMah = sync.map(e => { const t = split(e); return (e.ma * t.local + wifiMid(e) * t.wifi) / 3600; });
     const pressMah = press.map(e => e.ma * split(e).total / 3600);
     const tile = (label, v, hint) => `<div class="stat"><div class="label">${label}</div><div class="v">${v}</div><div class="h">${hint}</div></div>`;
     const n = a => `${a.length} reading${a.length === 1 ? "" : "s"}`;
     const ms = a => { const m = median(a.map(e => split(e).total)); return m === null ? "" : `, awake ${m.toFixed(2)} s`; };
     $("stats").innerHTML =
-      tile("local current (bare)", localMa === null ? "—" : `${localMa} mA`, n(bare) + ms(bare)) +
-      tile("syncing wake", syncMah.length ? `${median(syncMah).toFixed(4)} mAh` : "—", n(sync) + ms(sync) + (sync.length && localMa === null ? " · no bare yet (high)" : "")) +
+      tile("local current (no WiFi)", localMa === null ? "—" : `${localMa} mA`, n(localSrc) + (bare.length ? ms(bare) : "")) +
+      tile("syncing wake", syncMah.length ? `${median(syncMah).toFixed(4)} mAh` : "—", n(sync) + ms(sync) + (wifiMa !== null ? ` · WiFi ${wifiMa} mA` : "") + (halfDone ? ` · ${halfDone} row${halfDone === 1 ? "" : "s"} missing a number` : "")) +
       tile("button press", pressMah.length ? `${median(pressMah).toFixed(4)} mAh` : "—", n(press) + ms(press)) +
       tile("sleep", sleep.length ? `${median(sleep.map(e => e.ma))} mA` : "—", n(sleep));
     const iv = Math.max(60, +$("interval").value || 600), wakes = 86400 / iv, presses = Math.max(0, +$("presses").value || 0);
-    if (!syncMah.length) { $("budget").textContent = "—"; $("budgetHint").textContent = "needs a syncing wake with a meter reading"; return; }
+    if (!syncMah.length) { $("budget").textContent = "—"; $("budgetHint").textContent = "needs a syncing wake with both readings (no WiFi + WiFi)"; return; }
     const parts = [[`${wakes.toFixed(0)} syncing wakes`, median(syncMah) * wakes]];
     if (pressMah.length) parts.push([`${presses} presses`, median(pressMah) * presses]);
     if (sleep.length) parts.push(["sleep", median(sleep.map(e => e.ma)) * 24]);

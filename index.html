@@ -445,8 +445,8 @@
 
   .send-zone { display: flex; flex-direction: column; align-items: center; margin-top: 10px; }
   /* the send button rides above whichever of private / gallery is selected, and rolls across when you switch */
-  .send-rail { position: relative; z-index: 6; height: 96px; margin: 32px auto 0; max-width: 300px; }
-  .send-rail .send-btn { position: absolute; top: 0; left: calc(25% - 2.5px); margin-left: -48px; transition: left .5s cubic-bezier(.3,.9,.3,1), transform .15s ease, opacity .2s; }
+  .send-rail { position: relative; z-index: 6; height: 96px; margin: 14px auto 0; max-width: 300px; }
+  .send-rail .send-btn { position: absolute; top: 0; left: calc(25% - 2.5px); left: round(calc(25% - 2.5px), 1px); margin-left: -48px; transition: left .5s cubic-bezier(.3,.9,.3,1), transform .15s ease, opacity .2s; }
   .send-btn {
     width: 96px; height: 96px; border-radius: 50%; border: none;
     background: radial-gradient(circle at 35% 30%, var(--ember-glow), var(--ember) 55%, var(--ember-dim) 100%);
@@ -486,8 +486,11 @@
   .send-btn.launched .send-dot { opacity: 0 !important; transition: none !important; }
   .send-btn.loading .send-dot { opacity: 1; transition: opacity .14s ease-out }
   .send-btn.loading .send-dot circle { transform: scale(1); transition: transform .3s cubic-bezier(.3,1.5,.5,1); }
-  .send-btn.fade .send-dot { opacity: 0; transition: opacity var(--fade-a, .38s) cubic-bezier(.16,1,.3,1); }
+  .send-btn.fade .send-dot { opacity: 0; transition: opacity var(--fade-a, .6s) ease; } /* same ease + length as the badge's fade-out */
+  .send-btn:not(.loading) .send-arrow-fill { transition: opacity .8s ease; }
   .send-btn.fade .send-arrow-fill { opacity: 0; transition: opacity var(--fade-a, .38s) cubic-bezier(.16,1,.3,1); }
+  .send-btn.cooling .send-arrow-fill, .send-btn.cooling.fade .send-arrow-fill { opacity: 1; } /* right after a send the arrow just stays green... */
+  .send-btn.cooling.cooling-run:not(.loading) .send-arrow-fill { opacity: 0; transition: opacity var(--cool-fade, 3s) ease-in-out; } /* ...then slowly fades out; that fade is the cooldown */
   @media (prefers-reduced-motion: reduce) { .send-btn .send-arrow-fill, .send-btn .send-dot { transition: none !important; } }
   /* the send status sits beside the circle, on whichever side has room */
   /* the send message lives in its own line under private / gallery */
@@ -498,8 +501,8 @@
   .send-line .send-status { position: absolute; left: 0; top: 0; margin: 0; width: max-content; max-width: 100%; height: auto; min-height: 0; display: block; white-space: nowrap; text-align: center; font-size: 12px; line-height: 1.35; }
   .send-btn { color: #1a1108; font-family: inherit; font-size: 17px; font-weight: 700; letter-spacing: 0.04em; text-transform: lowercase; }
   .send-status { margin-top: 14px; font-size: 12px; color: var(--cream-dim); text-align: center; min-height: 16px; }
-  .send-hint { opacity: 0; transition: opacity .2s ease, left .3s cubic-bezier(.3,.9,.3,1); pointer-events: none; }
-  .send-rail.gallery .send-btn { left: calc(50% + 61px); }
+  .send-hint { opacity: 0; transition: opacity var(--hint-fade, .2s) ease, left .3s cubic-bezier(.3,.9,.3,1); pointer-events: none; color: var(--ember) !important; }
+  .send-rail.gallery .send-btn { left: calc(50% + 61px); left: round(calc(50% + 61px), 1px); }
   .send-rail.gallery .send-status { left: calc(50% - 81px); justify-content: flex-end; text-align: right; }
   .send-rail .send-status.success, .send-rail .send-status.fail { transition: none; }
   /* the receipt takes sending…'s spot and lines up on its right-hand end (8ch = the width of "sending…" in this monospace font) */
@@ -916,7 +919,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 /* round 43: font dial smaller and tucked up against the arrows */
 .font-dial-btn { width: 30px; height: 40px; margin-left: -14px; }
-.font-dial-btn svg { width: 17px; height: 17px; }
+.font-dial-btn svg { width: 20px; height: 20px; }
 
 /* round 44: both icons nudged toward the text box */
 .postcard-pos-btn { margin-left: -8px; }
@@ -961,6 +964,11 @@ html, body { background-color: #fdd48d; background-image: none; }
 
 /* round 57: selected contact in the olive sage; "send" as a small mono label above the circle */
 .contact-chip.selected .contact-avatar { border-color: #a8b86e; color: #a8b86e; }
+.contact-chip.selected .contact-avatar { border-color: #bccb8a !important; }
+.contact-chip.selected .contact-name { color: #a8b86e !important; }
+.contact-chip.selected .contact-id { color: #bccb8a !important; }
+.contact-name { font-size: 12.5px !important; }
+.contact-id { margin-top: -4px; }
 .send-btn::before { content: 'send'; position: absolute; left: 50%; top: -20px; transform: translateX(-50%);
   font: 400 11px/1 'SF Mono', ui-monospace, 'Menlo', 'Courier New', monospace; letter-spacing: 0.08em; text-transform: lowercase; color: rgb(134, 83, 58); pointer-events: none; }
 
@@ -1134,14 +1142,7 @@ html, body { background-color: #fdd48d; background-image: none; }
       </svg>
     </button>
     <button class="font-dial-btn" id="fontDialBtn" title="tap to cycle font">
-      <svg viewBox="0 0 24 24" width="22" height="22">
-        <circle id="fontDot0" cx="12"   cy="4"  r="2"   fill="var(--ember)" opacity="1"></circle>
-        <circle id="fontDot1" cx="18.93" cy="8" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-        <circle id="fontDot2" cx="18.93" cy="16" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-        <circle id="fontDot3" cx="12"   cy="20" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-        <circle id="fontDot4" cx="5.07" cy="16" r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-        <circle id="fontDot5" cx="5.07" cy="8"  r="1.6" fill="var(--cream-dim)" opacity="0.4"></circle>
-      </svg>
+      <svg id="fontDialSvg" viewBox="0 0 24 24" width="22" height="22"></svg>
     </button>
   </div>
 </div>
@@ -1225,9 +1226,7 @@ html, body { background-color: #fdd48d; background-image: none; }
 </div>
 </div>
 <div class="reset-row"><button class="link-btn" id="applyAllBtn" type="button" style="display:none;">apply to all</button><div id="resetSlidersBtn" role="button" tabindex="0" style="margin:0 0 0 auto; text-align:right; font-size:10px; opacity:.55; color:var(--neutral-grey); text-decoration:underline; text-underline-offset:3px; cursor:pointer; user-select:none; -webkit-user-select:none;">reset sliders</div></div>
-<p id="activeFontLabel" style="display:none;font-size:11px; color:var(--cream-dim); text-align:left; margin:4px 2px 0;">font: Pixelcastle</p>
-
-<p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading · tap preview to cycle filter</p>
+<p class="crop-hint" id="cropHint" style="display:none;">drag box to move · drag corners to reshape · drag preview up/down for shading · tap preview to cycle filter · <span id="activeFontLabel" style="color:var(--ember);white-space:nowrap;">font: Pixelcastle</span></p>
 
 <hr class="divider">
 
@@ -1331,7 +1330,7 @@ function updatePostcardPosIcon() {
   });
 }
 const fontDialBtn = document.getElementById('fontDialBtn');
-const FONT_DOTS = [0,1,2,3,4,5].map(i => document.getElementById(`fontDot${i}`));
+let FONT_DOTS = [];
 const activeFontLabel = document.getElementById('activeFontLabel');
 const sendBtn = document.getElementById('sendBtn');
 const sendStatus = document.getElementById('sendStatus');
@@ -2303,6 +2302,8 @@ function updateSendHint(idx) {
   const i = idx === undefined ? selectedContact : idx, list = loadContacts();
   const name = i !== null && i >= 0 && list[i] ? list[i].name : '';
   if (name) sendHint.textContent = 'to ' + name + (sendRail.classList.contains('gallery') ? ' (+ gallery)' : ' (private)');
+  sendHint.style.color = '';
+  sendHint.style.setProperty('--hint-fade', window.__hintSlow ? (window.hintFadeInS || 2.5) + 's' : '.4s');
   const showing = !!name && !sendBtn.classList.contains('loading') && !sendStatus.textContent && !window.__hintHold;
   // centre the line under whichever of private / gallery is active, kept inside the page edges
   const line = sendHint.parentNode, lr = line.getBoundingClientRect(), on = sendRail.classList.contains('gallery') ? privacyGalleryBtn : privacyPrivateBtn, br = on.getBoundingClientRect();
@@ -2311,6 +2312,19 @@ function updateSendHint(idx) {
   sendHint.style.opacity = showing ? '1' : '0';
 }
 window.addEventListener('resize', () => updateSendHint());
+// keep the circle (and the arrow drawn inside it) on whole device pixels so the arrow never looks nudged off-centre
+function snapSendBtn() {
+  if (sendBtn.classList.contains('loading') || performance.now() - (window.__railChangedAt || 0) < 700) return; // never nudge it mid-send or while it slides between private / gallery
+  sendBtn.style.translate = '0px 0px';
+  const r = sendBtn.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const fx = Math.round(r.left * dpr) / dpr - r.left, fy = Math.round(r.top * dpr) / dpr - r.top;
+  sendBtn.style.translate = (Math.abs(fx) < 0.01 && Math.abs(fy) < 0.01) ? '' : fx.toFixed(3) + 'px ' + fy.toFixed(3) + 'px';
+}
+window.addEventListener('resize', snapSendBtn);
+window.addEventListener('load', () => { snapSendBtn(); setTimeout(snapSendBtn, 400); });
+sendBtn.addEventListener('transitionend', e => { if (e.propertyName === 'left') snapSendBtn(); });
+new MutationObserver(() => { window.__railChangedAt = performance.now(); setTimeout(snapSendBtn, 760); }).observe(sendRail, { attributes: true, attributeFilter: ['class'] });
+setInterval(snapSendBtn, 1500); // layout above can shift by sub-pixels (scrollbars, toolbars); cheap to re-check
 function saveContacts(list) { localStorage.setItem('lampContacts', JSON.stringify(list)); }
 
 function renderContacts() {
@@ -2480,6 +2494,28 @@ function updateSendState() {
   const q = selectedContactQueue, n = q.n == null ? q.max : Math.min(q.n, q.max);
   document.getElementById('sendQ').textContent = ''; // the circle just says "mailbox full" (drawn by CSS); the count lives in the aria label and the prompt
   sendBtn.setAttribute('aria-label', full ? `mailbox full, ${n} of ${q.max}. tap to save for later` : 'send');
+  refreshCooling();
+}
+
+// ---- per-contact cooldown: after a send, that contact can't be sent to again for a while (stops accidental duplicates) ----
+// the hint line reads "sent to Name" in green and the arrow stays filled green; other contacts are unaffected
+window.sentCooldownS = window.sentCooldownS == null ? 3 : window.sentCooldownS; // counted from when the send animation finishes
+window.__cool = window.__cool || {};
+let coolTimer = 0;
+function contactCooling(i) {
+  const list = loadContacts(), c = i !== null && i !== undefined && list[i] ? list[i] : null;
+  return !!(c && window.__cool[c.id] && window.__cool[c.id] > Date.now());
+}
+function startCooldown(id) { window.__cool[id] = Infinity; refreshCooling(); } // locked right away; the countdown starts when the send animation ends
+function armCooldowns() { const now = Date.now(); Object.keys(window.__cool).forEach(k => { if (window.__cool[k] === Infinity) window.__cool[k] = now + window.sentCooldownS * 1000; }); sendBtn.style.setProperty('--cool-fade', window.sentCooldownS + 's'); window.__hintHold = true; window.__hintSlow = true; setTimeout(() => { window.__hintHold = false; updateSendHint(); setTimeout(() => { window.__hintSlow = false; }, (window.hintFadeInS || 2.5) * 1000 + 100); }, (window.hintReturnS == null ? .6 : window.hintReturnS) * 1000); requestAnimationFrame(() => { sendBtn.classList.add('cooling-run'); }); refreshCooling(); }
+function refreshCooling() {
+  const on = contactCooling(selectedContact);
+  sendBtn.classList.toggle('cooling', on);
+  if (!on) sendBtn.classList.remove('cooling-run');
+  updateSendHint();
+  clearTimeout(coolTimer);
+  const list = loadContacts(), c = selectedContact !== null && list[selectedContact] ? list[selectedContact] : null;
+  if (on && c && isFinite(window.__cool[c.id])) coolTimer = setTimeout(refreshCooling, Math.max(50, window.__cool[c.id] - Date.now() + 30));
 }
 
 // ---------- private/gallery toggle ----------
@@ -2510,16 +2546,17 @@ function miniScreenPos(lat, lon) { // where a map spot is on screen right now (t
   return [rect.left + Rc + dx * Math.cos(a) - dy * Math.sin(a), rect.top + Rc + dx * Math.sin(a) + dy * Math.cos(a)];
 }
 // The send dot leaves the send circle's lip, arcs across and lands on its spot on the map (gallery) or in the contact circle (private).
-// Gallery sends alternate between two flights; private sends use the plain defaults.
+// Gallery sends always arc, and the arc grows with each send: first low, second mid, third high, then back to low.
 const ARC_PRESETS = [
-  { name: 'High lob',  flight: 2.05, arc: 1.2,  easeOut: .13, lAngle: 76 },
-  { name: 'Low swoop', flight: 2.05, arc: -.58, easeOut: 0,   lAngle: 45 }
+  { name: 'Low arc',  flight: 1.7,  arc: .4,  easeOut: .13, lAngle: 76 },
+  { name: 'Mid arc',  flight: 1.9,  arc: .8,  easeOut: .13, lAngle: 76 },
+  { name: 'High lob', flight: 2.05, arc: 1.2, easeOut: .13, lAngle: 76 }
 ];
 window.arcCfg = { apex: .5, easeIn: 0, easeOut: 0, startScale: 1, rEnd: 1.5, shrinkK: 1, lAngle: 270, lDist: 48, lead: true };
-window.privCfg = { flight: .9, arc: .45, apex: .5, easeIn: 0, easeOut: 0, startScale: 1, rEnd: 1.5, angle: 69.2, dist: 48, fillHold: 1.5 };
+window.privCfg = { throw: true, flight: .9, arc: .45, apex: .5, easeIn: 0, easeOut: 0, startScale: 1, rEnd: 1.5, angle: 60, dist: 48, badgeDelay: 0, fillIn: 1.2 }; // private sends: the dot rests at the text; badgeDelay = how long after it stops the contact badge starts turning
 let arcIdx = 0;
 function arcNextPreset() { // called at the start of each gallery send: the dot's resting spot and flight for this send
-  const p = ARC_PRESETS[arcIdx++ % ARC_PRESETS.length];
+  const p = ARC_PRESETS[arcIdx++ % ARC_PRESETS.length]; // low, mid, high, then back to low
   arcCfg.easeOut = p.easeOut; arcCfg.lAngle = p.lAngle; miniMapCfg.flight = p.flight; miniMapCfg.arc = p.arc;
 }
 function arcSpot(place, aDeg) { // where a map spot is on screen when the map is turned to aDeg
@@ -2527,6 +2564,14 @@ function arcSpot(place, aDeg) { // where a map spot is on screen when the map is
   const q = miniProj(place.lon, place.lat), dx = q[0] * R, dy = -q[1] * R, a = aDeg * Math.PI / 180;
   return [rect.left + Rc + dx * Math.cos(a) - dy * Math.sin(a), rect.top + Rc + dx * Math.sin(a) + dy * Math.cos(a)];
 }
+// the contact badge turns sage with a lime letter, holds, then eases back
+window.contactBadgeFill = (av) => {
+  if (window.__onBadgeLand) { const f = window.__onBadgeLand; window.__onBadgeLand = null; f(); }
+  av = av || document.querySelector('.contact-chip.selected .contact-avatar'); if (!av) return;
+  const tr = 'transform .45s cubic-bezier(.2,.8,.3,1)';
+  const fi = (privCfg.fillIn || .9) + 's cubic-bezier(.4,0,.2,1)'; av.style.transition = 'background-color ' + fi + ', color ' + fi + ', ' + tr; av.style.backgroundColor = '#a8b86e'; av.style.color = 'var(--lime,#b5fb00)';
+  setTimeout(() => { av.style.transition = 'background-color .6s ease, color .6s ease, ' + tr; av.style.backgroundColor = ''; av.style.color = ''; setTimeout(() => { av.style.transition = ''; }, 900); }, ((window.sendDotCfg && window.sendDotCfg.restArrow) || 2.4) * 1000);
+};
 window.miniMapLaunch = (fromRect) => {
   const priv = !sendBtn.closest('.send-rail').classList.contains('gallery');
   const av = priv ? document.querySelector('.contact-chip.selected .contact-avatar') : null;
@@ -2552,12 +2597,7 @@ window.miniMapLaunch = (fromRect) => {
     el.style.transform = `translate(${x - r0}px, ${y - r0}px) scale(${r / r0})`;
     if (priv && !filled) { // the moment the dot breaks the contact circle's edge it vanishes and the circle fills sage with a lime letter
       const ap = avPos(), rr = av.getBoundingClientRect().width / 2;
-      if (Math.hypot(x - ap[0], y - ap[1]) <= rr) {
-        filled = true; const tr = 'transform .45s cubic-bezier(.2,.8,.3,1)';
-        av.style.transition = 'background-color .45s ease, color .45s ease, ' + tr; av.style.backgroundColor = '#a8b86e'; av.style.color = 'var(--lime,#b5fb00)';
-        setTimeout(() => { av.style.transition = 'background-color .8s ease, color .8s ease, ' + tr; av.style.backgroundColor = ''; av.style.color = ''; setTimeout(() => { av.style.transition = ''; }, 900); }, privCfg.fillHold * 1000);
-        land(); return;
-      }
+      if (Math.hypot(x - ap[0], y - ap[1]) <= rr) { filled = true; contactBadgeFill(av); land(); return; }
     }
     if (u < 1) requestAnimationFrame(step);
     else { land(); if (!priv) { miniMine.push({ ...place, born: 0 }); if (miniPending === place) miniPending = null; } }
@@ -5881,9 +5921,11 @@ let postcardText = '';
 let postcardPosition = 'bottom'; // 'top' | 'bottom'
 updatePostcardPosIcon();
 
-// order matches the 7 dots around the dial (dot0 at top, clockwise)
-const FONT_LIST = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonlight', 'VG5000', 'ChaumontScript', 'Helgoland', 'MagielBlack', 'Altgotisch'];
-let selectedFontIndex = 0; // Pixelcastle, the default
+// the dial has one slot per font the page has loaded (every @font-face), first one at the top, clockwise
+const FALLBACK_FONTS = ['Pixelcastle', 'Trathnona', 'BasteleurBold', 'BasteleurMoonlight', 'VG5000', 'ChaumontScript', 'Helgoland', 'MagielBlack', 'Altgotisch'];
+const fontFamilies = faces => [...new Set([...faces].map(f => f.family.replace(/^['"]|['"]$/g, '')))];
+let FONT_LIST = fontFamilies(document.fonts).length ? fontFamilies(document.fonts) : FALLBACK_FONTS;
+let selectedFontIndex = 0; // the first font, the default
 let gridAmount = 0;    // 0..1 — 2D periodic grid, interferes with dither patterns
 let hatchAmount = 0;   // 0..1 — diagonal single-axis wave, crosshatch/engraving feel
 let scanAmount = 0;    // 0..1 — horizontal-only wave, CRT/VHS scanline feel
@@ -5895,17 +5937,22 @@ let halationAmount = 0, echoAmount = 0, engraveAmount = 0, tiltshiftAmount = 0, 
 let dotStippleAmount = 0;    // 0..1 — dot-screen halftone: cells become circular dots sized by darkness
 let opacityAmount = 1; // 0..1 — overlay blend strength; base ignores this (nothing beneath it to blend with)
 
+function buildFontDial() {
+  const svg = document.getElementById('fontDialSvg'), n = FONT_LIST.length, NS = 'http://www.w3.org/2000/svg';
+  svg.innerHTML = ''; FONT_DOTS = [];
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + 2 * Math.PI * i / n, c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', (12 + 8.2 * Math.cos(a)).toFixed(2)); c.setAttribute('cy', (12 + 8.2 * Math.sin(a)).toFixed(2));
+    svg.appendChild(c); FONT_DOTS.push(c);
+  }
+  updateFontDots();
+}
 function updateFontDots() {
   FONT_DOTS.forEach((el, i) => {
-    if (i === selectedFontIndex) {
-      el.setAttribute('fill', 'var(--ember)');
-      el.setAttribute('opacity', '1');
-      el.setAttribute('r', '2');
-    } else {
-      el.setAttribute('fill', 'var(--cream-dim)');
-      el.setAttribute('opacity', '0.4');
-      el.setAttribute('r', '1.6');
-    }
+    const on = i === selectedFontIndex;
+    el.setAttribute('fill', on ? 'var(--ember)' : 'var(--cream-dim)');
+    el.setAttribute('opacity', on ? '1' : '0.4');
+    el.setAttribute('r', on ? '2.3' : '1.5');
   });
   activeFontLabel.textContent = `font: ${FONT_LIST[selectedFontIndex]}`;
 }
@@ -5916,7 +5963,16 @@ fontDialBtn.onclick = () => {
   updateFontDots();
   if (naturalW) render();
 };
-updateFontDots(); // sync visuals to the default selection on load
+buildFontDial(); // sync visuals to the default selection on load
+// once the fonts have actually loaded, drop any that failed so every slot is a font you can really use
+Promise.allSettled([...document.fonts].map(f => f.load())).then(() => {
+  const ok = fontFamilies([...document.fonts].filter(f => f.status === 'loaded'));
+  if (ok.length && ok.join() !== FONT_LIST.join()) {
+    const cur = FONT_LIST[selectedFontIndex];
+    FONT_LIST = ok; selectedFontIndex = Math.max(0, ok.indexOf(cur));
+    buildFontDial(); if (naturalW) render();
+  }
+});
 
 
 // 4 pip bars. The first is always solid (the baseline); the remaining 3 fill
@@ -6360,9 +6416,9 @@ const GALLERY_UPLOAD_TAG = 'test-gallery';
   // the dot orbits the circle at a steady speed while sending. When "sent" shows, the next time the dot reaches the side facing the text,
   // the text, dot and arrow fade out together. No easing, no speed changes.
   const dotEl = sendBtn.querySelector('.send-dot'), dotC = dotEl.querySelector('circle');
-  const dotCfg = window.sendDotCfg = window.sendDotCfg || { period: 1.8, variation: 0.22, radius: 25, spawn: 0.97, fadeArrow: 1.2, fadeText: 1.2, restArrow: 1.05, hintDelay: 0, restText: 1.05 };
+  const dotCfg = window.sendDotCfg = window.sendDotCfg || { period: 1.8, variation: 0.22, radius: 25, spawn: 0.97, fadeArrow: .6, fadeText: .6, restArrow: 1.8, hintDelay: 0, extraLoops: 1, launchBoost: 1.7, restText: 1.8 };
   document.documentElement.style.setProperty('--fade-a', dotCfg.fadeArrow + 's');
-  let dir = -1, dotRaf = 0, dotTheta = 0, dotLast = 0, armed = false, timers = [];
+  let dir = -1, dotRaf = 0, dotTheta = 0, dotLast = 0, armed = false, timers = [], lapsLeft = -1;
   const rest = () => (sendBtn.closest('.send-rail').classList.contains('gallery') ? arcCfg.lAngle : privCfg.angle);
   const K = 46 / 24; // px per svg unit
   let spawn = null; // { x, y, t0 } tap point in svg units; the dot grows out of it onto the rim
@@ -6380,30 +6436,54 @@ const GALLERY_UPLOAD_TAG = 'test-gallery';
   const reset = () => {
     timers.forEach(clearTimeout); timers = [];
     miniTextFading = false;
-    { const hd = (window.sendDotCfg && window.sendDotCfg.hintDelay) || 0; if (hd > 0) { window.__hintHold = true; setTimeout(() => { window.__hintHold = false; updateSendHint(); }, hd * 1000); } }
+    { const hd = (window.sendDotCfg && window.sendDotCfg.hintDelay) || 0; if (hd > 0) { window.__hintHold = true; sendHint.style.setProperty('--hint-fade', '0s'); setTimeout(() => { window.__hintHold = false; sendHint.style.setProperty('--hint-fade', '1.2s'); updateSendHint(); setTimeout(() => sendHint.style.removeProperty('--hint-fade'), 1300); }, hd * 1000); } }
     cancelAnimationFrame(dotRaf); dotRaf = 0; armed = false; dotTheta = 0; spawn = null; dotDraw();
-    sendBtn.classList.remove('loading', 'fade', 'launched'); busy = false; updateSendHint(); updateMiniMap();
+    if (dotC.getAnimations) dotC.getAnimations().forEach(a => a.cancel());
+    sendBtn.classList.remove('loading', 'fade', 'launched'); busy = false; armCooldowns(); updateSendHint(); updateMiniMap();
     sendStatus.style.transition = ''; sendStatus.style.opacity = '';
   };
   const finish = () => {
     armed = false; cancelAnimationFrame(dotRaf); dotRaf = 0; // dot rests at the text
-    { // gallery: the dot launches from the circle's lip and arcs onto the map instead of resting
-      const launchNow = () => { const rc = dotC.getBoundingClientRect(); if (window.miniMapLaunch && miniMapLaunch(rc) && sendBtn.classList.contains('loading')) sendBtn.classList.add('launched'); };
-      const dd = (miniMapCfg.dotDelay || 0) * 1000; if (dd > 0) setTimeout(launchNow, dd); else launchNow();
-    }
     const c = dotCfg;
-    later(() => sendBtn.classList.add('fade'), c.restArrow * 1000);
-    const pendNow = miniPending; setTimeout(() => miniMapCommit(pendNow), (c.restArrow + c.fadeArrow + miniMapCfg.dotDelay + miniMapCfg.flight) * 1000);
-    later(() => { sendStatus.style.transition = 'opacity ' + c.fadeText + 's ease'; sendStatus.style.opacity = '0'; miniTextFading = true; updateMiniMap(); }, c.restText * 1000);
-    later(() => { if (/^sent/.test(sendStatus.textContent)) { sendStatus.textContent = ''; sendStatus.className = 'send-status'; } reset(); },
-      Math.max(c.restArrow + c.fadeArrow, c.restText + c.fadeText) * 1000 + 40);
+    // everything after the dot arrives: the arrow, text and badge fade away together
+    const scheduleFades = () => {
+      later(() => sendBtn.classList.add('fade'), c.restArrow * 1000);
+      const pendNow = miniPending; setTimeout(() => miniMapCommit(pendNow), (c.restArrow + c.fadeArrow + miniMapCfg.dotDelay + miniMapCfg.flight) * 1000);
+      later(() => { sendStatus.style.transition = 'opacity ' + c.fadeText + 's ease'; sendStatus.style.opacity = '0'; miniTextFading = true; updateMiniMap(); }, c.restText * 1000);
+      later(() => { if (/^sent/.test(sendStatus.textContent)) { sendStatus.textContent = ''; sendStatus.className = 'send-status'; } reset(); },
+        Math.max(c.restArrow + c.fadeArrow, c.restText + c.fadeText) * 1000 + 40);
+    };
+    const launchNow = () => { const rc = dotC.getBoundingClientRect(); return !!(window.miniMapLaunch && miniMapLaunch(rc) && (sendBtn.classList.contains('loading') && (sendBtn.classList.add('launched'), true))); };
+    window.__onBadgeLand = null;
+    if (!sendBtn.closest('.send-rail').classList.contains('gallery')) {
+      if (privCfg.throw) { // private, thrown: the dot leaves the circle and flies to the contact badge; the badge fills when it lands, and the fades start from that moment
+        let started = false; const go = () => { if (started) return; started = true; window.__onBadgeLand = null; scheduleFades(); };
+        window.__onBadgeLand = go;
+        if (!launchNow()) { window.__onBadgeLand = null; later(() => contactBadgeFill(), privCfg.badgeDelay * 1000); go(); }
+        else setTimeout(go, (privCfg.flight + .6) * 1000); // safety if the dot never reaches the badge
+      } else { // private, no throw: the dot stops at the text; the badge still turns green on its own
+        later(() => contactBadgeFill(), privCfg.badgeDelay * 1000);
+        scheduleFades();
+      }
+    } else { // gallery: the dot launches from the circle's lip and arcs onto the map instead of resting
+      const dd = (miniMapCfg.dotDelay || 0) * 1000; if (dd > 0) setTimeout(launchNow, dd); else launchNow();
+      scheduleFades();
+    }
   };
   const tick = now => {
     const v = dotCfg.variation, mod = (1 + v * Math.cos((dotTheta - rest()) * Math.PI / 180)) / Math.sqrt(1 - v * v); // one smooth swell per lap: fastest as it passes the text side, slowest on the far side; a lap still takes `period`
-    const dtk = Math.min(0.05, (now - dotLast) / 1000), step = 360 / dotCfg.period * mod * dtk; dotLast = now;
+    const dtk = Math.min(0.05, (now - dotLast) / 1000); dotLast = now;
     const toRest = (((dir * (rest() - dotTheta)) % 360) + 360) % 360; // degrees until the dot reaches the text side
+    // before a throw the dot winds up: over its last lap it speeds up (smoothly) so it leaves the circle already moving fast
+    let boost = 1;
+    if (armed && lapsLeft === 0 && dotCfg.launchBoost > 1 && !sendBtn.closest('.send-rail').classList.contains('gallery') && privCfg.throw) {
+      const pr = Math.max(0, Math.min(1, 1 - toRest / 360)); boost = 1 + (dotCfg.launchBoost - 1) * pr * pr * (3 - 2 * pr);
+    }
+    const step = 360 / dotCfg.period * mod * dtk * boost;
     dotTheta += dir * step; dotDraw(now); // private: counter-clockwise, gallery: clockwise
-    if (armed && toRest <= step) { dotTheta -= dir * (step - toRest); dotDraw(now); miniMapDotStep(dir * toRest / mod, dtk); finish(); return; }
+    if (armed && lapsLeft < 0) lapsLeft = sendBtn.closest('.send-rail').classList.contains('gallery') ? 0 : (dotCfg.extraLoops == null ? 1 : dotCfg.extraLoops); // once "sent" is in, the dot still takes its extra lap(s) first
+    if (armed && toRest <= step && lapsLeft > 0) lapsLeft--;
+    else if (armed && toRest <= step) { dotTheta -= dir * (step - toRest); dotDraw(now); miniMapDotStep(dir * toRest / mod, dtk); finish(); return; }
     miniMapDotStep(dir * step / mod, dtk);
     dotRaf = requestAnimationFrame(tick);
   };
@@ -6413,13 +6493,13 @@ const GALLERY_UPLOAD_TAG = 'test-gallery';
     if (sendBtn.classList.contains('qfull')) { e.stopImmediatePropagation(); openQueueBox(); return; } // queue full: offer to save instead of sending
     busy = true; sendBtn.classList.add('loading'); updateSendHint(); updateMiniMap();
     dir = sendBtn.closest('.send-rail').classList.contains('gallery') ? 1 : -1; // fixed for this send
-    if (dir === 1) arcNextPreset(); // gallery: this send's flight (alternates High lob / Low swoop)
+    if (dir === 1) arcNextPreset(); // gallery: this send's flight (low, mid, high, repeat)
     const bb = sendBtn.getBoundingClientRect();
     let dx = e.clientX - (bb.left + bb.width / 2), dy = e.clientY - (bb.top + bb.height / 2);
     if (!e.detail || (e.clientX === 0 && e.clientY === 0) || Math.hypot(dx, dy) > 60) { dx = 0; dy = 0; } // keyboard / odd click: spawn from the middle
     spawn = { x: 12 + dx / K, y: 13.565 + dy / K, t0: performance.now() };
     dotTheta = Math.hypot(dx, dy) > 4 ? Math.atan2(dx, -dy) * 180 / Math.PI : 0;
-    dotLast = performance.now(); dotRaf = requestAnimationFrame(tick);
+    lapsLeft = -1; dotLast = performance.now(); dotRaf = requestAnimationFrame(tick);
     later(() => { if (busy) reset(); }, 60000); // safety net
   }, true);
   new MutationObserver(() => {
@@ -6431,8 +6511,28 @@ const GALLERY_UPLOAD_TAG = 'test-gallery';
   new MutationObserver(() => { updateSendHint(); updateMiniMap(); }).observe(sendStatus, { childList: true, characterData: true, subtree: true });
 })();
 
+// ---- saved send settings. applySendPreset('no throw send') restores the version where the dot stops at the text and only the badge fills ----
+window.SEND_PRESETS = {
+  'no throw send': {
+    dot: { period: 1.8, variation: .22, radius: 25, spawn: .97, fadeArrow: .6, fadeText: .6, restArrow: 1.8, restText: 1.8, hintDelay: 0, extraLoops: 1, launchBoost: 1 },
+    priv: { throw: false, angle: 60, dist: 48, badgeDelay: 0, fillIn: 1.2 },
+    misc: { sentCooldownS: 3, hintReturnS: .6, hintFadeInS: 2.5 }
+  },
+  'throw send': {
+    dot: { period: 1.8, variation: .22, radius: 25, spawn: .97, fadeArrow: .6, fadeText: .6, restArrow: 1.8, restText: 1.8, hintDelay: 0, extraLoops: 1, launchBoost: 1.7 },
+    priv: { throw: true, flight: .9, angle: 60, dist: 48, badgeDelay: 0, fillIn: 1.2 },
+    misc: { sentCooldownS: 3, hintReturnS: .6, hintFadeInS: 2.5 }
+  }
+};
+window.applySendPreset = (name) => {
+  const s = window.SEND_PRESETS[name]; if (!s) return false;
+  Object.assign(window.sendDotCfg, s.dot); Object.assign(window.privCfg, s.priv); Object.assign(window, s.misc);
+  document.documentElement.style.setProperty('--fade-a', window.sendDotCfg.fadeArrow + 's');
+  return true;
+};
+
 sendBtn.onclick = async () => {
-  if (sendBtn.disabled || sendBtn.classList.contains('qfull')) return;
+  if (sendBtn.disabled || sendBtn.classList.contains('qfull') ) return;
   const contacts = loadContacts();
   const target = contacts[selectedContact];
   sendStatus.className = 'send-status';
@@ -6476,6 +6576,7 @@ sendBtn.onclick = async () => {
     sendStatus.textContent = galleryNote ? `sent${galleryNote}` : 'sent ✓'; // just "sent" (plus the red note only if the gallery copy failed)
     sendStatus.classList.add(galleryNote ? 'fail' : 'success');
     miniMapNoteSend(target.name, shareToGallery && !galleryNote);
+    startCooldown(target.id);
   } catch (err) {
     sendStatus.textContent = 'could not send — check connection';
     sendStatus.classList.add('fail');

@@ -905,6 +905,23 @@ html, body { background-color: #fdd48d; background-image: none; }
 }
 
 
+/* shader time slider: same as the video one. The knob is the start; a faint line runs the stretch the baked frames cover, and the red fills from the knob to the frame playing now.
+   The stretch can wrap past the end of the loop, so every piece has a second part that starts back at the left. */
+#shaderTime::-webkit-slider-runnable-track, #shaderTime:not(.rail)::-webkit-slider-runnable-track {
+  --pa: calc(8px + (100% - 16px) * var(--sa, 0));
+  --pb: calc(8px + (100% - 16px) * var(--sb, 0));
+  --pc: calc(8px + (100% - 16px) * var(--sc, 0));
+  --pbw: calc(8px + (100% - 16px) * var(--sbw, 0));
+  --pcw: calc(8px + (100% - 16px) * var(--scw, 0));
+  --p0: 8px; --p1: calc(100% - 8px);
+  background:
+    linear-gradient(to right, transparent 0, transparent var(--pa), rgba(255, 36, 24, 0.95) var(--pa), rgba(255, 36, 24, 0.95) var(--pb), transparent var(--pb), transparent 100%),
+    linear-gradient(to right, transparent 0, transparent var(--p0), rgba(255, 36, 24, 0.95) var(--p0), rgba(255, 36, 24, 0.95) var(--pbw), transparent var(--pbw), transparent 100%),
+    linear-gradient(to right, transparent 0, transparent var(--pa), rgba(255, 36, 24, 0.22) var(--pa), rgba(255, 36, 24, 0.22) var(--pc), transparent var(--pc), transparent 100%),
+    linear-gradient(to right, transparent 0, transparent var(--p0), rgba(255, 36, 24, 0.22) var(--p0), rgba(255, 36, 24, 0.22) var(--pcw), transparent var(--pcw), transparent 100%) !important;
+  height: 2px; border-radius: 1px;
+}
+
 /* round 40: the toolbar icons rest in ember orange and turn our ocean blue when highlighted */
 .crop-toolbar .tool-btn, .crop-toolbar .crop-toggle { color: var(--ember); }
 .crop-toolbar .tool-btn.active, .crop-toolbar .crop-toggle[aria-expanded="true"], .crop-toolbar .play-tool.active, #shaderHead .play-tool.active, #videoHead .play-tool.active, #videoHead .vlive.active { color: var(--ocean); }
@@ -2844,7 +2861,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     float d = length(uv - c);
     float life = smoothstep(0.0, 0.03, age) * exp(-age * 1.0);
@@ -2872,7 +2889,7 @@ vec2 pinch(vec2 w, vec2 uv){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     float env = exp(-dot(uv - c, uv - c) / 0.035) * exp(-age * 1.5) * smoothstep(0.0, 0.02, age);
     w = c + rot(6.0 * env * cos(age * 8.0)) * (w - c) * (1.0 + 0.5 * env);
@@ -2883,7 +2900,7 @@ float pressAt(vec2 uv){
   float asp = u_res.x / u_res.y, m = 0.0;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     m = max(m, exp(-dot(uv - c, uv - c) / 0.03) * exp(-age * 1.5) * smoothstep(0.0, 0.02, age));
   }
@@ -2945,7 +2962,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec2 dv = uv - c; float d = length(dv), R = age * 0.9;
     float env = exp(-pow((d - R) / 0.075, 2.0)) * exp(-age * 1.8) * smoothstep(0.0, 0.02, age);
@@ -3000,7 +3017,7 @@ void main(){
     float bump = 0.0; vec2 push = vec2(0.0);
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec2 dc = pos - c; float d2 = dot(dc, dc);
     float env = exp(-d2 / 0.012) * smoothstep(0.0, 0.03, age) * exp(-age * 1.2);
@@ -3048,7 +3065,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec2 dv = uv - c; float d = length(dv);
     float life = smoothstep(0.0, 0.04, age) * exp(-age * 0.8);
@@ -3129,7 +3146,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     float d = length(uv - c);
     float life = smoothstep(0.0, 0.03, age) * exp(-age * 0.7);
@@ -3178,7 +3195,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec2 dv = uv - c; float d = length(dv);
     float life = smoothstep(0.0, 0.03, age) * exp(-age * 1.3);
@@ -3218,7 +3235,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec2 dv = (sx - tc.xy) * vec2(asp, 1.0); float d = length(dv);
     float env = (exp(-pow((d - age * 0.9) / 0.13, 2.0)) * exp(-age * 1.5) + exp(-d * d / 0.01) * exp(-age * 2.5)) * smoothstep(0.0, 0.02, age);
@@ -3270,7 +3287,7 @@ float puffD(vec2 uv){
   float asp = u_res.x / u_res.y, dens = 0.0;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec2 pos = c + vec2(0.05 * sin(age * 9.0 + tc.x * 20.0), age * 0.45 * u_p5);
     float sz = 0.07 + 0.16 * age;
@@ -3316,7 +3333,7 @@ void main(){
     float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
       float d = length(c - vec2(x0, -0.05));
       float life = smoothstep(0.0, 0.025, age) * exp(-age * 2.2) * exp(-d * d / 0.12);
@@ -3383,7 +3400,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec3 Ldt = vec3(c, u_p1 * 0.8) - P;
     float dft = max(dot(nrm, normalize(Ldt)), 0.0);
@@ -3432,7 +3449,7 @@ void main(){
   float asp = u_res.x / u_res.y;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     vec2 dv0 = uv - c;
     float fl0 = exp(-dot(dv0, dv0) / 0.006) * exp(-age * 6.0);
@@ -3488,7 +3505,7 @@ vec2 touchFire(vec2 uv){
   float asp = u_res.x / u_res.y, f = -1.0, gl = 0.0;
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t]; if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir; if (age < 0.0) continue;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */ if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     float life = smoothstep(0.0, 0.03, age) * exp(-age * 1.3);
     vec2 dv = uv - c;
@@ -3536,7 +3553,7 @@ float rippleH(vec2 p){
   for (int i = 0; i < 16; i++) {
     vec3 tc = u_touch[i];
     if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age < 0.0) continue;
     vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
     float d = length(p - c), R = age * u_p2 * 1.3;
@@ -3599,7 +3616,7 @@ void main(){
   for (int i = 0; i < 16; i++) {
     vec3 tc = u_touch[i];
     if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age < 0.0) continue;
     float dd = inkAt(uv, (tc.xy - 0.5) * vec2(asp, 1.0), age, tc.x * 7.0 + tc.y * 3.0);
     ink = 1.0 - (1.0 - ink) * (1.0 - dd);
@@ -3646,7 +3663,7 @@ void main(){
     for (int t = 0; t < 16; t++) {
       vec3 tc = u_touch[t];
       if (tc.z < -5.0) continue;
-      float age = (u_phase - tc.z) * u_tdir;
+      float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
       if (age < 0.0) continue;
       vec2 c = (tc.xy - 0.5) * vec2(asp, 1.0);
       vec2 dv = c - pos;
@@ -3666,7 +3683,7 @@ void main(){
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t];
     if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age < 0.0) continue;
     vec2 d = uv - (tc.xy - 0.5) * vec2(asp, 1.0);
     float dd = dot(d, d);
@@ -3707,7 +3724,7 @@ void main(){
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t];
     if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age < 0.0) continue;
     vec2 d = (q - tc.xy) * vec2(u_res.x / u_res.y, 1.0);
     pinch += exp(-dot(d, d) / 0.012) * exp(-age * (3.0 / u_p5));
@@ -3747,7 +3764,7 @@ void main(){
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t];
     if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age < 0.0) continue;
     vec2 d = (q - tc.xy) * vec2(asp, 1.0);
     float r = length(d);
@@ -3782,7 +3799,7 @@ void main(){
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t];
     if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age < 0.0) continue;
     vec2 d = (q - tc.xy) * vec2(asp, 1.0);
     pool += exp(-dot(d, d) / 0.03) * exp(-age * 1.6);
@@ -3831,7 +3848,7 @@ void main(){
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t];
     if (tc.z < -5.0) { continue; }
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age >= 0.0) {
       vec2 d = (q - tc.xy) * vec2(asp, 1.0);
       float dd = dot(d, d);
@@ -3870,7 +3887,7 @@ void main(){
   for (int t = 0; t < 16; t++) {
     vec3 tc = u_touch[t];
     if (tc.z < -5.0) continue;
-    float age = (u_phase - tc.z) * u_tdir;
+    float age = (u_phase - tc.z) * u_tdir; if (u_tdir > 0.0) age -= floor(age); /* wrap: a touch made late in the loop keeps playing after the loop restarts */
     if (age < 0.0) continue;
     vec2 d = (q - tc.xy) * vec2(asp, 1.0);
     focus += exp(-dot(d, d) / 0.035) * exp(-age * (2.0 / u_p5));
@@ -4443,6 +4460,7 @@ function syncTimeSlider() {
 function setBaked(on) { shaderBakeBtn.classList.toggle('baked', !!on); syncTimeSlider(); shaderBakeBtn.setAttribute('aria-pressed', on ? 'true' : 'false'); shaderBakeBtn.title = on ? 'baked: tap to bake again' : 'bake into frames'; }
 
 let shaderLiveLayer = null, shaderLoopT = 0, shaderLoopPos = -1, liveCropPending = false;
+let shaderPlayFrame = 0; // which baked frame the looping preview is showing
 function liveCropRefresh() {
   if (liveCropPending) return; liveCropPending = true;
   requestAnimationFrame(() => { liveCropPending = false; if (shaderLiveLayer && activeShaderLayer()) sourceImg.src = shaderLiveLayer.img.toDataURL(); });
@@ -4452,12 +4470,12 @@ function shaderLoopStep() {
   if (!shaderPlayTimer) return;
   if (!animPlaying && mode === 'cycle') {
     const filled = frames.map((f, i) => ({ f, i })).filter(x => frameIsFilled(x.f));
-    if (filled.length > 1) { const seq = playOrder(filled.length); shaderLoopPos = (shaderLoopPos + 1) % seq.length; renderFrameForPreview(filled[seq[shaderLoopPos]].i); }
+    if (filled.length > 1) { const seq = playOrder(filled.length); shaderLoopPos = (shaderLoopPos + 1) % seq.length; shaderPlayFrame = filled[seq[shaderLoopPos]].i; renderFrameForPreview(shaderPlayFrame); }
   }
   shaderLoopT = setTimeout(shaderLoopStep, animIntervalSec * 1000);
 }
 function stopShaderPlay() {
-  clearTimeout(shaderLoopT); shaderLoopT = 0; shaderLiveLayer = null;
+  shaderPlayFrame = 0; clearTimeout(shaderLoopT); shaderLoopT = 0; shaderLiveLayer = null;
   if (shaderPlayTimer) { clearInterval(shaderPlayTimer); shaderPlayTimer = null; { const l = activeShaderLayer(); if (l) refreshShaderSource(l); } }
   shaderHold = 0; shaderDir = 1; shaderLiveDir = 1;
   shaderPlayBtn.textContent = '▶';
@@ -4529,8 +4547,25 @@ function retimeOldFrames() { // moves the baked frames along the timeline (new t
   });
   shaderLiveDir = liveDirNow;
 }
+// the red line on the time slider: which stretch of the loop the baked frames cover and which of them is showing now (like the video's)
+function shaderRail() {
+  const s = shaderTime.style, rail = shaderTime.classList.contains('rail'), layer = activeShaderLayer();
+  const set = (a, b, c, bw, cw) => { s.setProperty('--sa', a); s.setProperty('--sb', b); s.setProperty('--sc', c); s.setProperty('--sbw', bw); s.setProperty('--scw', cw); };
+  if (!rail || !layer) { set(0, 0, 0, 0, 0); return; }
+  const start = Math.max(0, Math.min(1, shaderTime.value / 100)), step = parseInt(shaderBakeStep.value, 10) / 100;
+  const grow = !!shaderPreset(layer.shader.id).grow;
+  const filled = frames.filter(frameIsFilled).length, n = Math.max(2, filled > 1 ? filled : BAKE_FRAMES);
+  const at = i => grow ? Math.min(1, start + i * step) : start + i * step; // phase of frame i (can pass 1 = wraps)
+  const piece = ph => ph <= 1 ? [ph, 0] : [1, Math.min(1, ph - 1)];     // [end of the part before the wrap, end of the part after it]
+  const [c1, c2] = piece(at(n - 1));
+  const cur = (shaderPlayTimer && typeof shaderPlayFrame === 'number' && shaderPlayFrame > 0) ? Math.min(shaderPlayFrame, n - 1) : 0;
+  const [b1, b2] = piece(at(cur));
+  set(start.toFixed(4), Math.max(start, b1).toFixed(4), Math.max(start, c1).toFixed(4), b2.toFixed(4), c2.toFixed(4));
+}
+setInterval(shaderRail, 90);
 shaderBakeStep.oninput = () => {
   shaderBakeStepVal.textContent = shaderBakeStep.value + '%';
+  shaderRail();
   if (!shaderBakeBtn.classList.contains('baked') && !cycleReady()) return; // nothing baked yet: the step is just used by the next bake
   scheduleLiveRebake();
 };

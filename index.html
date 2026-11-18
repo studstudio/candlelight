@@ -4180,16 +4180,19 @@ function cloneLayer(layer) {
 function addShaderLayer(presetId) {
   if (videoSrcs.some(Boolean)) { flashStatus('shaders are for photos, not video', 'fail'); return; }
   if (!ensureGL()) { flashStatus("shaders need WebGL, which isn't available here", 'fail'); return; }
+  // coming from Still: the photo and the slider edits made there are what the shader should carry, not whatever an earlier visit to Cycle left behind
+  let fromStill = null;
+  if (mode !== 'cycle') { snapshotActiveLayerState(); const b0 = currentStack()[0]; if (b0 && !b0.shader) fromStill = { settings: { ...b0 }, photo: currentPhotoSource() }; }
   if (mode !== 'cycle') setMode('cycle');   // like a video, a shader is motion: it goes straight to cycle
   if (animPlaying) stopAnimPreview(true);
   stopShaderPlay();
   clearVideo(0);
   snapshotActiveLayerState();
   const wantsPhoto = !!shaderPreset(presetId).photo;
-  const photo = currentPhotoSource();
+  const photo = fromStill && fromStill.photo || currentPhotoSource();
   const layer = makeShaderLayer(presetId, photo);
   const stack = currentStack();
-  if (stack[0]) copyLayerSettings(stack[0], layer);   // edits made before the shader (tone, filters, sliders) carry over to it
+  if (fromStill) copyLayerSettings(fromStill.settings, layer); else if (stack[0]) copyLayerSettings(stack[0], layer);   // edits made before the shader (tone, filters, sliders) carry over to it
   const idx = 0; // the shader button always makes the shader the new base; overlays stay as they are
   stack[idx] = layer;
   hasPhoto = true;

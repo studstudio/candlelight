@@ -994,6 +994,7 @@ function draw() {
   drawSolarOverlay();
 
   drawEvents(lw, pr);
+  if (in3D) syncLights3D();
   updateLocationReadout();
 }
 
@@ -1187,7 +1188,7 @@ function drawEvents(lw, pr) {
   // the docked inlay is meant to be dainty: tiny icons, hairline routes, a
   // whisper of glow, and nothing selectable. Undocked gets the full-size look.
   const dk = docked;
-  if ((dk || in3D) && selectedKey) closeCard();
+  if (dk && selectedKey) closeCard(); // undocked 2D and 3D both keep the card
   positionCard();
   const R_DOT = dk ? 1.9 : 3.4, SQ = 2 * R_DOT + (dk ? 1.6 : 2.6), LINE_W = dk ? 0.6 : 0.9, HALO_W = dk ? 0 : 3;
   const GLOW = (dk ? 2.5 : 6) * dpr;
@@ -1198,7 +1199,7 @@ function drawEvents(lw, pr) {
     g.addColorStop(0, 'rgba(250,255,90,0.88)'); g.addColorStop(0.45, 'rgba(203,255,0,0.80)'); g.addColorStop(1, 'rgba(150,249,0,0.72)');
     return g;
   };
-  const pts = events.map(ev => ({ ev, from: project(ev.sentGeo), to: project(ev.downloadGeo), key: evKey(ev) }));
+  const pts = events.map(ev => ({ ev, from: lightLonLat(ev, 'sent'), to: lightLonLat(ev, 'received'), key: evKey(ev) })); // spread positions, identical to the 3D map's
 
   // routes first, so markers always sit on top of every line.
   // Every route is a faint hairline along its true great-circle path plus ONE
@@ -1263,6 +1264,19 @@ function drawEvents(lw, pr) {
 // Reading rotation from event.sourceEvent inside d3.zoom's own 'zoom'
 // callback sidesteps that entirely, since that event always fires. ----
 let twist = null; // { prevAngle, lastTime } while a 2-touch zoom gesture is active
+// One-finger swipe spin (docked only): the finger's angle around the inlay's
+// center drives rotation, like turning a record with a fingertip. Only
+// starts if the gesture BEGAN as a single touch — lifting one finger off a
+// two-finger twist must hand over to momentum, not get grabbed by this.
+let swipe = null; // { prevAngle, lastTime } while a 1-touch docked spin is active
+let swipeBlocked = false; // set once a gesture has had 2 touches; cleared when all fingers lift
+const SWIPE_DEADZONE = 0.15; // fraction of inlay radius around the center where angle is too unstable to use
+function swipeAngle(touch) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = dockTransform.x + DOCK_K * discCenter.x, cy = dockTransform.y + DOCK_K * discCenter.y;
+  const dx = touch.clientX - rect.left - cx, dy = touch.clientY - rect.top - cy;
+  return { angle: Math.atan2(dy, dx) * 180 / Math.PI, r: Math.hypot(dx, dy) };
+}
 function touchAngle(touches) {
   const dx = touches[1].clientX - touches[0].clientX;
   const dy = touches[1].clientY - touches[0].clientY;
@@ -1296,6 +1310,24 @@ const zoomBehavior = d3.zoom()
       // Popping out is handled by a plain click listener further down, not
       // here — trying to detect "was that a tap" from zoom-gesture timing
       // was unreliable and is gone now.
+      if (se && se.touches && se.touches.length >= 2) { swipeBlocked = true; swipe = null; }
+      if (se && se.touches && se.touches.length === 1 && !swipeBlocked && !twist) {
+        const { angle, r } = swipeAngle(se.touches[0]);
+        const now = performance.now();
+        const inlayR = DOCK_K * discRadius;
+        if (swipe && r > inlayR * SWIPE_DEADZONE) {
+          let delta = angle - swipe.prevAngle;
+          if (delta > 180) delta -= 360;
+          if (delta < -180) delta += 360;
+          const dt = Math.max(now - swipe.lastTime, 1);
+          const MOMENTUM_MULT = 1.5; // same flick boost as the two-finger spin
+          spinVelocity = (delta / dt) * 16 * MOMENTUM_MULT;
+          rotationGamma += delta; // 1:1 — the map stays under the fingertip
+        } else if (!swipe) {
+          spinVelocity = 0; // grabbing it fresh stops any residual momentum spin
+        }
+        swipe = { prevAngle: angle, lastTime: now };
+      }
       if (se && se.touches && se.touches.length === 2) {
         const angle = touchAngle(se.touches);
         const now = performance.now();
@@ -1318,6 +1350,7 @@ const zoomBehavior = d3.zoom()
       transform = { k: DOCK_K, x: dockTransform.x, y: dockTransform.y }; // locked in place regardless of the gesture
     } else {
       twist = null; // spin fully disabled once undocked
+      swipe = null;
       transform = event.transform;
       if (transform.k >= HANDOFF_K && !in3D) {
         const rect = canvas.getBoundingClientRect();
@@ -1335,6 +1368,13 @@ const zoomBehavior = d3.zoom()
     // direction reversal) can fire many touch events within a single
     // frame, those extra synchronous draws piled up and backed up the
     // main thread, which is what caused the jumpiness/freeze-ups.
+  })
+  .on('end', () => {
+    // all fingers lifted: one-finger swipe hands over to momentum in tick().
+    // If the finger paused before lifting, don't fling with a stale velocity.
+    if (swipe && performance.now() - swipe.lastTime > 100) spinVelocity = 0;
+    swipe = null;
+    swipeBlocked = false;
   });
 d3.select(canvas).call(zoomBehavior);
 
@@ -1429,6 +1469,7 @@ function undockWithFade(lon, lat) {
   playFadeTransition(() => {
     docked = false;
     twist = null;
+    swipe = null;
     spinVelocity = 0;
     canvas.style.clipPath = 'none';
     const base = projection([lon, lat]);
@@ -3129,6 +3170,7 @@ function initTerrainMap() {
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
+    addLightLayers3D();
     applyLayerToggles();
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {
@@ -3141,6 +3183,7 @@ function initTerrainMap() {
     }
   });
   terrainMapInstance.on('zoom', autoExitCheck);
+  terrainMapInstance.on('click', onTerrainMapClick);
   // Diagnostic: MapLibre has its own internal ResizeObserver watching the
   // container and auto-resizing when it detects a change — the console
   // showed a "ResizeObserver loop completed with undelivered
@@ -3454,6 +3497,203 @@ function exit3D() {
 const backBtn = document.getElementById('backBtn');
 backBtn.onclick = exit3D;
 
+// ============================================================
+// LIGHTS IN 3D: the same sent circles / received squares / routes as the
+// flat map, drawn as native MapLibre layers so they sit on the terrain and
+// move with the camera for free. Differences from the flat map, on purpose:
+//   - routes are straight in Mercator (a plain 2-point line), not great
+//     circles, and they don't animate — just a steady line with a soft glow
+//   - markers lie flat on the terrain (pitch/rotation aligned to the map)
+//   - markers grow gently with zoom, between a floor and a cap, instead of
+//     staying a fixed screen size or doubling every zoom level like tiles
+//   - every point is SPREAD around its city (the flat map uses the exact
+//     same spread positions, via lightLonLat, so both maps agree): locations come in at roughly
+//     city level (Cloudflare request.cf style, IP-based), so without this
+//     every post from one city would stack on a single spot
+// ============================================================
+
+// ---- spread: sunflower (Vogel) spiral around each city centre ----
+// The nth point in a city sits at distance SPREAD_STEP_KM * sqrt(n) and angle
+// n * 137.5°, so points fill the area evenly with no clumps. Each point gets
+// a permanent slot the first time it's seen (and keeps it), so markers never
+// shuffle when older lights drop off. Slots that land in water are skipped,
+// so coastal cities don't put posts out at sea.
+const SPREAD_STEP_KM = 0.6; // ~25 posts within 3 km, ~100 within 6 km. Tune once we know the worker's real precision.
+const GOLDEN_ANGLE = 2.399963229728653; // 137.5° in radians
+const spreadSlots = new Map(); // city cluster key -> next free slot
+const spreadPos = new Map();   // light key + part -> [lon, lat]
+function spreadLonLat(geo, key) {
+  if (spreadPos.has(key)) return spreadPos.get(key);
+  const p = project(geo);
+  if (!p) return null;
+  const clusterKey = p[1].toFixed(2) + ',' + p[0].toFixed(2); // ~1 km bins: same city centroid = same cluster
+  let n = spreadSlots.get(clusterKey) || 0;
+  // only use the land check if the city centre itself is on land at this
+  // coastline resolution (otherwise a coastal centroid could reject every slot)
+  const useLand = !!land && d3.geoContains(land, p);
+  const cosLat = Math.max(0.05, Math.cos(p[1] * Math.PI / 180));
+  let out = p;
+  for (let tries = 0; tries < 40; tries++, n++) {
+    let cand = p;
+    if (n > 0) {
+      const r = SPREAD_STEP_KM * Math.sqrt(n), th = n * GOLDEN_ANGLE;
+      cand = [p[0] + (r * Math.cos(th)) / (111.32 * cosLat), p[1] + (r * Math.sin(th)) / 111.32];
+    }
+    if (!useLand || d3.geoContains(land, cand)) { out = cand; n++; break; }
+  }
+  spreadSlots.set(clusterKey, n);
+  spreadPos.set(key, out);
+  return out;
+}
+// a light's spread [lon, lat] for 'sent' / 'received' — the ONE source of
+// marker/route positions for both the flat map and the 3D map
+function lightLonLat(ev, part) {
+  const geo = part === 'sent' ? ev.sentGeo : ev.downloadGeo;
+  return geo ? spreadLonLat(geo, evKey(ev) + (part === 'sent' ? '|s' : '|r')) : null;
+}
+// same, as a {lat, lon} object for helpers that take geo objects (screenPointFor)
+function lightGeo(ev, part) { const ll = lightLonLat(ev, part); return ll ? { lon: ll[0], lat: ll[1] } : null; }
+
+// ---- marker images: drawn with the same look as the flat map's markers ----
+function lightImage(w, h, paint) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); paint(x, w / 2, h / 2);
+  return x.getImageData(0, 0, w, h);
+}
+function addLightImages(map) {
+  const S = 2; // drawn at 2x, registered with pixelRatio 2
+  const add = (name, img) => { if (!map.hasImage(name)) map.addImage(name, img, { pixelRatio: S }); };
+  add('light-sent', lightImage(40, 40, (c, cx, cy) => {
+    const r = 3.4 * S, g = c.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, 'rgba(250,255,90,0.88)'); g.addColorStop(0.45, 'rgba(203,255,0,0.80)'); g.addColorStop(1, 'rgba(150,249,0,0.72)');
+    c.shadowColor = `rgba(${LIGHT_GREEN_RGB},0.6)`; c.shadowBlur = 6 * S;
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fillStyle = g; c.fill();
+  }));
+  add('light-received', lightImage(40, 40, (c, cx, cy) => {
+    const side = (2 * 3.4 + 2.6) * S, ow = 1.3 * S;
+    c.fillStyle = 'rgba(182,197,155,0.95)'; c.fillRect(cx - side / 2, cy - side / 2, side, side);
+    c.shadowColor = `rgba(${LIGHT_GREEN_RGB},0.6)`; c.shadowBlur = 6 * S * 0.7;
+    c.strokeStyle = `rgba(${LIGHT_GREEN_RGB},0.95)`; c.lineWidth = ow;
+    c.strokeRect(cx - side / 2 + ow / 2, cy - side / 2 + ow / 2, side - ow, side - ow);
+  }));
+  add('light-inflight', lightImage(48, 48, (c, cx, cy) => { // static stand-in for the flat map's pulsing ring
+    c.beginPath(); c.arc(cx, cy, 8 * S, 0, Math.PI * 2);
+    c.strokeStyle = `rgba(${LIGHT_GREEN_RGB},0.45)`; c.lineWidth = 1.4 * S; c.stroke();
+  }));
+  add('light-sel-sent', lightImage(44, 44, (c, cx, cy) => {
+    c.beginPath(); c.arc(cx, cy, 8.5 * S, 0, Math.PI * 2);
+    c.strokeStyle = LIGHT_GREEN; c.lineWidth = 1.5 * S; c.stroke();
+  }));
+  add('light-sel-received', lightImage(44, 44, (c, cx, cy) => {
+    const o = 12.5 * S; c.strokeStyle = LIGHT_GREEN; c.lineWidth = 1.5 * S; c.strokeRect(cx - o / 2, cy - o / 2, o, o);
+  }));
+}
+
+// gentle growth with zoom: ~flat-map size around the 3D entry zoom, larger
+// close in, smaller far out, capped at both ends
+const LIGHT_ICON_SIZE = ['interpolate', ['exponential', 1.6], ['zoom'], 3, 0.7, 6, 1, 10, 1.5, 14, 2.2, 18, 2.6];
+// MapLibre only allows ['zoom'] at the top of an interpolate, so scaled
+// variants (glow width, blur, selected width) get their own stops
+const lightLineW = (m) => ['interpolate', ['exponential', 1.6], ['zoom'], 3, 0.7 * m, 6, 1.1 * m, 10, 1.7 * m, 14, 2.6 * m, 18, 3.2 * m];
+const LIGHT_LINE_W = lightLineW(1);
+const MARKER_LAYOUT = {
+  'icon-size': LIGHT_ICON_SIZE,
+  'icon-pitch-alignment': 'map', 'icon-rotation-alignment': 'map', // lie flat on the terrain
+  'icon-allow-overlap': true, 'icon-ignore-placement': true,
+};
+let lightLayersReady = false;
+let lights3DEventsRef = null, lights3DSelected;
+function addLightLayers3D() {
+  const map = terrainMapInstance;
+  if (!map || map.getSource('lights-routes')) return;
+  addLightImages(map);
+  const empty = { type: 'FeatureCollection', features: [] };
+  map.addSource('lights-routes', { type: 'geojson', data: empty });
+  map.addSource('lights-markers', { type: 'geojson', data: empty });
+  map.addLayer({ id: 'lights-routes-glow', type: 'line', source: 'lights-routes',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': `rgb(${LIGHT_GREEN_RGB})`, 'line-width': lightLineW(4), 'line-blur': lightLineW(3), 'line-opacity': 0.22 } });
+  map.addLayer({ id: 'lights-routes', type: 'line', source: 'lights-routes',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': `rgb(${LIGHT_GREEN_RGB})`, 'line-width': LIGHT_LINE_W, 'line-opacity': 0.75 } });
+  map.addLayer({ id: 'lights-routes-selected', type: 'line', source: 'lights-routes', filter: ['==', ['get', 'key'], ''],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': 'rgba(143,212,0,0.9)', 'line-width': lightLineW(1.9) } });
+  map.addLayer({ id: 'lights-markers', type: 'symbol', source: 'lights-markers',
+    layout: { ...MARKER_LAYOUT, 'icon-image': ['get', 'icon'], 'symbol-sort-key': ['get', 'z'] } });
+  map.addLayer({ id: 'lights-markers-selected', type: 'symbol', source: 'lights-markers',
+    filter: ['all', ['==', ['get', 'key'], ''], ['!=', ['get', 'part'], 'inflight']],
+    layout: { ...MARKER_LAYOUT, 'icon-image': ['concat', 'light-sel-', ['get', 'part']] } });
+  lightLayersReady = true;
+  lights3DEventsRef = null; lights3DSelected = undefined; // force a full sync on the next frame
+}
+
+// Called every frame from draw() while in 3D; only touches MapLibre when
+// the lights list or the selection actually changed.
+function syncLights3D() {
+  const map = terrainMapInstance;
+  if (!in3D || !map || !lightLayersReady) return;
+  if (events !== lights3DEventsRef) {
+    lights3DEventsRef = events;
+    const routes = [], markers = [];
+    for (const ev of events) {
+      const key = evKey(ev);
+      const s = lightLonLat(ev, 'sent'), r = lightLonLat(ev, 'received');
+      if (s && r) {
+        // straight Mercator line, taking the short way across the 180° line
+        const rLon = r[0] + 360 * Math.round((s[0] - r[0]) / 360);
+        routes.push({ type: 'Feature', properties: { key }, geometry: { type: 'LineString', coordinates: [s, [rLon, r[1]]] } });
+      }
+      if (s && !ev.downloadedAt) markers.push({ type: 'Feature', properties: { key, part: 'inflight', icon: 'light-inflight', z: 0 }, geometry: { type: 'Point', coordinates: s } });
+      if (r) markers.push({ type: 'Feature', properties: { key, part: 'received', icon: 'light-received', z: 1 }, geometry: { type: 'Point', coordinates: r } });
+      if (s) markers.push({ type: 'Feature', properties: { key, part: 'sent', icon: 'light-sent', z: 2 }, geometry: { type: 'Point', coordinates: s } });
+    }
+    map.getSource('lights-routes').setData({ type: 'FeatureCollection', features: routes });
+    map.getSource('lights-markers').setData({ type: 'FeatureCollection', features: markers });
+  }
+  if (selectedKey !== lights3DSelected) {
+    lights3DSelected = selectedKey;
+    const k = selectedKey || '';
+    map.setFilter('lights-routes-selected', ['==', ['get', 'key'], k]);
+    map.setFilter('lights-markers-selected', ['all', ['==', ['get', 'key'], k], ['!=', ['get', 'part'], 'inflight']]);
+  }
+}
+
+// screen point (relative to the map container) of a light's sent/received
+// marker in 3D, or null. Picks the world copy nearest the camera.
+function screenPointFor3D(ev, part) {
+  if (!terrainMapInstance) return null;
+  const ll = lightLonLat(ev, part);
+  if (!ll) return null;
+  const cLng = terrainMapInstance.getCenter().lng;
+  const q = terrainMapInstance.project([ll[0] + 360 * Math.round((cLng - ll[0]) / 360), ll[1]]);
+  return [q.x, q.y];
+}
+
+// tap in 3D: a marker (generous radius) wins over a route; tapping empty
+// ground with a card open just closes it
+function onTerrainMapClick(e) {
+  if (transitioning || !lightLayersReady) return;
+  const map = terrainMapInstance, { x, y } = e.point;
+  const byKey = (k) => events.find(ev => evKey(ev) === k);
+  const MARK_R = 18, LINE_R = 10;
+  let best = null, bestD = Infinity;
+  for (const f of map.queryRenderedFeatures([[x - MARK_R, y - MARK_R], [x + MARK_R, y + MARK_R]], { layers: ['lights-markers'] })) {
+    const part = f.properties.part === 'received' ? 'received' : 'sent';
+    const ev = byKey(f.properties.key); if (!ev) continue;
+    const pt = screenPointFor3D(ev, part); if (!pt) continue;
+    const d = Math.hypot(pt[0] - x, pt[1] - y);
+    if (d < bestD) { bestD = d; best = { ev, part }; }
+  }
+  if (!best) {
+    const f = map.queryRenderedFeatures([[x - LINE_R, y - LINE_R], [x + LINE_R, y + LINE_R]], { layers: ['lights-routes'] })[0];
+    const ev = f && byKey(f.properties.key);
+    if (ev) best = { ev, part: 'route' };
+  }
+  if (best) openCard(best.ev, best.part, x, y);
+  else if (cardEl.classList.contains('open')) closeCard();
+}
+
 // ---- hover / tap tooltips (accounts for current pan/zoom) ----
 function screenPointFor(geo) {
   const p = project(geo);
@@ -3479,14 +3719,14 @@ function hitTestEvents(mx, my) {
   const MARK_R = 18, LINE_R = 10, LINE_PENALTY = 8;
   let best = null, bestScore = Infinity;
   for (const ev of events) {
-    const sp = screenPointFor(ev.sentGeo), rp = screenPointFor(ev.downloadGeo);
+    const sp = screenPointFor(lightGeo(ev, 'sent')), rp = screenPointFor(lightGeo(ev, 'received'));
     for (const [pt, part] of [[sp, 'sent'], [rp, 'received']]) {
       if (!pt) continue;
       const d = Math.hypot(pt[0] - mx, pt[1] - my);
       if (d < MARK_R && d < bestScore) { bestScore = d; best = { ev, part }; }
     }
     if (sp && rp) {
-      const a = project(ev.sentGeo), b = project(ev.downloadGeo), interp = d3.geoInterpolate(a, b);
+      const a = lightLonLat(ev, 'sent'), b = lightLonLat(ev, 'received'), interp = d3.geoInterpolate(a, b);
       let prev = sp;
       for (let i = 1; i <= 24; i++) {
         const q = interp(i / 24), cur = screenPointFor({ lat: q[1], lon: q[0] });
@@ -3568,7 +3808,9 @@ function positionCard() {
   if (!selectedKey || !cardEl.classList.contains('open') || !cardAnchor) return;
   const ev = events.find(e => evKey(e) === selectedKey); if (!ev) return;
   const cr = canvas.getBoundingClientRect(), pr_ = cardEl.offsetParent.getBoundingClientRect();
-  let pt = cardAnchor.part === 'sent' ? screenPointFor(ev.sentGeo) : cardAnchor.part === 'received' ? screenPointFor(ev.downloadGeo) : null;
+  let pt = in3D
+    ? (cardAnchor.part === 'route' ? null : screenPointFor3D(ev, cardAnchor.part))
+    : (cardAnchor.part === 'route' ? null : screenPointFor(lightGeo(ev, cardAnchor.part)));
   if (!pt) pt = [cardAnchor.x, cardAnchor.y];
   const ax = pt[0] + (cr.left - pr_.left), ay = pt[1] + (cr.top - pr_.top);
   const w = cardEl.offsetWidth, h = cardEl.offsetHeight, GAP = 16, M = 8;
@@ -3847,13 +4089,13 @@ const wake = () => { lastActivity = performance.now(); };
  'mousedown', 'mousemove', 'wheel', 'keydown', 'visibilitychange']
   .forEach(t => document.addEventListener(t, wake, { capture: true, passive: true }));
 function isIdle(now) {
-  return docked && !in3D && !transitioning && !twist
+  return docked && !in3D && !transitioning && !twist && !swipe
     && Math.abs(spinVelocity) <= 0.01
     && now - lastActivity > IDLE_AFTER_MS;
 }
 
 function tick() {
-  if (!twist && Math.abs(spinVelocity) > 0.01) {
+  if (!twist && !swipe && Math.abs(spinVelocity) > 0.01) {
     rotationGamma += spinVelocity;
     spinVelocity *= 0.976; // friction, decay rate reduced 2.5x from before — spins longer before settling
   }

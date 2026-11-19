@@ -48,7 +48,7 @@ const uint32_t WIFI_TIMEOUT_MS = 20000;                      // [PLACEHOLDER] gi
 const uint32_t WIFI_FAIL_SLEEP_1_S = 1800;                   // [PLACEHOLDER] after one failed connect, sleep this long instead of SYNC_INTERVAL_S
 const uint32_t WIFI_FAIL_SLEEP_2_S = 3600;                   // [PLACEHOLDER] after two or more in a row (router off for the night): this long
 const uint32_t NO_AP_SCAN_MS_PER_CH = 120;                   // [PLACEHOLDER] before a full connect, a quick scan (~1.6 s) checks the network is there at all; not found = router off, give up
-const uint32_t AWAKE_IDLE_MS = 10000;                        // [PLACEHOLDER] stay up this long after the last button press or pass (a held button keeps it open, see idleWindow)
+const uint32_t AWAKE_IDLE_MS = 5000;                         // [PLACEHOLDER] stay up this long after the last button press or pass (a held button keeps it open, see idleWindow)
 const uint32_t OTA_BUDGET_MS = 150000;                       // [PLACEHOLDER] a firmware download that isn't finished by now is abandoned (retried next check)
 const uint32_t OTA_STALL_MS = 15000;                         // [PLACEHOLDER] ...and so is one that stops delivering data for this long
 const uint32_t FAST_WIFI_MS = 6000;                          // [PLACEHOLDER] fast connect (cached channel/BSSID/IP) gives up after this and does a full connect
@@ -711,13 +711,36 @@ bool readLineFrom(WiFiClient* s, String& out) {
 
 uint32_t copyFlashUs = 0;  // time spent inside File::write by copyBytes (flash erase + program), to tell flash from network
 
+// While the panel refreshes (~0.36 s per pass image, drawn mid-download by passTick()) the CPU only
+// waits for the panel's BUSY pin. GxEPD2 calls panelBusyFill() in that wait, so the image being
+// received into PSRAM keeps coming in instead of the download pausing. dlFill is set by copyBytes()
+// around its passTick() (PSRAM path only; flash writes stay out of the panel wait)
+struct { WiFiClient* s; uint8_t* mem; size_t n; } dlFill = {nullptr, nullptr, 0};
+void panelBusyFill(const void*) {
+  if (!dlFill.s || !dlFill.mem || !dlFill.n) { delay(1); return; }
+  int avail = dlFill.s->available();
+  if (avail <= 0) { delay(1); return; }
+  int got = dlFill.s->read(dlFill.mem, min((size_t)avail, dlFill.n));
+  if (got > 0) { dlFill.mem += got; dlFill.n -= got; }
+}
+
 // copies the next n bytes of the response into mem (if given) or f, or throws them away if both are null
 bool copyBytes(WiFiClient* s, File* f, size_t n, uint32_t deadline, uint8_t* mem = nullptr) {
   uint8_t buf[1460];
   uint32_t last = millis();
   while (n > 0) {
     otaguard::tick();
-    passTick();  // the next image of the pass goes up while this one downloads
+    // the next image of the pass goes up while this one downloads; into PSRAM the bytes keep
+    // arriving during the panel refresh (panelBusyFill)
+    if (mem) dlFill = {s, mem, n};
+    passTick();
+    if (mem) {
+      if (dlFill.n != n) last = millis();
+      mem = dlFill.mem;
+      n = dlFill.n;
+      dlFill = {nullptr, nullptr, 0};
+      if (n == 0) break;
+    }
     if (millis() > deadline || millis() - last > BUNDLE_STALL_MS) return false;
     int avail = s->available();
     if (!avail) {
@@ -1026,7 +1049,8 @@ SyncResult syncBundle(int& added) {
         passQueue.push_back(itemId);
       }
       passMoreComing = k + 1 < count;
-      passTick();
+      // no passTick() here: drawn now, the download would wait out the refresh. The next item's
+      // copyBytes() draws it within milliseconds, receiving during the refresh
       continue;
     }
     // PSRAM missing or full: what is held goes to flash first, so images stay in arrival order
@@ -2349,6 +2373,7 @@ void setup() {
   fsReady = true;
   // after deep sleep the panel still holds its image, so partial refreshes keep working
   display.init(115200, !wokeFromSleep);
+  display.epd2.setBusyCallback(panelBusyFill);  // a refresh mid-download keeps receiving (see dlFill)
   displayReady = true;
 
   pinMode(NEXT_BUTTON, INPUT_PULLUP);

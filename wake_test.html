@@ -135,7 +135,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
           <label><input type="radio" name="mode" value="bare">bare</label>
           <label><input type="radio" name="mode" value="press">button press</label>
         </div>
-        <span class="tip" tabindex="0" aria-label="the tests">i<span class="tx"><b>Syncing</b>: the normal 10-minute wake (WiFi on, check the worker, back to sleep).<br><b>Bare</b>: boots and goes straight back to sleep, no WiFi. Its reading is the local current, which splits a syncing wake into local + WiFi.<br><b>Button press</b>: your next real NEXT press from sleep is the measured wake (no countdown). Step through as many images as you like; it sleeps 10 s after your last press. Logs image steps and full vs partial refreshes.<br><b>Sleep</b>: add by hand in the log (mA jack).</span></span>
+        <span class="tip" tabindex="0" aria-label="the tests">i<span class="tx"><b>Syncing</b>: the normal 10-minute wake (WiFi on, check the worker, back to sleep).<br><b>Bare</b>: boots and goes straight back to sleep, no WiFi. Its reading is the local current, which splits a syncing wake into local + WiFi.<br><b>Button press</b>: your next real NEXT press from sleep is the measured wake (no countdown). Step through as many images as you like; it sleeps 5 s after your last press (10 s on firmware before 2026-11-19). Logs image steps and full vs partial refreshes.<br><b>Sleep</b>: add by hand in the log (mA jack).</span></span>
         <label class="f">countdown <input type="number" id="sleepS" min="5" max="600" step="5" value="10"> s</label>
         <button class="link" id="arm">arm</button><button class="link" id="cancel">cancel</button><span id="armMsg" class="muted"></span>
       </div>
@@ -170,7 +170,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
   const BASE = "https://candlelight.daniloinfinite.workers.dev/teg/test-lamp-1";
   const $ = id => document.getElementById(id);
   const BOOT_S = 0.3;    // before the firmware's clock starts (ROM + bootloader), not in the lamp's timing
-  const DL_S = 3, IMG_S = 1, IDLE_S = 12;  // a wake with images: download, ~1 s per image (receive + pass), the 10 s idle window + margin
+  const DL_S = 6, IMG_S = 1.5, IDLE_S = 12;  // a wake with images: download (4 images took 7 s once), per image (receive + pass), the idle window (5 s, 10 s on older firmware) + margin
   const SETTLE_S = 1.5;  // from the sync request reaching the worker to the lamp asleep
   const AWAKE_GUESS = { sync: 4, bare: 0.8, press: 13 };  // rough, for the prompt only; the real length comes back afterwards
   const NAMES = { sync: "syncing wake", bare: "bare wake", press: "button press", sleep: "sleep" };
@@ -220,7 +220,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
       "Wire the meter in (? above), then power on holding the probes.", false, "");
     if (st.reportedAt) return show("done", "Logged.", "Type the meter reading into the highlighted row.", false, "");
     if (st.mode === "press") return show("press", "Asleep. Press NEXT when ready.",
-      "Read the meter in the quiet stretch after each screen change. It sleeps 10 s after your last press (meter 0.00): let go then.", false,
+      "Read the meter in the quiet stretch after each screen change. It sleeps 5 s after your last press (meter 0.00): let go then.", false,
       "Steps, refreshes and timing arrive with the next sync (the power-up after rewiring).");
     const wakeAt = st.pickedUpAt + (SETTLE_S + st.sleepS) * 1000;
     const left = (wakeAt - now) / 1000;
@@ -232,13 +232,13 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
     // when it's surely back asleep: a syncing wake checks in at its sync request and sleeps ~1-2 s later
     // (3 s allowed); without a check-in, WiFi gives up after 20 s. A bare wake is up under a second,
     // so the wake time plus the timer's ±2 s and a margin
-    // a syncing wake that downloads images also plays the pass and stays up the idle window (10 s) before it
+    // a syncing wake that downloads images also plays the pass and stays up the idle window (5 s) before it
     // sleeps and saves its timing: cutting the power earlier loses the measurement
     const imgS = st.wokeWaiting ? DL_S + st.wokeWaiting * IMG_S + IDLE_S : 0;
     const asleepAt = st.mode === "sync" ? (st.wokeAt ? st.wokeAt + 3000 + imgS * 1000 : wakeAt + 25000) : wakeAt + 4000;
     if (now < asleepAt) {
       const seen = st.wokeAt ? ` It checked in at ${new Date(st.wokeAt).toLocaleTimeString()}.` : "";
-      const imgs = st.wokeWaiting ? ` Downloading ${st.wokeWaiting} image${st.wokeWaiting === 1 ? "" : "s"}, then the pass and 10 s idle: don't cut the power.` : "";
+      const imgs = st.wokeWaiting ? ` Downloading ${st.wokeWaiting} image${st.wokeWaiting === 1 ? "" : "s"}, then the pass and the idle window: don't cut the power.` : "";
       return show("awake", `Up: ${type}.${seen}${imgs}`, "Read the meter now: its steadiest number. Keep holding.", true,
         st.mode === "sync" && !st.wokeAt && now > wakeAt + 8000 ? "No check-in yet: it may be struggling with WiFi (it gives up after 20 s)." : note, true);
     }

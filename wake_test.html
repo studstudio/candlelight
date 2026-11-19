@@ -170,6 +170,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
   const BASE = "https://candlelight.daniloinfinite.workers.dev/teg/test-lamp-1";
   const $ = id => document.getElementById(id);
   const BOOT_S = 0.3;    // before the firmware's clock starts (ROM + bootloader), not in the lamp's timing
+  const DL_S = 3, IMG_S = 1, IDLE_S = 12;  // a wake with images: download, ~1 s per image (receive + pass), the 10 s idle window + margin
   const SETTLE_S = 1.5;  // from the sync request reaching the worker to the lamp asleep
   const AWAKE_GUESS = { sync: 4, bare: 0.8, press: 13 };  // rough, for the prompt only; the real length comes back afterwards
   const NAMES = { sync: "syncing wake", bare: "bare wake", press: "button press", sleep: "sleep" };
@@ -231,10 +232,14 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
     // when it's surely back asleep: a syncing wake checks in at its sync request and sleeps ~1-2 s later
     // (3 s allowed); without a check-in, WiFi gives up after 20 s. A bare wake is up under a second,
     // so the wake time plus the timer's ±2 s and a margin
-    const asleepAt = st.mode === "sync" ? (st.wokeAt ? st.wokeAt + 3000 : wakeAt + 25000) : wakeAt + 4000;
+    // a syncing wake that downloads images also plays the pass and stays up the idle window (10 s) before it
+    // sleeps and saves its timing: cutting the power earlier loses the measurement
+    const imgS = st.wokeWaiting ? DL_S + st.wokeWaiting * IMG_S + IDLE_S : 0;
+    const asleepAt = st.mode === "sync" ? (st.wokeAt ? st.wokeAt + 3000 + imgS * 1000 : wakeAt + 25000) : wakeAt + 4000;
     if (now < asleepAt) {
       const seen = st.wokeAt ? ` It checked in at ${new Date(st.wokeAt).toLocaleTimeString()}.` : "";
-      return show("awake", `Up: ${type}.${seen}`, "Read the meter now: its steadiest number. Keep holding.", true,
+      const imgs = st.wokeWaiting ? ` Downloading ${st.wokeWaiting} image${st.wokeWaiting === 1 ? "" : "s"}, then the pass and 10 s idle: don't cut the power.` : "";
+      return show("awake", `Up: ${type}.${seen}${imgs}`, "Read the meter now: its steadiest number. Keep holding.", true,
         st.mode === "sync" && !st.wokeAt && now > wakeAt + 8000 ? "No check-in yet: it may be struggling with WiFi (it gives up after 20 s)." : note, true);
     }
     show("✓", "Wake over. Let go, wire it back to normal.",

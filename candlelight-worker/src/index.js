@@ -754,7 +754,8 @@ export default {
         wt.pickedUpAt = wtNow;
         wtChanged = true;
       }
-      if (wt && url.searchParams.get('wtw') === '1' && wt.pickedUpAt && !wt.wokeAt) { wt.wokeAt = wtNow; wtChanged = true; }
+      // wokeWaiting: images this wake downloads (then it plays the pass and the idle window: the page waits longer)
+      if (wt && url.searchParams.get('wtw') === '1' && wt.pickedUpAt && !wt.wokeAt) { wt.wokeAt = wtNow; wt.wokeWaiting = listed.length; wtChanged = true; }
       const wtRaw = url.searchParams.get('wt');
       if (wtRaw) {
         const [awakeMs, wifiMs, syncMs, mode, fwv, steps, draws, fullDraws] = wtRaw.split(':');

@@ -115,7 +115,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
       <li>Move the FireBeetle's VCC wire from the BAT row to an empty row (row X).</li>
       <li>Red probe in the 10A jack, dial on 10A, black probe in COM.</li>
       <li>Red probe on a jumper from the BAT row (pack +), black probe on a jumper from row X.</li>
-      <li>Power back on. The lamp boots, syncs, takes the test and sleeps; the countdown starts. Ignore the meter until 0.</li>
+      <li>Power back on. The lamp boots, syncs, takes the test and sleeps; the countdown starts. Ignore the meter until 0. Images in the queue wait for the measured wake: a syncing test then downloads them and plays the pass, like a real timer wake.</li>
     </ol>If the lamp is already running on the meter, hold NEXT 5 s to make it check in. The TEG monitor connected over USB holds the lamp awake.</span></span>
     <span class="status"><span class="dot" id="dot"></span><span id="conn">connecting…</span></span>
   </header>
@@ -194,7 +194,7 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
 
   async function arm(body) {
     $("armMsg").textContent = "…"; $("armMsg").className = "muted";
-    try { st = await json(BASE + "/waketest", body); if (st.now) skew = st.now - Date.now(); $("armMsg").textContent = body.stop ? "cancelled" : "armed"; }
+    try { st = await json(BASE + "/waketest", body); if (st.now) skew = st.now - Date.now(); $("armMsg").textContent = body.stop ? "reset: choose a test and arm" : "armed"; }
     catch (e) { $("armMsg").textContent = String(e.message || e); $("armMsg").className = "err"; }
   }
   $("arm").onclick = () => arm({ sleepS: +$("sleepS").value, mode: mode() });
@@ -211,7 +211,8 @@ tr.fresh td:first-child { box-shadow: inset 2px 0 var(--teal); }
   function tick() {
     const now = Date.now() + skew;
     $("arm").disabled = !!(st && st.armed && st.pickedUpAt && !st.reportedAt);
-    $("cancel").disabled = !(st && st.armed && !st.pickedUpAt);
+    $("cancel").disabled = !(st && st.armed && !st.reportedAt);
+    $("cancel").textContent = st && st.armed && st.pickedUpAt && !st.reportedAt ? "reset" : "cancel";
     if (!st || !st.armed) return show("—", "Not armed.", "", false, "");
     const type = NAMES[st.mode];
     if (!st.pickedUpAt) return show("…", `Armed: ${type}. Waiting for the lamp to power on.`,

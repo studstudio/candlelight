@@ -328,8 +328,8 @@ export default {
     // session time (teg/{lampId}/{session}/{minute}, [[seconds, mV], ...]) next
     // to a small head object, so neither side ever moves the whole session ----
     // ---- teg/{lampId}/waketest: times one lamp wake for a meter test of its draw. [PROTOTYPE-ONLY: WAKE TEST]
-    // POST {sleepS, mode: sync|bare|press} arms it, POST {stop: true} cancels it before the lamp
-    // picks it up, GET reads it (wake_test.html polls). /sync below hands it to the lamp once
+    // POST {sleepS, mode: sync|bare|press} arms it, POST {stop: true} cancels or resets it (also after the
+    // lamp picked it up: a stuck test; arming again replaces the lamp's copy at its next sync), GET reads it (wake_test.html polls). /sync below hands it to the lamp once
     // (pickedUpAt), notes the measured wake checking in (wokeAt, syncing wakes only) and files the
     // timing the lamp reports on a later sync into the draw log (reportedAt, entryId) ----
     if (parts[0] === 'teg' && parts[1] && parts[2] === 'waketest' && parts.length === 3) {
@@ -344,7 +344,6 @@ export default {
         let state;
         if (body.stop) {
           if (!prev || !prev.armed) return json({ error: 'nothing armed' }, 404);
-          if (prev.pickedUpAt) return json({ error: 'the lamp already has it; it finishes by itself' }, 409);
           state = { ...prev, armed: false };
         } else {
           const sleepS = Math.round(Number(body.sleepS));
@@ -739,7 +738,7 @@ export default {
       const prefix = `queue/${lampId}/`;
       const t0 = Date.now();
       const wtKey = `teg/${lampId}/waketest`;  // [PROTOTYPE-ONLY: WAKE TEST]
-      const [listed, fw, wtObj] = await Promise.all([
+      let [listed, fw, wtObj] = await Promise.all([
         getQueueItems(env, lampId, { include: ['customMetadata'] }),
         env.LAMP_IMAGES.head('firmware/latest.bin'),
         env.LAMP_IMAGES.get(wtKey),
@@ -771,7 +770,7 @@ export default {
           if (log.entries.length > 5000) log.entries.splice(0, log.entries.length - 5000);
           ctx.waitUntil(env.LAMP_IMAGES.put(logKey, JSON.stringify(log)));
           // not an older report riding on the pickup sync
-          if (wt && wt.pickedUpAt && !wtHead && !wt.reportedAt) { wt.reportedAt = wtNow; wt.entryId = e.id; wtChanged = true; }
+          if (wt && wt.armed && wt.pickedUpAt && !wtHead && !wt.reportedAt && kind === wt.mode) { wt.reportedAt = wtNow; wt.entryId = e.id; wtChanged = true; }
         }
       }
       if (wtChanged) ctx.waitUntil(env.LAMP_IMAGES.put(wtKey, JSON.stringify(wt)));
@@ -804,6 +803,9 @@ export default {
         if (wl.entries.length > 3000) wl.entries.splice(0, wl.entries.length - 3000);
         ctx.waitUntil(env.LAMP_IMAGES.put(wlKey, JSON.stringify(wl)));
       }
+      // [PROTOTYPE-ONLY: WAKE TEST] the sync that hands out a test delivers no images: they wait for the
+      // measured wake, so a syncing test times a real timer wake that downloads them and plays the pass
+      if (wtHead) listed = [];
       const timing = [`list+head ${Date.now() - t0}ms`];
       const enc = new TextEncoder();
       const itemHead = (it, size) => {

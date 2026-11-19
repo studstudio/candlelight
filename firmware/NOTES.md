@@ -127,7 +127,23 @@ Still to build: skip the update step when the battery is low (waiting for the ba
 - **User doubts these are real ticks, and the trace agrees:** TEG loaded 1.2-1.58 V from t ~240 s to ~780 s (9 min, strongest harvest, legs 1-2 at ~1-2 mV) gave **zero ticks**, where ~30 were expected. The pairs only came once the harvest was falling (TEG 1.06 V and dropping). So they follow the current *changing* (falling toward zero, maybe flipping direction around the BQ's bursts), not the charge passed. A steady charge current produces no counts.
 - **INT-stuck banner showed afterwards; LTC test (13:20) passed** (INT high, CLR works, no pulses). The banner stayed up until tapped, so it may have been left over from earlier. Likely the 2.7 s pair: by the ULP's logic a tick pair is INT going low (tick 1), staying low through several CLR pulses (stuck >= 3 polls = banner), briefly high, then low again (tick 2). If so, each "pair" is one long INT-low episode that CLR can't release, during falling current. Page now clears the banner on release and logs the episode's time and length to the console (891eb9b).
 
-### 2026-11-19 bookmark (RESUME HERE)
+### 2026-11-19 evening bookmark (RESUME HERE)
+
+**State:** firmware `467262c` published (CI green), lamp installs it at its next sync; previous firmware `866c20d` (the worker's `previousVersion`). Worker `f335cde6`. Page live (commit `fd8c240` + `467262c`). Nothing tested on the lamp yet.
+
+**What changed in `467262c` (firmware only):**
+1. `AWAKE_IDLE_MS` 10000 -> 5000 (one line).
+2. Download keeps receiving during pass refreshes: `panelBusyFill()` + `dlFill` (GxEPD2 busy callback, set after `display.init`), `copyBytes()` sets/reads `dlFill` around its `passTick()` (PSRAM path only), and the `passTick()` right after a PSRAM item in `syncBundle()` removed (the next item's `copyBytes()` draws it).
+
+**Test tomorrow (user):** check the wake log "fw" column reads `467262c`. Queue 4 **stills**, arm syncing (10A jack, dial 10A). Expect: download well under the earlier 7.1 s, all 4 images intact, the pass ends on image 1 with the badge, ~5 s awake after it. Then type the readings into the row; I pull `/drawlog` + `/wakelog` and recompute the image-wake mAh and the daily budget. After that: sleep current (mA jack, 200m), then pick the wake interval.
+
+**If it goes wrong / rollback:**
+- A firmware that can't finish a wake (sync, draw, sleep) rolls back to `866c20d` by itself (otaguard), and recovery blocklists it. Wake log "fw" column shows which one runs.
+- Images corrupt, missing, or the pass/download misbehaves: revert just item 2 (keep the 5 s): `git revert 467262c` reverts both, so instead undo the `panelBusyFill`/`dlFill` hunks by hand, restore `passTick();` after `passMoreComing = k + 1 < count;` in the PSRAM branch, push; CI publishes and the lamp updates on its next sync. Nothing is lost on the worker side: images are only deleted after the lamp acks them stored.
+- Full rollback: `git revert 467262c` + push (the page/worker don't depend on it; the page's waits are sized for 10 s too).
+- Lamp won't update at all: USB flash the `866c20d` build (CI artifact, or `firmware/fw/old-versions/`).
+
+### 2026-11-19 bookmark
 
 - **Button press measured** (10A jack/dial): a **flat 40 mA the whole time** while stepping through images. Screen refreshes don't show above the baseline at the 10A range's 10 mA steps. **40 mA = the awake baseline with the radio off** (same as boot and the non-WiFi part of a syncing wake).
 - **WiFi refined:** averages **110-130 mA** during syncs (was logged as 120-160). **Empty syncing wake** (nothing new, most timer wakes; ~1.8 s awake) = ~1.1 s at 40 + ~1.1 s at 120 = **~0.049 mAh** (was 0.056). **Syncing wake that brings images: NOT measured yet**, much longer: download + pass + the 10 s idle window (a timer wake with new images runs `idleWindow()`). The 11.4 s power-up with 3 images (11-18) isn't usable: full WiFi connect 4.8 s, and it's a power-up. Measure it with the fixed test (images queued, syncing mode).

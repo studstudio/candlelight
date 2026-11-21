@@ -199,8 +199,6 @@
       radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
-  /* isometric mode: the map is drawn at low resolution and scaled up with hard pixel edges */
-  #terrainMap.isoPixel .maplibregl-canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
   /* detail card for a tapped light: sits at the bottom of the map area so it
      never covers the docked inlay, and works the same docked or undocked */
   #eventCard {
@@ -253,7 +251,7 @@
   #eventCard.grouped #ecDestList { display: flex; }
   #eventCard.grouped #ecRecvGroup > .ecRoute, #eventCard.grouped #ecMeta { display: none; }
   #ecDestList .dt { color: var(--cream-dim); }
-  #routeStyleBtn, #mockRateBtn {
+  #routeStyleBtn, #mockRateBtn, #spotsBtn {
     position: absolute; left: 12px; bottom: 12px; z-index: 5; padding: 6px 10px;
     background: rgba(29,22,16,0.55); color: var(--cream); border: 0; border-radius: 999px;
     font-size: 10px; letter-spacing: 0.05em; font-family: 'SF Mono','Menlo','Courier New',monospace;
@@ -261,6 +259,18 @@
   }
   /* sits directly above the route button, same look */
   #mockRateBtn { bottom: 44px; }
+  /* test spots: above the new-light button, list opens upward */
+  #spotsBtn { bottom: 76px; }
+  #spotsPanel {
+    position: absolute; left: 12px; bottom: 108px; z-index: 6; display: none; flex-direction: column;
+    max-height: 55vh; overflow-y: auto; touch-action: pan-y; min-width: 190px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 0;
+    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; font-weight: 300; font-size: 11px;
+  }
+  #spotsPanel * { touch-action: pan-y; }
+  #spotsPanel.open { display: flex; }
+  #spotsPanel .spotCountry { color: var(--cream-dim); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; padding: 7px 12px 2px; }
+  #spotsPanel .spot { background: none; border: 0; color: var(--cream); text-align: left; padding: 6px 12px; font: inherit; cursor: pointer; touch-action: manipulation; }
   #solarOverlay { position: absolute; inset: 0; z-index: 3; pointer-events: none; cursor: default; }
   /* ticker under the docked globe: fills the space down to the buttons, newest
      row on top, fading out toward the bottom. Delicate ember type. */
@@ -315,7 +325,6 @@
     <div id="galleryBelow" class="hidden"><div id="tickerList"></div></div>
     <div id="terrainMap"></div>
     <div id="layerToggles">
-      <button id="toggleIsoBtn" class="layerToggle" aria-pressed="false">isometric</button>
       <button id="toggleLabelsBtn" class="layerToggle">labels</button>
       <button id="toggleLinesBtn" class="layerToggle">terrain lines</button>
       <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
@@ -1594,7 +1603,6 @@ function dockMap() { dockWithFade(); } // initial-load call sites — same mecha
 // and read when the layers are first created in initTerrainMap().
 function applyLayerToggles() {
   if (!terrainMapInstance) return;
-  if (isoOn) return; // isometric mode owns layer visibility while it's on
   try {
     // Keep Classic on the original Mapterhorn terrain geometry and Satellite
     // on MapTiler Terrain RGB. This is important for both responsiveness and
@@ -1634,13 +1642,13 @@ function applyLayerToggles() {
       terrainMapInstance.setLayoutProperty('maptiler-3d-buildings', 'visibility', buildingsOn ? 'visible' : 'none');
     }
     if (terrainMapInstance.getLayer('color-relief')) {
-      terrainMapInstance.setLayoutProperty('color-relief', 'visibility', usesMaptilerSurface() ? 'none' : 'visible');
+      terrainMapInstance.setLayoutProperty('color-relief', 'visibility', classicBaseVisible() ? 'visible' : 'none');
     }
     if (terrainMapInstance.getLayer('classic-hillshade')) {
-      terrainMapInstance.setLayoutProperty('classic-hillshade', 'visibility', usesMaptilerSurface() ? 'none' : 'visible');
+      terrainMapInstance.setLayoutProperty('classic-hillshade', 'visibility', classicBaseVisible() ? 'visible' : 'none');
     }
     if (terrainMapInstance.getLayer('maptiler-hillshade')) {
-      terrainMapInstance.setLayoutProperty('maptiler-hillshade', 'visibility', usesMaptilerSurface() ? 'visible' : 'none');
+      terrainMapInstance.setLayoutProperty('maptiler-hillshade', 'visibility', usesMaptilerSurface() && !satFadedOut ? 'visible' : 'none');
     }
   } catch (err) {
     console.warn('gallery: layer toggle failed', err);
@@ -1700,415 +1708,12 @@ toggleSatelliteBtn.onclick = () => {
   applyBuildingPalette();
 };
 toggleBuildingsBtn.onclick = () => {
+  buildingsAutoOn = false; // the user's choice from here on
   buildingsOn = !buildingsOn;
   toggleBuildingsBtn.classList.toggle('active', buildingsOn);
   toggleBuildingsBtn.setAttribute('aria-pressed', String(buildingsOn));
   applyLayerToggles();
 };
-
-// ============================================================
-// ISOMETRIC MODE (3D view): turns the whole 3D map, anywhere in the world,
-// into a SimCity-style pixel-art diorama built from the same open map data.
-//  - camera locked to the isometric angle (35.26° above the ground, turned
-//    45°) with the perspective narrowed as far as MapLibre allows
-//  - drawn at 1/ISO_PIXEL_SIZE resolution and scaled up without smoothing,
-//    so every art pixel is a crisp ISO_PIXEL_SIZE x ISO_PIXEL_SIZE block
-//  - its own flat palette: pixel patterns for woods, fields, parks, sand and
-//    wetland; water styled by type (sea, lakes/ponds, rivers, canals/docks,
-//    pools, streams, drains, dry beds); foam outlines on every shore
-//  - it moves: water flows (sea, rivers, canals drift; lakes sparkle), gusts
-//    of wind roll across grass, parks, fields and trees, and rooftop glints
-//    twinkle on tall buildings — all by swapping pixel-pattern frames
-//  - buildings coloured per building from a "vibe": each listed city has its
-//    own building palettes (low-rise / mid-rise / towers) and its own river
-//    colour (city rivers are murkier); everywhere else gets a regional vibe
-//    (nordic, mediterranean, desert, tropical, east asian, temperate). The
-//    vibe follows the map centre.
-// The normal map's layers are hidden while it's on and restored after.
-// ============================================================
-const ISO_PIXEL_SIZE = 2;          // CSS px per art pixel (bigger = chunkier)
-const ISO_PITCH = 54.74, ISO_BEARING = 45; // true isometric: 35.26° elevation
-const ISO_FOV = 12;                // degrees; MapLibre's default is ~37 (lower = flatter)
-const ISO_USE_OSM_COLOURS = false; // true: buildings tagged with a colour in OSM use it
-const ISO_PR = 1 / ISO_PIXEL_SIZE; // render pixel ratio (and pattern image pixel ratio)
-const toggleIsoBtn = document.getElementById('toggleIsoBtn');
-let isoOn = false, isoSnapshot = {}, isoSaved = null, isoVibeKey = '', isoPal = null, isoFrame = 0, isoAnimTimer = 0, isoFrames = {};
-
-// ---- palettes ----
-const ISO_BASE = {
-  ground: '#a8c878', residential: '#d6cfba', commercial: '#cfc5b0', industrial: '#b9b1a1', civic: '#ddd2a8', cemetery: '#8fb07a', pitch: '#6fbf4f',
-  grass: '#9fd06a', park: '#7fc05a', parkHi: '#a8e07a', wood: '#3f8a3f', woodHi: '#5fae4f', woodLo: '#2c662c',
-  farmA: '#c9d07a', farmB: '#a9c262', sand: '#ecd9a0', sandLo: '#d6bd7e', ice: '#eef6f8', rock: '#a8a49a', wetland: '#6fa080',
-  ocean: '#3f7fbf', oceanHi: '#7fb8e8', lake: '#4f9fc9', lakeHi: '#a8dcf0', river: '#4f8fbf', riverHi: '#8fc4e8',
-  canal: '#5a7a5e', canalLo: '#465e48', ditch: '#7a7a52', pool: '#4fd9e8', foam: '#e2f2f7',
-  road: '#7f7d78', roadMajor: '#6f6d68', street: '#9a9890', edge: '#cfc8b6', marking: '#f2e6a0', path: '#d9c49a', rail: '#5a4a3a',
-  sky: '#bfe0f0',
-  bLow: ['#d8c8b0', '#c9a888', '#a85a42', '#e6dccb', '#b9a48a'], bMid: ['#cfc6b6', '#b8ad9c', '#e0d8c8'], bTall: ['#8fa8b8', '#b0c0c8', '#6f8898'],
-};
-const ISO_REGIONS = {
-  temperate: {},
-  nordic: { ground: '#9ab87a', grass: '#93bd6e', wood: '#2f6f45', woodHi: '#4a8f5c', woodLo: '#22553a', ocean: '#2f6a9a', lake: '#3f86b0',
-    bLow: ['#a8322a', '#e8c24a', '#e8e4da', '#3e6f8f', '#c9673a', '#2f2f2f'], bMid: ['#d9cfc0', '#b8b0a4', '#e8e0d0'] },
-  mediterranean: { ground: '#c9c08a', grass: '#b5c47a', wood: '#5f8a45', woodHi: '#7fa85a', woodLo: '#4a6e36', ocean: '#2f86c9', oceanHi: '#7fc8f0',
-    bLow: ['#f2ead8', '#e8c89a', '#d98a5a', '#f5f0e6', '#e0b080'], bMid: ['#ece2cc', '#d9c4a0', '#f5efe2'] },
-  desert: { ground: '#e0c99a', residential: '#e6d4ac', grass: '#b8c27a', park: '#8fb85a', wood: '#6f8a4a', sand: '#ecd59a',
-    bLow: ['#d9c09a', '#c9a87a', '#e6d5b8', '#b8956a', '#f0e2c4'], bMid: ['#e0cfae', '#cbb28a', '#ece0c8'] },
-  tropical: { ground: '#8fcf6a', grass: '#8fd66a', park: '#5fbf4f', wood: '#2f8a3a', woodHi: '#4fae4a', woodLo: '#1f6a2c', ocean: '#2a9ac9', oceanHi: '#8fe0f0', lake: '#3fb0c0',
-    bLow: ['#f2efe6', '#e8c8a0', '#9fd0c0', '#f2a08a', '#f0d06b', '#c9e0f0'], bMid: ['#ece6da', '#d9e6e0', '#f0dcc0'] },
-  eastasia: { ground: '#a8c080', residential: '#d4d0c6', bLow: ['#e0dcd4', '#c9c4bc', '#a8a49c', '#d9c8b0', '#bfc4c8'], bMid: ['#d6d2ca', '#b9b6b0', '#e6e2da'] },
-};
-function isoRegion(lng, lat) {
-  const a = Math.abs(lat);
-  if (a > 55) return 'nordic';
-  if ((lat > 15 && lat < 35 && lng > -17 && lng < 60) || (lat > 25 && lat < 37 && lng > -118 && lng < -100) || (lat > -32 && lat < -18 && lng > 118 && lng < 145)) return 'desert';
-  if (lat > 30 && lat < 46 && lng > -10 && lng < 40) return 'mediterranean';
-  if (lat > 20 && lat < 46 && lng > 100 && lng < 146) return 'eastasia';
-  if (a < 23.5) return 'tropical';
-  return 'temperate';
-}
-// [name, lat, lon, overrides] — building palettes are low-rise, mid-rise, towers; river = city river colour
-const ISO_CITY_VIBES = [
-  ['Paris', 48.857, 2.352, { bLow: ['#e8dcc0', '#ddd0b0', '#efe6cf', '#d6c7a3', '#c9b892'], bMid: ['#e4d8bc', '#d2c39f', '#ece2cc'], bTall: ['#8fa9b8', '#a9bcc6', '#6f8a9c'], river: '#6f8f7a', road: '#8a857c' }],
-  ['London', 51.507, -0.128, { bLow: ['#c9a66b', '#a5553c', '#efe9df', '#8d5a3c', '#b8885a'], bMid: ['#b9a68a', '#d8d2c4', '#7d6e5d'], bTall: ['#7f98a6', '#9fb3bd', '#5e7686', '#c4ccd0'], river: '#7a7458' }],
-  ['Amsterdam', 52.37, 4.90, { bLow: ['#7a3b2a', '#5a2e22', '#9a4a32', '#3e2a24', '#c9b79a', '#6e2f26'], bMid: ['#8a4a36', '#b8a68a', '#5a3a2e'], river: '#5e6e4e', canal: '#4e5e40', canalLo: '#3c4a32' }],
-  ['New York', 40.73, -73.99, { bLow: ['#7b4a36', '#9a5b40', '#b07a5a', '#6b5b52', '#a35b45'], bMid: ['#b9a58c', '#a35b45', '#d6cbb8', '#8a6a52'], bTall: ['#8aa0b0', '#b8c4cc', '#5d6f7d', '#c9b48a', '#9a9a96'], river: '#56707a', road: '#6a6864', marking: '#f2c84a' }],
-  ['Tokyo', 35.68, 139.76, { bLow: ['#e9e6df', '#cfccc5', '#b9b6ae', '#d9c7b0', '#e6dccb'], bMid: ['#c8c8c4', '#a9adb0', '#e0ddd6'], bTall: ['#9fb4c4', '#cfd8de', '#7d8f9c'], river: '#5f7f86', road: '#8f8f8c' }],
-  ['Kyoto', 35.01, 135.77, { bLow: ['#8a6a50', '#6a5040', '#d9cdb8', '#4a4a48', '#a88a6a'], bMid: ['#c9c0b0', '#9a8a78', '#e0d8c8'], river: '#5f8a80' }],
-  ['Seoul', 37.57, 126.98, { bLow: ['#e6e0d8', '#cfc9bf', '#b5b0a8', '#d9c4b0'], bTall: ['#9ab2c2', '#c6d2da', '#7a90a0'], river: '#5b8a96' }],
-  ['Beijing', 39.90, 116.40, { bLow: ['#c9b9a0', '#b8a588', '#9c4a3a', '#d9cdb8', '#8a8a86'], bTall: ['#9aaab2', '#c0cacf'], river: '#6b7d6a' }],
-  ['Shanghai', 31.23, 121.47, { bLow: ['#d6cdbf', '#bfb5a5', '#a89a88'], bTall: ['#9ab6c6', '#c8d6de', '#6f8f9f', '#d9c8a0'], river: '#6b7d6a' }],
-  ['Hong Kong', 22.32, 114.17, { bLow: ['#e6e2da', '#cfcac0', '#b9b4aa'], bMid: ['#d9d4ca', '#c0bab0', '#e8a888'], bTall: ['#8fa9b4', '#b4c4ca', '#d9dedd'], ocean: '#3d7a8f' }],
-  ['Singapore', 1.29, 103.85, { bLow: ['#f2efe8', '#e0e8e0', '#c9d9cf', '#f0d9b0', '#e8b8a0'], bTall: ['#9fc4c8', '#c4dcdc', '#6fa0a8'], river: '#4f8a86' }],
-  ['Bangkok', 13.75, 100.50, { bLow: ['#e8e2d6', '#d9b080', '#c9c0b0', '#e8c060'], bTall: ['#9fb8c4', '#c4d0d6'], river: '#8a7a50' }],
-  ['Hanoi', 21.03, 105.85, { bLow: ['#f2d06b', '#e8a0a0', '#a0c8e8', '#e8e8e0', '#c9e0a8'], river: '#8a7050' }],
-  ['Ho Chi Minh City', 10.78, 106.70, { bLow: ['#f2d06b', '#e8a0a0', '#a0c8e8', '#e8e8e0', '#f0b878'], bTall: ['#9ab8c4'], river: '#7a6e4a' }],
-  ['Mumbai', 19.07, 72.88, { bLow: ['#e6d5c0', '#d9b38c', '#c9c0b4', '#8fb3a0', '#e8a87a'], bTall: ['#9ab0c0', '#c4ced4'] }],
-  ['Jaipur', 26.91, 75.79, { bLow: ['#e89a7a', '#d9826a', '#f0b090', '#e6a080'], bMid: ['#e0957a', '#f0c0a0'] }],
-  ['Dubai', 25.20, 55.27, { bLow: ['#e8d6b4', '#dcc59c', '#f0e6d2'], bMid: ['#e6dcc6', '#d0c0a0'], bTall: ['#7fb0c8', '#a8cddb', '#5a8fa8', '#c8d8de', '#d9c89a'], ocean: '#3ea0b8' }],
-  ['Cairo', 30.04, 31.24, { bLow: ['#d9c09a', '#c9a87a', '#b8956a', '#e6d5b8', '#a88a6a'], river: '#4f7f7a' }],
-  ['Marrakech', 31.63, -7.99, { bLow: ['#c9573f', '#b84a35', '#d97a5a', '#e0a07a', '#a8402e'], bMid: ['#c45a40', '#d98a68'] }],
-  ['Istanbul', 41.01, 28.98, { bLow: ['#e8d8bc', '#d9a77a', '#c9c0b0', '#b97a5a', '#f0e8d8'], bTall: ['#9ab2c0'], ocean: '#3f7aa0' }],
-  ['Athens', 37.98, 23.73, { bLow: ['#f0ebe0', '#e6dfd2', '#d9d0c0', '#efe8dc'] }],
-  ['Santorini', 36.42, 25.43, { bLow: ['#f7f7f2', '#f0f0ea', '#e8eef2', '#2f6fb0', '#f7f7f2'], ocean: '#1f6fb8' }],
-  ['Rome', 41.90, 12.50, { bLow: ['#d98a4e', '#c46d3c', '#e0b06b', '#b5583a', '#e8c48d'], bMid: ['#d9955a', '#e6bc80', '#c47a48'], river: '#7f7a4f' }],
-  ['Venice', 45.44, 12.33, { bLow: ['#e0967a', '#e8b07c', '#d8705a', '#f2d7a8', '#c9a089'], river: '#4f7d6e', canal: '#4f7d6e', canalLo: '#3e6a5c', lake: '#4f8a80' }],
-  ['Florence', 43.77, 11.25, { bLow: ['#e8c890', '#d9a870', '#c98a5a', '#f0dcb0'] }],
-  ['Barcelona', 41.39, 2.17, { bLow: ['#d9b98c', '#cfa577', '#e8d5b5', '#b88a5e'], bMid: ['#e0c49c', '#cfae86'], bTall: ['#8fb0c0'] }],
-  ['Madrid', 40.42, -3.70, { bLow: ['#d6b48c', '#e6d2b4', '#b9875e', '#f0e6d4'] }],
-  ['Lisbon', 38.72, -9.14, { bLow: ['#f2d06b', '#f0a8a0', '#f5f0e6', '#8fb3d9', '#e8835f'], bMid: ['#f0e2c8', '#e8c0a0'], river: '#5a86a0' }],
-  ['Porto', 41.15, -8.61, { bLow: ['#e8835f', '#f2d06b', '#8fb3d9', '#f5f0e6', '#b85a40'], river: '#4f7a8a' }],
-  ['Berlin', 52.52, 13.405, { bLow: ['#d8d2c4', '#bfb6a5', '#a39b8c', '#e6e0d2', '#8f8576'], bTall: ['#9aaab4'], river: '#5e6f63' }],
-  ['Prague', 50.08, 14.44, { bLow: ['#efe2c0', '#e8c8a0', '#f2d48a', '#d9a07a', '#e8e2d6'], river: '#5f7d72' }],
-  ['Vienna', 48.21, 16.37, { bLow: ['#efe3c8', '#e8d8b0', '#f3ecdc', '#d8c39a'], river: '#5f7f80' }],
-  ['Copenhagen', 55.68, 12.57, { bLow: ['#e8b84a', '#d9603b', '#4f8a8b', '#e9dfc8', '#b9473a'], ocean: '#4e6f86' }],
-  ['Stockholm', 59.33, 18.07, { bLow: ['#e3a857', '#c9603e', '#e6d7b8', '#9e3b2f', '#f0c36a'] }],
-  ['Reykjavik', 64.15, -21.94, { bLow: ['#d94e3a', '#3e7cb1', '#f2c14e', '#e8e4da', '#5a9e6f'] }],
-  ['Edinburgh', 55.95, -3.19, { bLow: ['#8a8278', '#a39a8e', '#6e675f', '#b8ad9e'] }],
-  ['Dublin', 53.35, -6.26, { bLow: ['#9a4a36', '#b05a40', '#e8e0d0', '#7a3a2c'], river: '#5a6a58' }],
-  ['Moscow', 55.76, 37.62, { bLow: ['#e8d6b8', '#d9c39a', '#c25a4a', '#b8a88e'], bTall: ['#8fa3b6', '#c0c8d0'], river: '#5f7068' }],
-  ['San Francisco', 37.77, -122.42, { bLow: ['#f2c9b8', '#c9dce8', '#f0e2a8', '#d9c9e8', '#b8d9c4', '#f5f0e6'], bTall: ['#a9bac4', '#cfd6da'], ocean: '#4f7f99' }],
-  ['Los Angeles', 34.05, -118.24, { bLow: ['#f0e6d4', '#e8d0b0', '#d9b894', '#f5efe4', '#c9a888'], bTall: ['#9db4c4'] }],
-  ['Chicago', 41.88, -87.63, { bLow: ['#a85a42', '#c9b49a', '#8a5a44', '#d6d0c4'], bTall: ['#7f8f9a', '#a9b4bc', '#4f5f6a', '#c9b88a'], river: '#4f7f6f' }],
-  ['Toronto', 43.65, -79.38, { bLow: ['#b8735a', '#e0d8cc', '#c9a68a'], bTall: ['#7fa8b8', '#9fc0cc', '#5f7f8f'] }],
-  ['Vancouver', 49.28, -123.12, { bLow: ['#e0d8cc', '#c9b49a', '#a8b8b0'], bTall: ['#7fb0b8', '#a8ccd0', '#5f8f98'] }],
-  ['Mexico City', 19.43, -99.13, { bLow: ['#e85a8a', '#f2b84a', '#4fb0a0', '#e8e0d0', '#d97a4a', '#7a6ad9'] }],
-  ['Havana', 23.11, -82.37, { bLow: ['#7fc9d9', '#f2a0b4', '#f2d06b', '#a8d98a', '#e8e2d6'] }],
-  ['Rio de Janeiro', -22.91, -43.17, { bLow: ['#f0e8d8', '#e8c8a0', '#d9a87a', '#bfd9cf'], bTall: ['#9fbcc8'] }],
-  ['Buenos Aires', -34.60, -58.38, { bLow: ['#e8dcc8', '#d9c4a8', '#c9a888', '#b8b0a4'], river: '#8a7a5a' }],
-  ['Cape Town', -33.92, 18.42, { bLow: ['#e8e2d6', '#f2c96b', '#8fb8d9', '#e88a6b', '#b8d98a'] }],
-  ['Sydney', -33.87, 151.21, { bLow: ['#e8dcc8', '#c9785a', '#f0ebe2', '#d8c09a'], bTall: ['#9fbccc', '#c6d6de'], ocean: '#3a7fa6' }],
-  ['Melbourne', -37.81, 144.96, { bLow: ['#d8c8b0', '#b8735a', '#e8e0d0'], bTall: ['#8fa8b8', '#b8c8d0'], river: '#6a7a5a' }],
-];
-const ISO_CITY_RADIUS_KM = 30;
-function isoMix(a, b, t) {
-  const p = (h) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)), A = p(a), B = p(b);
-  return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join('');
-}
-// palette for the map centre: base → region → city (cities also get murkier rivers by default)
-function isoVibeAt(lng, lat) {
-  const region = isoRegion(lng, lat);
-  const pal = { ...ISO_BASE, ...ISO_REGIONS[region] };
-  let city = null, best = Infinity;
-  for (const c of ISO_CITY_VIBES) { const km = d3.geoDistance([lng, lat], [c[2], c[1]]) * 6371; if (km < ISO_CITY_RADIUS_KM && km < best) { best = km; city = c; } }
-  if (city) {
-    Object.assign(pal, city[3]);
-    if (!city[3].river) pal.river = isoMix(pal.river, '#7a6a4a', 0.35); // city rivers run murkier
-    if (!city[3].canal) { pal.canal = isoMix(pal.river, '#4a5a3a', 0.4); pal.canalLo = isoMix(pal.canal, '#2a3424', 0.3); }
-  }
-  pal.riverHi = isoMix(pal.river, '#ffffff', 0.35);
-  pal.oceanHi = pal.oceanHi || isoMix(pal.ocean, '#ffffff', 0.4);
-  return { key: city ? city[0] : region, label: city ? city[0] : region, pal };
-}
-
-// ---- pixel patterns (16x16 art pixels; seeded so they never change between redraws) ----
-const ISO_PAT = 16;
-function isoPattern(seed, paint) {
-  const c = document.createElement('canvas'); c.width = c.height = ISO_PAT;
-  const x = c.getContext('2d'), rnd = mulberry32(seed);
-  const px = (col, i, j) => { x.fillStyle = col; x.fillRect(((i % ISO_PAT) + ISO_PAT) % ISO_PAT, ((j % ISO_PAT) + ISO_PAT) % ISO_PAT, 1, 1); };
-  paint(x, px, rnd);
-  return x.getImageData(0, 0, ISO_PAT, ISO_PAT);
-}
-const isoFill = (x, col) => { x.fillStyle = col; x.fillRect(0, 0, ISO_PAT, ISO_PAT); };
-function isoBuildPatterns(P) {
-  // each entry: list of frames (ImageData). Animated ones cycle in isoAnimate().
-  const frames = (n, fn) => Array.from({ length: n }, (_, f) => fn(f));
-  const lighten = (c, t) => isoMix(c, '#ffffff', t);
-  // a soft gust: a lighter diagonal band that travels across the tile, frame by frame
-  const gust = (f, n, i, j) => { const b = Math.round(f * 16 / n); const d = (((i + j - b) % 16) + 16) % 16; return d < 3; };
-  const ocean = (f) => isoPattern(11, (x, px, r) => {
-    isoFill(x, P.ocean);
-    for (let k = 0; k < 6; k++) { const i = (r() * 16 | 0) + f, j = r() * 16 | 0; px(P.oceanHi, i, j); px(P.oceanHi, i + 1, j); if (k % 2) px(P.oceanHi, i + 2, j); }
-  });
-  const lake = (f) => isoPattern(21, (x, px, r) => {
-    isoFill(x, P.lake);
-    for (let k = 0; k < 6; k++) { const i = r() * 16 | 0, j = r() * 16 | 0, on = (k + f) % 4; if (on === 0) { px(P.lakeHi, i, j); px(P.lakeHi, i + 1, j); } else if (on === 1) px(P.lakeHi, i, j); }
-  });
-  const river = (f) => isoPattern(31, (x, px, r) => {
-    isoFill(x, P.river);
-    for (let k = 0; k < 5; k++) { const i = (r() * 16 | 0) + f, j = (r() * 16 | 0) + f; px(P.riverHi, i, j); px(P.riverHi, i + 1, j); }
-  });
-  const canal = (f) => isoPattern(41, (x, px, r) => {
-    isoFill(x, P.canal);
-    for (let k = 0; k < 7; k++) { const i = (r() * 16 | 0) + (f >> 1), j = r() * 16 | 0; px(P.canalLo, i, j); px(P.canalLo, i + 1, j); }
-    px(lighten(P.canal, 0.25), (r() * 16 | 0) + f, r() * 16 | 0);
-  });
-  const grass = (f, n) => isoPattern(111, (x, px, r) => {
-    isoFill(x, P.grass);
-    for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) if (gust(f, n, i, j)) px(lighten(P.grass, 0.14), i, j);
-    for (let k = 0; k < 7; k++) { const i = r() * 16 | 0, j = r() * 16 | 0, lean = gust(f, n, i, j) ? 1 : 0; px(lighten(P.grass, 0.3), i + lean, j - 1); px(isoMix(P.grass, P.wood, 0.35), i, j); }
-  });
-  const park = (f, n) => isoPattern(61, (x, px, r) => {
-    isoFill(x, P.park);
-    for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) if (gust(f, n, i, j)) px(lighten(P.park, 0.12), i, j);
-    for (let k = 0; k < 6; k++) { const i = r() * 16 | 0, j = r() * 16 | 0; px(P.parkHi, i + (gust(f, n, i, j) ? 1 : 0), j); }
-    const i = r() * 16 | 0, j = r() * 16 | 0, sway = gust(f, n, i, j) ? 1 : 0;
-    for (const [a, b] of [[0, 0], [1, 0], [0, 1], [1, 1]]) px(P.wood, i + a + (b === 0 ? sway : 0), j + b);
-    px(P.woodLo, i + 1, j + 2);
-  });
-  const farm = (f, n) => isoPattern(71, (x, px) => {
-    for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) { const base = (j >> 2) % 2 ? P.farmA : P.farmB; px(gust(f, n, i, j) ? lighten(base, 0.16) : base, i, j); } // wheat waves
-  });
-  const wood = (f, n) => isoPattern(51, (x, px, r) => {
-    isoFill(x, P.wood);
-    for (let k = 0; k < 4; k++) { const i = r() * 16 | 0, j = r() * 16 | 0, sway = gust(f, n, i, j) ? 1 : 0;
-      for (const [a, b] of [[0, -1], [-1, 0], [0, 0], [1, 0], [0, 1]]) px(P.woodHi, i + a + (b < 1 ? sway : 0), j + b);
-      px(P.woodLo, i + 1, j + 1); px(P.woodLo, i, j + 2); }
-  });
-  const N = 8; // frames in one gust cycle
-  return {
-    'iso-pat-ocean': frames(16, ocean),
-    'iso-pat-lake': frames(4, lake),
-    'iso-pat-river': frames(16, river),
-    'iso-pat-canal': frames(16, canal),
-    'iso-pat-grass': frames(N, f => grass(f, N)),
-    'iso-pat-park': frames(N, f => park(f, N)),
-    'iso-pat-farm': frames(N, f => farm(f, N)),
-    'iso-pat-wood': frames(N, f => wood(f, N)),
-    'iso-pat-sand': [isoPattern(81, (x, px, r) => { isoFill(x, P.sand); for (let k = 0; k < 8; k++) px(P.sandLo, r() * 16 | 0, r() * 16 | 0); })],
-    'iso-pat-wetland': [isoPattern(91, (x, px, r) => { isoFill(x, P.wetland); for (let k = 0; k < 5; k++) { const i = r() * 16 | 0, j = r() * 16 | 0; px(P.lake, i, j); px(P.lake, i + 1, j); px(P.woodHi, i + 3, j - 1); px(P.woodHi, i + 3, j - 2); } })],
-    'iso-pat-dry': [isoPattern(101, (x, px, r) => { isoFill(x, P.sand); for (let k = 0; k < 6; k++) { const i = r() * 16 | 0, j = r() * 16 | 0; px(P.lake, i, j); px(P.sandLo, i + 1, j + 1); } })],
-  };
-}
-// how many animation ticks (ISO_TICK_MS each) every pattern holds a frame: water flows, grass breathes
-const ISO_TICK_MS = 160;
-const ISO_ANIM_TICKS = { 'iso-pat-ocean': 3, 'iso-pat-lake': 4, 'iso-pat-river': 2, 'iso-pat-canal': 5, 'iso-pat-grass': 2, 'iso-pat-park': 2, 'iso-pat-farm': 2, 'iso-pat-wood': 3 };
-// rooftop glints: 4 sparkle images, each twinkling at its own moment; every tall building uses one
-const ISO_GLINT_SHAPES = [[], [[0, 0]], [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]], [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1], [-2, 0], [2, 0], [0, -2], [0, 2]]];
-const ISO_GLINT_SEQ = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // one twinkle per cycle
-const isoGlintImages = ISO_GLINT_SHAPES.map(shape => {
-  const c = document.createElement('canvas'); c.width = c.height = 5; const x = c.getContext('2d');
-  shape.forEach(([a, b], k) => { x.fillStyle = k === 0 ? '#ffffff' : 'rgba(255,250,215,0.85)'; x.fillRect(2 + a, 2 + b, 1, 1); });
-  return x.getImageData(0, 0, 5, 5);
-});
-let isoTick = 0;
-function isoAnimate() {
-  const map = terrainMapInstance;
-  if (!isoOn || document.hidden || !map) return;
-  isoTick++;
-  for (const [name, every] of Object.entries(ISO_ANIM_TICKS)) {
-    const f = isoFrames[name];
-    if (f && f.length > 1 && isoTick % every === 0 && map.hasImage(name)) map.updateImage(name, f[(isoTick / every | 0) % f.length]);
-  }
-  for (let g = 0; g < 4; g++) { const name = 'iso-glint-' + g; if (map.hasImage(name)) map.updateImage(name, isoGlintImages[ISO_GLINT_SEQ[(isoTick + g * 6) % ISO_GLINT_SEQ.length]]); }
-}
-// glints sit on the roof: lift each one up the screen by its building's height. icon-offset can't be
-// computed per feature, so heights are bucketed (10 m steps) and the lift interpolated over zoom
-function isoGlintOffset(lat) {
-  const h = ['coalesce', ['get', 'render_height'], ['get', 'height'], 6];
-  const k = (z) => Math.sin(ISO_PITCH * Math.PI / 180) * 512 * Math.pow(2, z) / (40075016 * Math.max(0.1, Math.cos(lat * Math.PI / 180)));
-  const at = (z) => { const st = ['step', h, ['literal', [0, -Math.round(35 * k(z))]]]; for (let b = 40; b <= 400; b += 10) st.push(b, ['literal', [0, -Math.round((b + 5) * k(z))]]); return st; };
-  return ['interpolate', ['exponential', 2], ['zoom'], 15, at(15), 20, at(20)];
-}
-
-// ---- layers ----
-const ISO_SRC = 'maptilerBuildings'; // MapTiler OpenMapTiles vector data (already used for the buildings layer)
-const isoW = (artPx) => { const a = artPx * ISO_PIXEL_SIZE; return ['interpolate', ['exponential', 2], ['zoom'], 12, a * 0.3, 15, a * 0.8, 17, a * 2, 19, a * 5]; };
-const notTunnel = ['!=', ['get', 'brunnel'], 'tunnel'];
-// width per class that also grows with zoom: MapLibre needs the zoom curve outermost,
-// so each zoom stop holds its own per-class match. pairs: [[labels, artPx], ...]
-const isoWByClass = (pairs, fallbackArtPx) => {
-  const stops = [[12, 0.3], [15, 0.8], [17, 2], [19, 5]], out = ['interpolate', ['exponential', 2], ['zoom']];
-  for (const [z, f] of stops) {
-    const m = ['match', ['get', 'class']];
-    for (const [labels, a] of pairs) m.push(labels, a * ISO_PIXEL_SIZE * f);
-    m.push(fallbackArtPx * ISO_PIXEL_SIZE * f);
-    out.push(z, m);
-  }
-  return out;
-};
-function isoBuildingColor(P) {
-  const h = ['coalesce', ['get', 'render_height'], ['get', 'height'], 6];
-  // per-building pick: mixes the feature id with its height so neighbours differ
-  const pick = (arr) => ['at', ['%', ['abs', ['round', ['+', ['to-number', ['id'], 0], ['*', h, 13.7]]]], arr.length], ['literal', arr]];
-  const byTier = ['case', ['>=', h, 60], pick(P.bTall), ['>=', h, 22], pick(P.bMid), pick(P.bLow)];
-  return ISO_USE_OSM_COLOURS ? ['to-color', ['get', 'colour'], byTier] : byTier;
-}
-// every iso layer with its paint as a function of the palette
-const ISO_LAYERS = [
-  { id: 'iso-ground', type: 'background', paint: P => ({ 'background-color': P.ground }) },
-  { id: 'iso-landuse', type: 'fill', 'source-layer': 'landuse', minzoom: 10, paint: P => ({ 'fill-color': ['match', ['get', 'class'],
-      ['residential', 'suburb', 'neighbourhood', 'quarter'], P.residential, ['commercial', 'retail'], P.commercial, ['industrial', 'railway', 'garages'], P.industrial,
-      ['school', 'university', 'college', 'kindergarten', 'hospital', 'library'], P.civic, 'cemetery', P.cemetery, ['pitch', 'stadium', 'playground'], P.pitch, P.ground] }) },
-  { id: 'iso-landcover', type: 'fill', 'source-layer': 'landcover', filter: ['match', ['get', 'class'], ['ice', 'rock'], true, false],
-    paint: P => ({ 'fill-color': ['match', ['get', 'class'], 'ice', P.ice, P.rock] }) },
-  { id: 'iso-landcover-pat', type: 'fill', 'source-layer': 'landcover',
-    filter: ['any', ['match', ['get', 'class'], ['wood', 'farmland', 'sand', 'wetland', 'grass'], true, false], ['match', ['get', 'subclass'], ['park', 'garden'], true, false]],
-    paint: () => ({ 'fill-pattern': ['match', ['get', 'subclass'], ['park', 'garden'], 'iso-pat-park',
-      ['match', ['get', 'class'], 'wood', 'iso-pat-wood', 'farmland', 'iso-pat-farm', 'sand', 'iso-pat-sand', 'grass', 'iso-pat-grass', 'iso-pat-wetland']] }) },
-  { id: 'iso-park', type: 'fill', 'source-layer': 'park', paint: () => ({ 'fill-pattern': 'iso-pat-park' }) },
-  { id: 'iso-water-ocean', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'class'], 'ocean'], paint: () => ({ 'fill-pattern': 'iso-pat-ocean' }) },
-  { id: 'iso-water-lake', type: 'fill', 'source-layer': 'water', filter: ['all', ['match', ['get', 'class'], ['lake', 'pond'], true, false], ['!=', ['get', 'intermittent'], 1]], paint: () => ({ 'fill-pattern': 'iso-pat-lake' }) },
-  { id: 'iso-water-river', type: 'fill', 'source-layer': 'water', filter: ['all', ['==', ['get', 'class'], 'river'], ['!=', ['get', 'intermittent'], 1]], paint: () => ({ 'fill-pattern': 'iso-pat-river' }) },
-  { id: 'iso-water-canal', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'class'], 'dock'], paint: () => ({ 'fill-pattern': 'iso-pat-canal' }) },
-  { id: 'iso-water-pool', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'class'], 'swimming_pool'], paint: P => ({ 'fill-color': P.pool }) },
-  { id: 'iso-water-dry', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'intermittent'], 1], paint: () => ({ 'fill-pattern': 'iso-pat-dry' }) },
-  { id: 'iso-water-shore', type: 'line', 'source-layer': 'water', minzoom: 12, filter: ['!=', ['get', 'class'], 'swimming_pool'], paint: P => ({ 'line-color': P.foam, 'line-width': ISO_PIXEL_SIZE, 'line-opacity': 0.85 }) },
-  { id: 'iso-waterway', type: 'line', 'source-layer': 'waterway', filter: notTunnel, layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: P => ({ 'line-color': ['match', ['get', 'class'], 'river', P.river, 'canal', P.canal, 'stream', P.lake, P.ditch],
-      'line-width': isoWByClass([['river', 4], ['canal', 3], ['stream', 1.5]], 1) }) },
-  { id: 'iso-road-edge', type: 'line', 'source-layer': 'transportation', minzoom: 11, filter: ['all', notTunnel, ['match', ['get', 'class'], ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'minor', 'service'], true, false]],
-    layout: { 'line-cap': 'butt', 'line-join': 'miter' },
-    paint: P => ({ 'line-color': P.edge, 'line-width': isoWByClass([[['motorway', 'trunk'], 6], [['primary', 'secondary'], 5], ['tertiary', 4]], 3) }) },
-  { id: 'iso-road', type: 'line', 'source-layer': 'transportation', minzoom: 11, filter: ['all', notTunnel, ['match', ['get', 'class'], ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'minor', 'service'], true, false]],
-    layout: { 'line-cap': 'butt', 'line-join': 'miter' },
-    paint: P => ({ 'line-color': ['match', ['get', 'class'], ['motorway', 'trunk'], P.roadMajor, ['minor', 'service'], P.street, P.road],
-      'line-width': isoWByClass([[['motorway', 'trunk'], 4], [['primary', 'secondary'], 3], ['tertiary', 2.5]], 1.5) }) },
-  { id: 'iso-road-mark', type: 'line', 'source-layer': 'transportation', minzoom: 15, filter: ['all', notTunnel, ['match', ['get', 'class'], ['motorway', 'trunk', 'primary', 'secondary'], true, false]],
-    paint: P => ({ 'line-color': P.marking, 'line-width': ISO_PIXEL_SIZE, 'line-dasharray': [2, 2] }) },
-  { id: 'iso-path', type: 'line', 'source-layer': 'transportation', minzoom: 14, filter: ['all', notTunnel, ['match', ['get', 'class'], ['path', 'track'], true, false]],
-    paint: P => ({ 'line-color': P.path, 'line-width': ISO_PIXEL_SIZE, 'line-dasharray': [1, 1] }) },
-  { id: 'iso-rail', type: 'line', 'source-layer': 'transportation', minzoom: 12, filter: ['all', notTunnel, ['match', ['get', 'class'], ['rail', 'transit'], true, false]],
-    paint: P => ({ 'line-color': P.rail, 'line-width': isoW(1.5), 'line-dasharray': [1, 1] }) },
-  { id: 'iso-buildings', type: 'fill-extrusion', 'source-layer': 'building', minzoom: 13, filter: ['!=', ['get', 'hide_3d'], true],
-    paint: P => ({ 'fill-extrusion-color': isoBuildingColor(P),
-      // heights snapped to ~one storey, so roofs line up in steps like pixel art
-      'fill-extrusion-height': ['*', ['ceil', ['/', ['coalesce', ['get', 'render_height'], ['get', 'height'], 6], 3.2]], 3.2],
-      'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0],
-      'fill-extrusion-vertical-gradient': true, 'fill-extrusion-opacity': 1 }) },
-  { id: 'iso-glints', type: 'symbol', 'source-layer': 'building', minzoom: 15,
-    filter: ['all', ['!=', ['get', 'hide_3d'], true], ['>=', ['coalesce', ['get', 'render_height'], ['get', 'height'], 0], 30]],
-    layout: { 'symbol-placement': 'point', 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-pitch-alignment': 'viewport',
-      'icon-image': ['concat', 'iso-glint-', ['to-string', ['%', ['abs', ['round', ['to-number', ['id'], 0]]], 4]]] },
-    paint: () => ({ 'icon-opacity': 0.95 }) },
-];
-function isoEnsureLayers(P) {
-  const map = terrainMapInstance;
-  const pats = isoBuildPatterns(P); isoFrames = pats;
-  for (const [name, frames] of Object.entries(pats)) { if (map.hasImage(name)) map.updateImage(name, frames[0]); else map.addImage(name, frames[0], { pixelRatio: ISO_PR }); }
-  for (let g = 0; g < 4; g++) if (!map.hasImage('iso-glint-' + g)) map.addImage('iso-glint-' + g, isoGlintImages[0], { pixelRatio: ISO_PR });
-  if (map.getLayer('iso-ground')) return;
-  const before = map.getStyle().layers.find(l => l.id.startsWith('lights-'));
-  for (const L of ISO_LAYERS) {
-    const def = { id: L.id, type: L.type, layout: { visibility: 'none', ...(L.layout || {}) }, paint: L.paint(P) };
-    if (L.type !== 'background') { def.source = ISO_SRC; def['source-layer'] = L['source-layer']; }
-    if (L.filter) def.filter = L.filter;
-    if (L.minzoom) def.minzoom = L.minzoom;
-    try { map.addLayer(def, before && before.id); } catch (err) { console.warn('gallery: iso layer skipped', L.id, err.message); }
-  }
-}
-function isoApplyPalette(P) {
-  const map = terrainMapInstance;
-  const pats = isoBuildPatterns(P); isoFrames = pats;
-  for (const [name, frames] of Object.entries(pats)) if (map.hasImage(name)) map.updateImage(name, frames[0]);
-  if (map.getLayer('iso-glints')) { try { map.setLayoutProperty('iso-glints', 'icon-offset', isoGlintOffset(map.getCenter().lat)); } catch (err) { console.warn('gallery: glint offset', err.message); } }
-  for (const L of ISO_LAYERS) {
-    if (!map.getLayer(L.id)) continue;
-    for (const [k, v] of Object.entries(L.paint(P))) { try { map.setPaintProperty(L.id, k, v); } catch (err) { console.warn('gallery: iso paint', L.id, k, err.message); } }
-  }
-  try { map.setSky({ 'sky-color': P.sky, 'horizon-color': P.sky, 'fog-color': P.sky, 'sky-horizon-blend': 0.5, 'horizon-fog-blend': 0.5, 'fog-ground-blend': 0.9 }); } catch (e) {}
-}
-// pick the vibe for the map centre; re-styles only when it changes
-function isoUpdateVibe() {
-  if (!isoOn || !terrainMapInstance) return;
-  const c = terrainMapInstance.getCenter(), v = isoVibeAt(c.lng, c.lat);
-  if (v.key === isoVibeKey) return;
-  isoVibeKey = v.key; isoPal = v.pal;
-  isoApplyPalette(v.pal);
-  toggleIsoBtn.textContent = 'isometric · ' + v.label;
-}
-function isoSetFov(deg) { // MapLibre has no public field-of-view setting; use the internal one if it exists
-  const t = terrainMapInstance && terrainMapInstance.transform;
-  try {
-    if (t && typeof t.setFov === 'function') t.setFov(deg);
-    else if (t && 'fov' in t) t.fov = deg;
-    terrainMapInstance.triggerRepaint();
-  } catch (e) { console.warn('gallery: field of view not adjustable here', e); }
-}
-function isoGetFov() { const t = terrainMapInstance && terrainMapInstance.transform; try { return t && typeof t.fov === 'number' ? t.fov : null; } catch (e) { return null; } }
-
-function setIso(on) {
-  const map = terrainMapInstance;
-  if (on === isoOn) return;
-  if (on && (!map || !map.isStyleLoaded())) { if (map) map.once('idle', () => setIso(true)); return; }
-  isoOn = on;
-  toggleIsoBtn.classList.toggle('active', on); toggleIsoBtn.setAttribute('aria-pressed', String(on));
-  if (on) {
-    const c = map.getCenter(), v = isoVibeAt(c.lng, c.lat);
-    isoVibeKey = v.key; isoPal = v.pal;
-    isoEnsureLayers(v.pal);
-    isoApplyPalette(v.pal);
-    toggleIsoBtn.textContent = 'isometric · ' + v.label;
-    // hide every normal layer (remembering its visibility), show the iso ones
-    isoSnapshot = {};
-    for (const l of map.getStyle().layers) {
-      if (l.id.startsWith('lights-')) continue;
-      if (l.id.startsWith('iso-')) { map.setLayoutProperty(l.id, 'visibility', 'visible'); continue; }
-      isoSnapshot[l.id] = map.getLayoutProperty(l.id, 'visibility') || 'visible';
-      map.setLayoutProperty(l.id, 'visibility', 'none');
-    }
-    isoSaved = { pitch: map.getPitch(), bearing: map.getBearing(), pixelRatio: map.getPixelRatio ? map.getPixelRatio() : null, fov: isoGetFov(), light: map.getLight ? map.getLight() : null, sky: map.getSky ? map.getSky() : null };
-    if (map.setPixelRatio) map.setPixelRatio(ISO_PR);
-    document.getElementById('terrainMap').classList.add('isoPixel');
-    try { map.setLight({ anchor: 'viewport', position: [1.5, 315, 45], color: '#ffffff', intensity: 0.5 }); } catch (e) {}
-    isoSetFov(ISO_FOV);
-    map.dragRotate.disable(); map.touchZoomRotate.disableRotation(); map.touchPitch.disable();
-    map.easeTo({ pitch: ISO_PITCH, bearing: ISO_BEARING, duration: 700 });
-    clearInterval(isoAnimTimer); isoAnimTimer = setInterval(isoAnimate, ISO_TICK_MS);
-  } else {
-    clearInterval(isoAnimTimer);
-    toggleIsoBtn.textContent = 'isometric';
-    if (map) {
-      for (const l of map.getStyle().layers) if (l.id.startsWith('iso-')) map.setLayoutProperty(l.id, 'visibility', 'none');
-      for (const [id, vis] of Object.entries(isoSnapshot)) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
-      isoSnapshot = {};
-      if (isoSaved) {
-        if (map.setPixelRatio) map.setPixelRatio(isoSaved.pixelRatio || window.devicePixelRatio || 1);
-        if (isoSaved.fov) isoSetFov(isoSaved.fov);
-        try { if (isoSaved.light) map.setLight(isoSaved.light); } catch (e) {}
-        try { if (isoSaved.sky) map.setSky(isoSaved.sky); } catch (e) {}
-        map.easeTo({ pitch: isoSaved.pitch, bearing: isoSaved.bearing, duration: 600 });
-      }
-      document.getElementById('terrainMap').classList.remove('isoPixel');
-      map.dragRotate.enable(); map.touchZoomRotate.enableRotation(); map.touchPitch.enable();
-      // let the normal toggles re-assert themselves
-      satVisShown = null; streetsShown = null; satFadeKey = '';
-      applyLayerToggles(); applyBuildingPalette();
-    }
-    isoVibeKey = '';
-  }
-}
-toggleIsoBtn.onclick = () => setIso(!isoOn);
 
 // ============================================================
 // OPEN AERIAL IMAGERY (satellite mode): free government aerial photos,
@@ -2138,9 +1743,6 @@ const AERIAL_SOURCES = [
   { id: 'aerial-es', name: 'Spain — IGN PNOA (25 cm)', bounds: [-9.40, 35.90, 3.40, 43.80], maxzoom: 20,
     tiles: ['https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&VERSION=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}'],
     attribution: '© <a href="https://www.scne.es/" target="_blank">PNOA / IGN España</a> (CC BY 4.0)' },
-  { id: 'aerial-jp', name: 'Japan — GSI seamless photo', bounds: [122.9, 24.0, 146.0, 45.6], maxzoom: 18,
-    tiles: ['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],
-    attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">GSI Japan</a>' },
 ];
 function addAerialLayers() {
   const map = terrainMapInstance;
@@ -2166,7 +1768,7 @@ function aerialAt(lng, lat) {
 }
 
 // ============================================================
-// STREETS BASE MAP + SATELLITE → STREETS AUTO-FADE
+// STREETS BASE MAP + SATELLITE → BASE MAP AUTO-FADE
 // Three base maps: satellite, streets (MapTiler Streets v4), or classic
 // (both off). Satellite and streets are exclusive: turning one on turns the
 // other off.
@@ -2186,7 +1788,7 @@ function aerialAt(lng, lat) {
 // parent tile. A real new level keeps a similar amount of detail; an
 // enlarged copy has far less. The last level with real detail is the
 // "native" depth N for that area (cached per area). The satellite then
-// cross-fades into streets over one zoom level just past N, and is switched
+// cross-fades into the base relief map with 3D buildings over one zoom level just past N, and is switched
 // off entirely beyond that (no point downloading blurry tiles).
 // Probe results are logged to the console ("gallery: satellite depth …") so
 // the threshold can be tuned. If probing can't run, a fixed fallback is used.
@@ -2307,17 +1909,32 @@ function requestSatProbe() {
 // Applies the base-map state: satellite opacity curve, satellite on/off, streets on/off.
 // Cheap to call on every zoom event (only touches MapLibre when something changes).
 let satFadeKey = '', satVisShown = null;
+// Satellite → base map: past the imagery's real depth the satellite fades into
+// the base relief map with 3D buildings (not streets). If buildings were off,
+// they're switched on for the fade (and the buildings toggle lights up to
+// show it); zooming back out switches them off again, unless the user has
+// touched the toggle meanwhile.
+let satBaseShown = false, satFadedOut = false, buildingsAutoOn = false;
+const classicBaseVisible = () => !usesMaptilerSurface() || (maptilerSatelliteOn && satBaseShown);
+function setBuildings(on) {
+  buildingsOn = on;
+  toggleBuildingsBtn.classList.toggle('active', on);
+  toggleBuildingsBtn.setAttribute('aria-pressed', String(on));
+  if (terrainMapInstance && terrainMapInstance.getLayer('maptiler-3d-buildings')) terrainMapInstance.setLayoutProperty('maptiler-3d-buildings', 'visibility', on ? 'visible' : 'none');
+}
 function updateSatAuto() {
   const map = terrainMapInstance;
-  if (!map || !map.getLayer('maptiler-satellite') || isoOn) return;
+  if (!map || !map.getLayer('maptiler-satellite')) return;
   const z = map.getZoom();
   // map zoom where the native satellite tiles start being enlarged (256px tiles sit one level above map zoom)
   const start = satNativeHere - 0.5, end = satNativeHere + 0.5;
-  let satVisible = false, streetsVisible = false;
+  let satVisible = false, streetsVisible = false, baseVisible = false, fadedOut = false, inFade = false;
   if (streetsOn) { streetsVisible = true; }
   else if (maptilerSatelliteOn) {
     satVisible = z < end + 0.1;
-    streetsVisible = z > start - 0.3; // underneath, ready before the fade begins
+    baseVisible = z > start - 0.3; // base relief underneath, ready before the fade begins
+    inFade = z >= start;
+    fadedOut = z >= (start + end) / 2;
     const key = start + '|' + end;
     if (key !== satFadeKey) {
       satFadeKey = key;
@@ -2328,6 +1945,18 @@ function updateSatAuto() {
   }
   if (streetsVisible) ensureStreets();
   setStreetsVisible(streetsVisible);
+  if (baseVisible !== satBaseShown) {
+    satBaseShown = baseVisible;
+    for (const id of ['color-relief', 'classic-hillshade']) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', classicBaseVisible() ? 'visible' : 'none');
+  }
+  if (fadedOut !== satFadedOut) {
+    satFadedOut = fadedOut;
+    if (map.getLayer('maptiler-hillshade')) map.setLayoutProperty('maptiler-hillshade', 'visibility', usesMaptilerSurface() && !satFadedOut ? 'visible' : 'none');
+    applyBuildingPalette();
+  }
+  // buildings on for the fade; back off afterwards if we were the ones who turned them on
+  if (inFade && !buildingsOn) { buildingsAutoOn = true; setBuildings(true); }
+  else if (!inFade && buildingsAutoOn) { buildingsAutoOn = false; setBuildings(false); }
   if (satVisible !== satVisShown) {
     satVisShown = satVisible;
     map.setLayoutProperty('maptiler-satellite', 'visibility', satVisible ? 'visible' : 'none');
@@ -3393,7 +3022,7 @@ function applyBuildingPalette() {
   // The extrusion renderer supplies directional shading and its own vertical
   // gradient. These palettes set the material family; the height stops give
   // the upper faces a distinct highlight tone without adding another layer.
-  const satellite = usesMaptilerSurface(); // satellite and streets share the light building palette
+  const satellite = usesMaptilerSurface() && !(maptilerSatelliteOn && satFadedOut); // satellite/streets: light palette; once satellite has faded to the base map, the base palette
   const night = nightModeOn;
   let color, opacity;
   if (satellite) {
@@ -3914,9 +3543,8 @@ function initTerrainMap() {
     }
   });
   terrainMapInstance.on('zoom', autoExitCheck);
-  terrainMapInstance.on('zoom', updateSatAuto);    // satellite → streets fade as you zoom past the imagery's real depth
+  terrainMapInstance.on('zoom', updateSatAuto);    // satellite → base map fade as you zoom past the imagery's real depth
   terrainMapInstance.on('moveend', requestSatProbe); // re-check the imagery depth for each new area
-  terrainMapInstance.on('moveend', isoUpdateVibe);   // isometric mode: switch city/regional vibe
   terrainMapInstance.on('click', onTerrainMapClick);
   // Diagnostic: MapLibre has its own internal ResizeObserver watching the
   // container and auto-resizing when it detects a change — the console
@@ -4219,7 +3847,6 @@ function autoExitCheck() {
 
 function exit3D() {
   if (!in3D) return;
-  if (isoOn) setIso(false); // isometric is a 3D-only view: restore the normal map before leaving
   in3D = false;
   syncFlatMapToMapLibre();
   document.getElementById('terrainMap').classList.remove('active');
@@ -4770,7 +4397,7 @@ function layoutGalleryBelow() {
   const mainRect = canvas.parentElement.getBoundingClientRect();
   const inlay = document.getElementById('mapInlay').getBoundingClientRect();
   galleryBelowEl.style.top = (inlay.bottom - mainRect.top + 16) + 'px';
-  galleryBelowEl.style.bottom = '84px'; // clear of the route / new-light buttons
+  galleryBelowEl.style.bottom = '116px'; // clear of the route / new-light / test-spots buttons
   galleryBelowEl.style.width = Math.min(inlay.width, mainRect.width - 24) + 'px';
   if (tickerStarted) trimTicker();
 }
@@ -5119,6 +4746,54 @@ function tick() {
   setInterval(poll, POLL_MS);
   tick();
 })();
+
+// ============================================================
+// TEST SPOTS (dev aid): one tap flies to places where the open aerial photos
+// should be sharpest, straight into 3D at full zoom. From the flat map it
+// undocks/enters 3D first; already in 3D it just flies there.
+// ============================================================
+const TEST_SPOTS = [
+  ['Switzerland', [['Zurich old town', 47.3717, 8.5423], ['Lucerne Chapel Bridge', 47.0516, 8.3075], ['Zermatt', 46.0207, 7.7491]]],
+  ['Netherlands', [['Amsterdam canal ring', 52.3667, 4.8897], ['Rotterdam Markthal', 51.9201, 4.4888], ['Kinderdijk windmills', 51.8846, 4.6385]]],
+  ['France', [['Paris — Notre-Dame', 48.8530, 2.3499], ['Vieux Lyon', 45.7622, 4.8270], ['Mont-Saint-Michel', 48.6361, -1.5115], ['Marseille old port', 43.2951, 5.3740]]],
+  ['Austria', [['Vienna — St. Stephen’s', 48.2085, 16.3731], ['Hallstatt', 47.5622, 13.6493], ['Salzburg old town', 47.7981, 13.0465]]],
+  ['Spain', [['Sagrada Família', 41.4036, 2.1744], ['Barcelona Eixample', 41.3925, 2.1650], ['Seville cathedral', 37.3858, -5.9931], ['Madrid Plaza Mayor', 40.4155, -3.7074]]],
+];
+const TEST_SPOT_ZOOM = 18.5;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+async function goToSpot(lat, lon) {
+  closeCard();
+  document.getElementById('spotsPanel').classList.remove('open');
+  if (!in3D) {
+    if (docked) { undockWithFade(lon, lat); await sleep(1300); }
+    await enter3D(lon, lat);
+    const map = terrainMapInstance;
+    if (!map.isStyleLoaded()) await new Promise(r => map.once('load', r));
+    await sleep(300);
+    enteredAt = performance.now() + 2500; // grace period covers the whole flight, so the auto-exit check can't fire mid-way
+    map.easeTo({ center: [lon, lat], zoom: TEST_SPOT_ZOOM, pitch: 50, duration: 2500 });
+  } else {
+    enteredAt = performance.now() + 3500; // flyTo arcs out mid-flight: keep the auto-exit check quiet until it lands
+    terrainMapInstance.flyTo({ center: [lon, lat], zoom: TEST_SPOT_ZOOM, pitch: 50, bearing: terrainMapInstance.getBearing(), duration: 3500, essential: true });
+  }
+}
+function mountSpotsBtn() {
+  if (document.getElementById('spotsBtn')) return;
+  const main = document.querySelector('main');
+  const btn = document.createElement('button'); btn.id = 'spotsBtn'; btn.textContent = 'test spots ▸';
+  const panel = document.createElement('div'); panel.id = 'spotsPanel';
+  for (const [country, spots] of TEST_SPOTS) {
+    const h = document.createElement('div'); h.className = 'spotCountry'; h.textContent = country; panel.appendChild(h);
+    for (const [name, lat, lon] of spots) {
+      const b = document.createElement('button'); b.className = 'spot'; b.textContent = name;
+      b.addEventListener('click', (e) => { e.stopPropagation(); goToSpot(lat, lon); });
+      panel.appendChild(b);
+    }
+  }
+  btn.addEventListener('click', (e) => { e.stopPropagation(); panel.classList.toggle('open'); wake(); });
+  main.append(btn, panel);
+}
+mountSpotsBtn();
 </script>
 </body>
 </html>

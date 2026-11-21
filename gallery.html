@@ -199,8 +199,6 @@
       radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
-  /* 3D lights overlay: above the 3D map so buildings/terrain can't cover the lights, below the buttons and card */
-  #lights3D { position: absolute; inset: 0; z-index: 2; pointer-events: none; cursor: default; }
   /* detail card for a tapped light: sits at the bottom of the map area so it
      never covers the docked inlay, and works the same docked or undocked */
   #eventCard {
@@ -235,6 +233,8 @@
   .ecMark.pending { background: transparent; border: 1px dashed var(--lightgreen); opacity: 0.75; }
   #ecMid, #ecMeta > div { font-size: 8.5px; color: var(--cream-dim); line-height: 1.4; }
   #ecMid:empty { display: none; }
+  #ecMid { white-space: pre-line; }
+  #ecDestList .dtime { font-size: 8.5px; color: var(--cream-dim); line-height: 1.4; padding-left: 11px; } /* received time under each destination */
   /* grouped card (tap on a sender's circle when it went to several places):
      the photo + a strip of that sender's other photos, and one row per destination */
   #ecMedia { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; pointer-events: none; }
@@ -257,6 +257,26 @@
   /* sits directly above the route button, same look */
   #mockRateBtn { bottom: 44px; }
   #solarOverlay { position: absolute; inset: 0; z-index: 3; pointer-events: none; cursor: default; }
+  /* ticker under the docked globe: fills the space down to the buttons, newest
+     row on top, fading out toward the bottom. Delicate ember type. */
+  #galleryBelow {
+    position: absolute; left: 50%; transform: translateX(-50%); z-index: 3; pointer-events: none; overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 70%, transparent 100%);
+            mask-image: linear-gradient(to bottom, #000 0, #000 70%, transparent 100%);
+    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; font-size: 10px; font-weight: 300;
+    letter-spacing: 0.06em; color: var(--ember);
+  }
+  #galleryBelow.hidden { display: none; }
+  #tickerList { display: flex; flex-direction: column; row-gap: 9px; }
+  /* a new row grows in at the top, easing the rest down one place */
+  .tickerRow.enter { animation: tickerIn 0.45s ease-out; overflow: hidden; }
+  @keyframes tickerIn { from { max-height: 0; opacity: 0; margin-top: -9px; } to { max-height: 16px; opacity: 0.85; margin-top: 0; } }
+  .tickerRow { display: flex; align-items: center; gap: 8px; min-width: 0; opacity: 0.85; }
+  .tickerRow .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* marks echo the legend's shapes, drawn as fine ember outlines to match the type */
+  .tmark { flex: 0 0 auto; width: 6px; height: 6px; box-sizing: border-box; border: 1px solid var(--ember); }
+  .tmark.flight { border-radius: 50%; border-style: dashed; }
+  .tmark.recv { border-radius: 1px; background: rgba(232,130,60,0.35); }
   #map { transition: opacity 0.6s ease; }
   #map.faded { opacity: 0; pointer-events: none; }
   #backBtn {
@@ -287,8 +307,8 @@
     <div id="poleFade"></div>
     <canvas id="map"></canvas>
     <canvas id="solarOverlay"></canvas>
+    <div id="galleryBelow" class="hidden"><div id="tickerList"></div></div>
     <div id="terrainMap"></div>
-    <canvas id="lights3D"></canvas>
     <div id="layerToggles">
       <button id="toggleLabelsBtn" class="layerToggle">labels</button>
       <button id="toggleLinesBtn" class="layerToggle">terrain lines</button>
@@ -776,6 +796,7 @@ function resize() {
   } else {
     draw();
   }
+  layoutGalleryBelow();
 }
 
 async function loadGeo(url, isTopo, objectName) {
@@ -1014,9 +1035,10 @@ function draw() {
   }
 
   drawSolarOverlay();
+  updateGalleryBelow();
 
   drawEvents(lw, pr);
-  if (in3D) maybeRedrawLights3D();
+  if (in3D) syncLights3D();
   updateLocationReadout();
 }
 
@@ -1032,6 +1054,7 @@ function draw() {
 //   imageUrl? (https or data:image)
 // ============================================================
 const LIGHT_GREEN = '#b5fb00', LIGHT_GREEN_RGB = '181,251,0';
+const SELECTED_ROUTE_COLOR = 'rgba(255,221,0,0.95)'; // the tapped light's route (2D + 3D): warm yellow
 const toMs = (v) => (v == null ? null : (typeof v === 'number' ? v : (Date.parse(v) || null)));
 const evKey = (ev) => ev.id != null ? String(ev.id) : `${ev.sentAt || ev.createdAt || ''}|${ev.sentGeo && ev.sentGeo.lat}|${ev.sentGeo && ev.sentGeo.lon}`;
 const evSentMs = (ev) => toMs(ev.sentAt ?? ev.createdAt ?? ev.timestamp);
@@ -1267,7 +1290,7 @@ function drawEvents(lw, pr) {
     if (!(from && to)) continue;
     const sel = !dk && isSelectedLight(ev);
     ctx.beginPath(); path({ type: 'LineString', coordinates: [from, to] });
-    ctx.strokeStyle = sel ? 'rgba(143,212,0,0.9)' : rgba(routeStyle === 'plain' ? (dk ? 0.5 : 0.6) : (dk ? 0.20 : 0.26));
+    ctx.strokeStyle = sel ? SELECTED_ROUTE_COLOR : rgba(routeStyle === 'plain' ? (dk ? 0.5 : 0.6) : (dk ? 0.20 : 0.26));
     ctx.lineWidth = lw(sel ? 1.7 : (routeStyle === 'plain' ? (dk ? 0.6 : 0.9) : (dk ? 0.5 : 0.7))); ctx.stroke();
     const fn = ROUTE_STYLES[routeStyle];
     if (!fn) continue;
@@ -3229,6 +3252,7 @@ function initTerrainMap() {
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
+    addLightLayers3D();
     applyLayerToggles();
     if (DEBUG_DISABLE_BATHYMETRY) {
       for (const id of ['bathymetry-contours', 'bathymetry-hillshade', 'bathymetry-color-relief']) {
@@ -3242,7 +3266,6 @@ function initTerrainMap() {
   });
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('click', onTerrainMapClick);
-  terrainMapInstance.on('render', drawLights3D); // lights overlay redraws in step with every MapLibre frame
   // Diagnostic: MapLibre has its own internal ResizeObserver watching the
   // container and auto-resizing when it detects a change — the console
   // showed a "ResizeObserver loop completed with undelivered
@@ -3551,7 +3574,6 @@ function exit3D() {
   backBtn.classList.remove('visible');
   document.getElementById('layerToggles').classList.remove('visible');
   updateZoomElevReadout(); // resets to "–" now that in3D is false
-  drawLights3D(); // clears the 3D lights overlay now that in3D is false
   draw();
 }
 const backBtn = document.getElementById('backBtn');
@@ -3559,8 +3581,8 @@ backBtn.onclick = exit3D;
 
 // ============================================================
 // LIGHTS IN 3D: the same sent circles / received squares / routes as the
-// flat map, drawn on an overlay canvas above the 3D map (see below for why)
-// and positioned from the live 3D camera every frame. Differences from the flat map, on purpose:
+// flat map, drawn as native MapLibre layers so they sit on the terrain and
+// move with the camera for free. Differences from the flat map, on purpose:
 //   - routes are straight in Mercator (a plain 2-point line), not great
 //     circles, and they don't animate — just a steady line with a soft glow
 //   - markers lie flat on the terrain (pitch/rotation aligned to the map)
@@ -3614,151 +3636,122 @@ function lightLonLat(ev, part) {
 // same, as a {lat, lon} object for helpers that take geo objects (screenPointFor)
 function lightGeo(ev, part) { const ll = lightLonLat(ev, part); return ll ? { lon: ll[0], lat: ll[1] } : null; }
 
-// ---- drawing: an overlay canvas ABOVE the 3D map ----
-// MapLibre paints line layers into the terrain surface (under buildings) and
-// depth-tests flat icons against extrusions, so native layers always end up
-// hidden behind buildings. Instead the lights are drawn on their own
-// transparent canvas (#lights3D) stacked over the map, re-drawn on every
-// MapLibre frame from the live camera via map.project() (which includes
-// terrain height). Each marker is drawn through a small ground-plane
-// transform built from three projected points, so it still lies flat,
-// foreshortens with pitch and turns with bearing — it just can't be covered.
-// (This also means lights stay visible behind hills, not only buildings.)
-const lightsCv = document.getElementById('lights3D'), lctx = lightsCv.getContext('2d');
-let lights3DHits = { markers: [], routes: [] }; // screen positions from the last draw, for tapping
-let lights3DEventsRef = null, lights3DSelected = '';
-// gentle growth with zoom (exponential-ish between stops, flat outside them):
-// ~flat-map size around the 3D entry zoom, larger close in, smaller far out
-const LIGHT_ICON_STOPS = [[3, 0.7], [6, 1], [10, 1.5], [14, 2.2], [18, 2.6]];
-const LIGHT_LINE_STOPS = [[3, 0.7], [6, 1.1], [10, 1.7], [14, 2.6], [18, 3.2]];
-function zoomCurve(z, stops, base = 1.6) {
-  if (z <= stops[0][0]) return stops[0][1];
-  for (let i = 1; i < stops.length; i++) {
-    const [z0, v0] = stops[i - 1], [z1, v1] = stops[i];
-    if (z <= z1) { const t = (Math.pow(base, z - z0) - 1) / (Math.pow(base, z1 - z0) - 1); return v0 + (v1 - v0) * t; }
-  }
-  return stops[stops.length - 1][1];
+// ---- marker images: drawn with the same look as the flat map's markers ----
+// (Native MapLibre layers: buildings can cover them, since MapLibre paints
+// line layers into the terrain surface and depth-tests flat icons. An overlay
+// canvas was tried to get around that and is not used.)
+function lightImage(w, h, paint) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); paint(x, w / 2, h / 2);
+  return x.getImageData(0, 0, w, h);
+}
+function addLightImages(map) {
+  const S = 2; // drawn at 2x, registered with pixelRatio 2
+  const add = (name, img) => { if (!map.hasImage(name)) map.addImage(name, img, { pixelRatio: S }); };
+  add('light-sent', lightImage(40, 40, (c, cx, cy) => {
+    const r = 3.4 * S, g = c.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, 'rgba(250,255,90,0.88)'); g.addColorStop(0.45, 'rgba(203,255,0,0.80)'); g.addColorStop(1, 'rgba(150,249,0,0.72)');
+    c.shadowColor = `rgba(${LIGHT_GREEN_RGB},0.6)`; c.shadowBlur = 6 * S;
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fillStyle = g; c.fill();
+  }));
+  add('light-received', lightImage(40, 40, (c, cx, cy) => {
+    const side = (2 * 3.4 + 2.6) * S, ow = 1.3 * S;
+    c.fillStyle = 'rgba(182,197,155,0.95)'; c.fillRect(cx - side / 2, cy - side / 2, side, side);
+    c.shadowColor = `rgba(${LIGHT_GREEN_RGB},0.6)`; c.shadowBlur = 6 * S * 0.7;
+    c.strokeStyle = `rgba(${LIGHT_GREEN_RGB},0.95)`; c.lineWidth = ow;
+    c.strokeRect(cx - side / 2 + ow / 2, cy - side / 2 + ow / 2, side - ow, side - ow);
+  }));
+  add('light-inflight', lightImage(48, 48, (c, cx, cy) => { // static stand-in for the flat map's pulsing ring
+    c.beginPath(); c.arc(cx, cy, 8 * S, 0, Math.PI * 2);
+    c.strokeStyle = `rgba(${LIGHT_GREEN_RGB},0.45)`; c.lineWidth = 1.4 * S; c.stroke();
+  }));
+  add('light-sel-sent', lightImage(44, 44, (c, cx, cy) => {
+    c.beginPath(); c.arc(cx, cy, 8.5 * S, 0, Math.PI * 2);
+    c.strokeStyle = LIGHT_GREEN; c.lineWidth = 1.5 * S; c.stroke();
+  }));
+  add('light-sel-received', lightImage(44, 44, (c, cx, cy) => {
+    const o = 12.5 * S; c.strokeStyle = LIGHT_GREEN; c.lineWidth = 1.5 * S; c.strokeRect(cx - o / 2, cy - o / 2, o, o);
+  }));
 }
 
-function drawLights3D() {
+// gentle growth with zoom: ~flat-map size around the 3D entry zoom, larger
+// close in, smaller far out, capped at both ends
+const LIGHT_ICON_SIZE = ['interpolate', ['exponential', 1.6], ['zoom'], 3, 0.7, 6, 1, 10, 1.5, 14, 2.2, 18, 2.6];
+// MapLibre only allows ['zoom'] at the top of an interpolate, so scaled
+// variants (glow width, blur, selected width) get their own stops
+const lightLineW = (m) => ['interpolate', ['exponential', 1.6], ['zoom'], 3, 0.7 * m, 6, 1.1 * m, 10, 1.7 * m, 14, 2.6 * m, 18, 3.2 * m];
+const LIGHT_LINE_W = lightLineW(1);
+const MARKER_LAYOUT = {
+  'icon-size': LIGHT_ICON_SIZE,
+  'icon-pitch-alignment': 'map', 'icon-rotation-alignment': 'map', // lie flat on the terrain
+  'icon-allow-overlap': true, 'icon-ignore-placement': true,
+};
+let lightLayersReady = false;
+let lights3DEventsRef = null, lights3DSelected;
+function addLightLayers3D() {
   const map = terrainMapInstance;
-  const w = map ? map.getContainer().clientWidth : lightsCv.clientWidth, h = map ? map.getContainer().clientHeight : lightsCv.clientHeight;
-  if (lightsCv.width !== Math.round(w * dpr) || lightsCv.height !== Math.round(h * dpr)) { lightsCv.width = w * dpr; lightsCv.height = h * dpr; }
-  lctx.setTransform(1, 0, 0, 1, 0, 0);
-  lctx.clearRect(0, 0, lightsCv.width, lightsCv.height);
-  lights3DHits = { markers: [], routes: [] };
-  if (!in3D || !map || !maplibregl) return;
-  lights3DEventsRef = events;
-  lights3DSelected = (selectedKey || '') + '|' + (selectedGroup || '');
-
-  const MC = maplibregl.MercatorCoordinate;
-  const zoom = map.getZoom(), ks = zoomCurve(zoom, LIGHT_ICON_STOPS), lw = zoomCurve(zoom, LIGHT_LINE_STOPS);
-  // camera position + view direction, to drop/clip anything behind the camera
-  // (projecting a point behind the camera gives a mirrored, nonsense position)
-  const C = map.getFreeCameraOptions().position;
-  const b = map.getBearing() * Math.PI / 180, pt = map.getPitch() * Math.PI / 180;
-  const f = [Math.sin(pt) * Math.sin(b), -Math.sin(pt) * Math.cos(b), -Math.cos(pt)];
-  const depth = (m) => (m.x - C.x) * f[0] + (m.y - C.y) * f[1] + ((m.z || 0) - C.z) * f[2];
-  const center = map.getCenter(), cLng = center.lng;
-  const eps = depth(MC.fromLngLat(center)) * 0.08; // a near plane, a little in front of the camera
-  const wrap = (lng) => lng + 360 * Math.round((cLng - lng) / 360); // world copy nearest the camera
-  const proj = (lng, lat) => { const q = map.project([lng, lat]); return [q.x, q.y]; };
-
-  // ground-plane frame at a point: screen position plus screen vectors for
-  // 1 "px" east and 1 "px" south at this zoom; null if behind the camera
-  const frame = (ll) => {
-    const lng = wrap(ll[0]), lat = ll[1];
-    if (depth(MC.fromLngLat([lng, lat])) < eps) return null;
-    const cos = Math.max(0.05, Math.cos(lat * Math.PI / 180));
-    const d = 10 * 156543.03392 * cos / Math.pow(2, zoom); // metres covered by 10 screen px here
-    const p0 = proj(lng, lat), pe = proj(lng + d / (111320 * cos), lat), ps = proj(lng, lat - d / 111320);
-    const ex = [(pe[0] - p0[0]) / 10, (pe[1] - p0[1]) / 10], sy = [(ps[0] - p0[0]) / 10, (ps[1] - p0[1]) / 10];
-    if (Math.hypot(ex[0], ex[1]) > 12) return null; // right under the camera: would be enormous
-    return { p0, ex, sy };
-  };
-  const onGround = (fr, paint) => {
-    lctx.setTransform(dpr * fr.ex[0] * ks, dpr * fr.ex[1] * ks, dpr * fr.sy[0] * ks, dpr * fr.sy[1] * ks, dpr * fr.p0[0], dpr * fr.p0[1]);
-    paint(); lctx.shadowBlur = 0;
-  };
-
-  const selCircle = selectedCircleGroup();
-  const GLOW = 6 * dpr;
-  const rgba = (a) => `rgba(${LIGHT_GREEN_RGB},${a})`;
-
-  // ---- routes: straight in Mercator, so on (roughly flat) ground they are
-  // straight on screen too — clip at the near plane, project the two ends ----
-  const routes = [];
-  for (const ev of events) {
-    const s = lightLonLat(ev, 'sent'), r = lightLonLat(ev, 'received');
-    if (!s || !r) continue;
-    const sLng = wrap(s[0]), rLng = sLng + ((r[0] - s[0] + 540) % 360 - 180); // short way across the 180° line
-    let A = MC.fromLngLat([sLng, s[1]]), B = MC.fromLngLat([rLng, r[1]]);
-    const da = depth(A) - eps, db = depth(B) - eps;
-    if (da < 0 && db < 0) continue;
-    const cut = (P, Q, dp, dq) => { const t = dp / (dp - dq); return new MC(P.x + (Q.x - P.x) * t, P.y + (Q.y - P.y) * t, 0); };
-    const a2 = da < 0 ? cut(A, B, da, db) : A, b2 = db < 0 ? cut(B, A, db, da) : B;
-    const la = a2.toLngLat(), lb = b2.toLngLat();
-    const pa = proj(la.lng, la.lat), pb = proj(lb.lng, lb.lat);
-    routes.push({ ev, pa, pb, sel: isSelectedLight(ev) });
-  }
-  lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  lctx.lineCap = 'round';
-  for (const pass of ['glow', 'line', 'sel']) {
-    for (const rt of routes) {
-      if (pass === 'sel' && !rt.sel) continue;
-      lctx.beginPath(); lctx.moveTo(rt.pa[0], rt.pa[1]); lctx.lineTo(rt.pb[0], rt.pb[1]);
-      if (pass === 'glow') { lctx.strokeStyle = rgba(0.18); lctx.lineWidth = lw * 3.5; }
-      else if (pass === 'line') { lctx.strokeStyle = rgba(0.75); lctx.lineWidth = lw; }
-      else { lctx.strokeStyle = 'rgba(143,212,0,0.9)'; lctx.lineWidth = lw * 1.9; }
-      lctx.stroke();
-    }
-  }
-  for (const rt of routes) lights3DHits.routes.push({ key: evKey(rt.ev), a: rt.pa, b: rt.pb });
-
-  // ---- markers: one sent circle per sender group, a square per delivery ----
-  const circles = new Map(), inFlight = new Set();
-  for (const ev of events) {
-    const g = groupKeyOf(ev);
-    if (!ev.downloadedAt) inFlight.add(g);
-    if (!circles.has(g)) { const s = lightLonLat(ev, 'sent'); if (s) circles.set(g, { ev, s }); }
-  }
-  // in-flight rings first (static in 3D — no motion), then squares, then circles on top
-  for (const [g, { s }] of circles) {
-    if (!inFlight.has(g)) continue;
-    const fr = frame(s); if (!fr) continue;
-    onGround(fr, () => { lctx.beginPath(); lctx.arc(0, 0, 8, 0, Math.PI * 2); lctx.strokeStyle = rgba(0.45); lctx.lineWidth = 1.4; lctx.stroke(); });
-  }
-  for (const ev of events) {
-    const r = lightLonLat(ev, 'received'); if (!r) continue;
-    const fr = frame(r); if (!fr) continue;
-    const sel = isSelectedLight(ev), side = 2 * 3.4 + 2.6, ow = 1.3;
-    onGround(fr, () => {
-      if (sel) { const o = 12.5; lctx.lineWidth = 1.5; lctx.strokeStyle = LIGHT_GREEN; lctx.strokeRect(-o / 2, -o / 2, o, o); }
-      lctx.fillStyle = 'rgba(182,197,155,0.95)'; lctx.fillRect(-side / 2, -side / 2, side, side);
-      lctx.shadowColor = rgba(0.6); lctx.shadowBlur = GLOW * 0.7;
-      lctx.strokeStyle = rgba(0.95); lctx.lineWidth = ow;
-      lctx.strokeRect(-side / 2 + ow / 2, -side / 2 + ow / 2, side - ow, side - ow);
-    });
-    lights3DHits.markers.push({ key: evKey(ev), part: 'received', x: fr.p0[0], y: fr.p0[1] });
-  }
-  for (const [g, { ev, s }] of circles) {
-    const fr = frame(s); if (!fr) continue;
-    onGround(fr, () => {
-      if (g === selCircle) { lctx.beginPath(); lctx.arc(0, 0, 8.5, 0, Math.PI * 2); lctx.strokeStyle = LIGHT_GREEN; lctx.lineWidth = 1.5; lctx.stroke(); }
-      const R = 3.4, gr = lctx.createRadialGradient(0, 0, 0, 0, 0, R);
-      gr.addColorStop(0, 'rgba(250,255,90,0.88)'); gr.addColorStop(0.45, 'rgba(203,255,0,0.80)'); gr.addColorStop(1, 'rgba(150,249,0,0.72)');
-      lctx.shadowColor = rgba(0.6); lctx.shadowBlur = GLOW;
-      lctx.beginPath(); lctx.arc(0, 0, R, 0, Math.PI * 2); lctx.fillStyle = gr; lctx.fill();
-    });
-    lights3DHits.markers.push({ key: evKey(ev), part: 'sent', x: fr.p0[0], y: fr.p0[1] });
-  }
+  if (!map || map.getSource('lights-routes')) return;
+  addLightImages(map);
+  const empty = { type: 'FeatureCollection', features: [] };
+  map.addSource('lights-routes', { type: 'geojson', data: empty });
+  map.addSource('lights-markers', { type: 'geojson', data: empty });
+  map.addLayer({ id: 'lights-routes-glow', type: 'line', source: 'lights-routes',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': `rgb(${LIGHT_GREEN_RGB})`, 'line-width': lightLineW(4), 'line-blur': lightLineW(3), 'line-opacity': 0.22 } });
+  map.addLayer({ id: 'lights-routes', type: 'line', source: 'lights-routes',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': `rgb(${LIGHT_GREEN_RGB})`, 'line-width': LIGHT_LINE_W, 'line-opacity': 0.75 } });
+  map.addLayer({ id: 'lights-routes-selected', type: 'line', source: 'lights-routes', filter: ['==', ['get', 'key'], ''],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': SELECTED_ROUTE_COLOR, 'line-width': lightLineW(1.9) } });
+  map.addLayer({ id: 'lights-markers', type: 'symbol', source: 'lights-markers',
+    layout: { ...MARKER_LAYOUT, 'icon-image': ['get', 'icon'], 'symbol-sort-key': ['get', 'z'] } });
+  map.addLayer({ id: 'lights-markers-selected', type: 'symbol', source: 'lights-markers',
+    filter: ['==', ['get', 'key'], ''],
+    layout: { ...MARKER_LAYOUT, 'icon-image': ['concat', 'light-sel-', ['get', 'part']] } });
+  lightLayersReady = true;
+  lights3DEventsRef = null; lights3DSelected = undefined; // force a full sync on the next frame
 }
-// MapLibre only re-renders when the camera or a layer changes; this catches
-// the other cases (lights list updated, selection changed) from the page's
-// own frame loop
-function maybeRedrawLights3D() {
-  if (!in3D) return;
-  if (events !== lights3DEventsRef || (selectedKey || '') + '|' + (selectedGroup || '') !== lights3DSelected) drawLights3D();
+
+// Called every frame from draw() while in 3D; only touches MapLibre when
+// the lights list or the selection actually changed.
+function syncLights3D() {
+  const map = terrainMapInstance;
+  if (!in3D || !map || !lightLayersReady) return;
+  if (events !== lights3DEventsRef) {
+    lights3DEventsRef = events;
+    const routes = [], markers = [], circles = new Map(), inFlight = new Set();
+    for (const ev of events) {
+      const key = evKey(ev), group = groupKeyOf(ev);
+      const s = lightLonLat(ev, 'sent'), r = lightLonLat(ev, 'received');
+      if (s && r) {
+        // straight Mercator line, taking the short way across the 180° line
+        const rLon = r[0] + 360 * Math.round((s[0] - r[0]) / 360);
+        routes.push({ type: 'Feature', properties: { key, group }, geometry: { type: 'LineString', coordinates: [s, [rLon, r[1]]] } });
+      }
+      if (s && !circles.has(group)) circles.set(group, { key, s }); // one sent circle per sender group
+      if (!ev.downloadedAt) inFlight.add(group);
+      if (r) markers.push({ type: 'Feature', properties: { key, group, part: 'received', icon: 'light-received', z: 1 }, geometry: { type: 'Point', coordinates: r } });
+    }
+    for (const [group, { key, s }] of circles) {
+      if (inFlight.has(group)) markers.push({ type: 'Feature', properties: { key, group, part: 'inflight', icon: 'light-inflight', z: 0 }, geometry: { type: 'Point', coordinates: s } });
+      markers.push({ type: 'Feature', properties: { key, group, part: 'sent', icon: 'light-sent', z: 2 }, geometry: { type: 'Point', coordinates: s } });
+    }
+    map.getSource('lights-routes').setData({ type: 'FeatureCollection', features: routes });
+    map.getSource('lights-markers').setData({ type: 'FeatureCollection', features: markers });
+  }
+  const selSig = (selectedKey || '') + '|' + (selectedGroup || '');
+  if (selSig !== lights3DSelected) {
+    lights3DSelected = selSig;
+    // a grouped card highlights every route/square in the group; a single
+    // light highlights just its own; either way its sender circle lights up
+    const routeCond = selectedGroup ? ['==', ['get', 'group'], selectedGroup] : ['==', ['get', 'key'], selectedKey || ''];
+    const circleG = selectedCircleGroup() || '';
+    map.setFilter('lights-routes-selected', routeCond);
+    map.setFilter('lights-markers-selected', ['any',
+      ['all', ['==', ['get', 'part'], 'sent'], ['==', ['get', 'group'], circleG]],
+      ['all', ['==', ['get', 'part'], 'received'], routeCond]]);
+  }
 }
 
 // screen point (relative to the map container) of a light's sent/received
@@ -3773,24 +3766,26 @@ function screenPointFor3D(ev, part) {
 }
 
 // tap in 3D: a marker (generous radius) wins over a route; tapping empty
-// ground with a card open just closes it. Uses the screen positions from the
-// last overlay draw, so it matches exactly what's on screen.
+// ground with a card open just closes it
 function onTerrainMapClick(e) {
-  if (transitioning) return;
-  const { x, y } = e.point;
+  if (transitioning || !lightLayersReady) return;
+  const map = terrainMapInstance, { x, y } = e.point;
   const byKey = (k) => events.find(ev => evKey(ev) === k);
-  const MARK_R = 18, LINE_R = 10, LINE_PENALTY = 8;
-  let best = null, bestScore = Infinity;
-  for (const m of lights3DHits.markers) {
-    const d = Math.hypot(m.x - x, m.y - y);
-    if (d < MARK_R && d < bestScore) { bestScore = d; best = { key: m.key, part: m.part }; }
+  const MARK_R = 18, LINE_R = 10;
+  let best = null, bestD = Infinity;
+  for (const f of map.queryRenderedFeatures([[x - MARK_R, y - MARK_R], [x + MARK_R, y + MARK_R]], { layers: ['lights-markers'] })) {
+    const part = f.properties.part === 'received' ? 'received' : 'sent';
+    const ev = byKey(f.properties.key); if (!ev) continue;
+    const pt = screenPointFor3D(ev, part); if (!pt) continue;
+    const d = Math.hypot(pt[0] - x, pt[1] - y);
+    if (d < bestD) { bestD = d; best = { ev, part }; }
   }
-  for (const r of lights3DHits.routes) {
-    const d = distToSeg(x, y, r.a[0], r.a[1], r.b[0], r.b[1]);
-    if (d < LINE_R && d + LINE_PENALTY < bestScore) { bestScore = d + LINE_PENALTY; best = { key: r.key, part: 'route' }; }
+  if (!best) {
+    const f = map.queryRenderedFeatures([[x - LINE_R, y - LINE_R], [x + LINE_R, y + LINE_R]], { layers: ['lights-routes'] })[0];
+    const ev = f && byKey(f.properties.key);
+    if (ev) best = { ev, part: 'route' };
   }
-  const ev = best && byKey(best.key);
-  if (ev) openCard(ev, best.part, x, y);
+  if (best) openCard(best.ev, best.part, x, y);
   else if (cardEl.classList.contains('open')) closeCard();
 }
 
@@ -3872,7 +3867,7 @@ function fmtDelta(ms) {
 const fmtClockDay = (ms) => { const d = new Date(ms); return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + ' ' + d.toLocaleDateString(undefined, { weekday: 'long' }); };
 
 const cardEl = document.getElementById('eventCard');
-let cardAnchor = null; // {part, x, y}: which dot the card hangs off (x,y only used for taps on a route line)
+let cardAnchor = null; // {part, x, y, t}: which dot the card hangs off; for a tap on a route line, t is how far along the route it landed (x,y only as a last-resort fallback)
 // grouped card: the sender's distinct photos as thumbnails (current one outlined)
 function renderThumbs(list, cur) {
   const box = document.getElementById('ecThumbs');
@@ -3896,7 +3891,8 @@ function renderGroupCard(rep) {
     return (toMs(b.downloadedAt) || 0) - (toMs(a.downloadedAt) || 0);
   });
   const photos = new Set(list.map(evImageKey).filter(Boolean)).size;
-  document.getElementById('ecMid').textContent = list.length + ' destinations' + (photos > 1 ? ' • ' + photos + ' photos' : '');
+  const repSent = evSentMs(rep); // time & day sent, for the photo the card is showing
+  document.getElementById('ecMid').textContent = (repSent ? fmtClockDay(repSent) + '\n' : '') + list.length + ' destinations' + (photos > 1 ? ' • ' + photos + ' photos' : '');
   const box = document.getElementById('ecDestList');
   box.textContent = '';
   const MAX = 8;
@@ -3905,9 +3901,9 @@ function renderGroupCard(rep) {
     const mark = document.createElement('span'); mark.className = 'ecMark square' + (e.downloadGeo ? '' : ' pending');
     const txt = document.createElement('span'); txt.className = 'txt';
     txt.textContent = e.downloadGeo ? placeName(e.downloadGeo) : 'in flight…';
-    const sentMs = evSentMs(e), gotMs = toMs(e.downloadedAt), dur = e.deliveryMs != null ? e.deliveryMs : (sentMs && gotMs ? gotMs - sentMs : null);
-    if (gotMs && dur != null) { const dt = document.createElement('span'); dt.className = 'dt'; dt.textContent = ' ' + fmtDelta(dur); txt.appendChild(dt); }
     row.append(mark, txt); box.appendChild(row);
+    const gotMs = toMs(e.downloadedAt);
+    if (gotMs) { const t = document.createElement('div'); t.className = 'dtime'; t.textContent = fmtClockDay(gotMs); box.appendChild(t); } // time & day received
   });
   if (list.length > MAX) { const more = document.createElement('div'); more.className = 'dt'; more.style.fontSize = '8.5px'; more.textContent = '+' + (list.length - MAX) + ' more'; box.appendChild(more); }
 }
@@ -3932,17 +3928,43 @@ function renderCard() {
   const mid = [];
   if (ev.downloadGeo) { toEl.textContent = placeName(ev.downloadGeo); toMark.classList.remove('pending'); }
   else { toEl.textContent = 'in flight…'; toMark.classList.add('pending'); }
-  if (gotMs && dur != null) mid.push(fmtDelta(dur));
-  if (ev.sentGeo && ev.downloadGeo && project(ev.sentGeo) && project(ev.downloadGeo)) { // sits between the two places: "+2m • 8,000mi"
+  if (sentMs) mid.push(fmtClockDay(sentMs)); // time & day sent, matching the time & day received below
+  if (ev.sentGeo && ev.downloadGeo && project(ev.sentGeo) && project(ev.downloadGeo)) { // sits between the two places: "4:12 PM Tuesday • 8,000mi"
     const km = d3.geoDistance(project(ev.sentGeo), project(ev.downloadGeo)) * 6371;
     mid.push(Math.round(km * 0.621371).toLocaleString() + 'mi');
   }
   document.getElementById('ecMid').textContent = mid.join(' • ');
   const bits = [];
-  if (gotMs) bits.push(fmtClockDay(gotMs));
-  else if (sentMs) bits.push('sent ' + fmtClockDay(sentMs));
+  if (gotMs) bits.push(fmtClockDay(gotMs)); // in flight: nothing here — the sent time is already shown above
   const meta = document.getElementById('ecMeta');
   meta.textContent = ''; bits.forEach(t => { const d = document.createElement('div'); d.textContent = t; meta.appendChild(d); });
+}
+// A point part-way along a light's route (t: 0 = sender, 1 = receiver), as
+// it's drawn in the current view: a great-circle arc on the flat map, a
+// straight Mercator line in 3D. Returns screen coordinates, or null.
+function routeScreenPoint(ev, t) {
+  if (t == null) return null;
+  const a = lightLonLat(ev, 'sent'), b = lightLonLat(ev, 'received');
+  if (!a || !b) return null;
+  if (!in3D) { const p = d3.geoInterpolate(a, b)(t); return screenPointFor({ lon: p[0], lat: p[1] }); }
+  if (!terrainMapInstance) return null;
+  const bLon = b[0] + 360 * Math.round((a[0] - b[0]) / 360); // short way across the 180° line, like the drawn line
+  const my = (lat) => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)), lat = (y) => (2 * Math.atan(Math.exp(y)) - Math.PI / 2) * 180 / Math.PI;
+  const lon = a[0] + (bLon - a[0]) * t, la = lat(my(a[1]) + (my(b[1]) - my(a[1])) * t);
+  const cLng = terrainMapInstance.getCenter().lng;
+  const q = terrainMapInstance.project([lon + 360 * Math.round((cLng - lon) / 360), la]);
+  return [q.x, q.y];
+}
+// where along the route a tap at (x, y) landed: the t whose point is closest on screen
+function nearestRouteT(ev, x, y) {
+  let best = 0.5, bestD = Infinity;
+  for (let i = 0; i <= 120; i++) {
+    const t = i / 120, pt = routeScreenPoint(ev, t);
+    if (!pt) continue;
+    const d = Math.hypot(pt[0] - x, pt[1] - y);
+    if (d < bestD) { bestD = d; best = t; }
+  }
+  return best;
 }
 // hang the card off the tapped dot (re-run every frame so it follows pan / zoom / spin)
 let lastCardPos = '';
@@ -3950,9 +3972,9 @@ function positionCard() {
   if (!selectedKey || !cardEl.classList.contains('open') || !cardAnchor) return;
   const ev = events.find(e => evKey(e) === selectedKey); if (!ev) return;
   const cr = canvas.getBoundingClientRect(), pr_ = cardEl.offsetParent.getBoundingClientRect();
-  let pt = in3D
-    ? (cardAnchor.part === 'route' ? null : screenPointFor3D(ev, cardAnchor.part))
-    : (cardAnchor.part === 'route' ? null : screenPointFor(lightGeo(ev, cardAnchor.part)));
+  let pt = cardAnchor.part === 'route'
+    ? routeScreenPoint(ev, cardAnchor.t) // the spot on the route that was tapped, so the card travels with the map
+    : in3D ? screenPointFor3D(ev, cardAnchor.part) : screenPointFor(lightGeo(ev, cardAnchor.part));
   if (!pt) pt = [cardAnchor.x, cardAnchor.y];
   const ax = pt[0] + (cr.left - pr_.left), ay = pt[1] + (cr.top - pr_.top);
   const w = cardEl.offsetWidth, h = cardEl.offsetHeight, GAP = 16, M = 8;
@@ -4057,9 +4079,113 @@ function openCard(ev, part, x, y) {
   const group = members.length > 1 ? groupKeyOf(ev) : null;
   if (group) ev = members.sort(newestFirst)[0];
   const wasSame = selectedKey === evKey(ev) && selectedGroup === group && cardEl.classList.contains('open');
-  selectedKey = evKey(ev); selectedGroup = group; cardAnchor = { part: part === 'route' ? 'route' : part, x, y }; renderCard(); cardEl.classList.add('open'); lastCardPos = ''; positionCard(); if (!wasSame) startReveal(); }
+  selectedKey = evKey(ev); selectedGroup = group; cardAnchor = { part: part === 'route' ? 'route' : part, x, y, t: part === 'route' ? nearestRouteT(ev, x, y) : null }; renderCard(); cardEl.classList.add('open'); lastCardPos = ''; positionCard(); if (!wasSame) startReveal(); }
 function closeCard() { selectedKey = null; selectedGroup = null; cardEl.classList.remove('grouped'); cardAnchor = null; cancelAnimationFrame(revealRaf); endReveal(); cardEl.classList.remove('open'); }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCard(); });
+
+// ============================================================
+// TICKER (docked view only): fills the space under the globe with a list of
+// recent lights, newest at the top. It holds still; when something new
+// happens (a light is sent, or one lands) a row slides in at the top, the
+// rest move down one, and the bottom row drops out. A light that lands moves
+// up to the top as an arrival. Rows read
+//   "○ Lima, Peru · in flight 12s"            while travelling (live timer)
+//   "▪ Lima, Peru → Tokyo, Japan · +3h"       once it has landed
+// Hidden whenever the map is undocked or in 3D.
+// ============================================================
+const galleryBelowEl = document.getElementById('galleryBelow');
+const tickerListEl = document.getElementById('tickerList');
+const galleryBelowVisible = () => docked && !in3D;
+let tickerSeenSent = new Set(), tickerSeenLanded = new Set(), tickerEventsRef = null, tickerStarted = false, tickerLastText = 0;
+
+// fills from just under the inlay down to the buttons, matching the inlay's width. Called from resize().
+function layoutGalleryBelow() {
+  const mainRect = canvas.parentElement.getBoundingClientRect();
+  const inlay = document.getElementById('mapInlay').getBoundingClientRect();
+  galleryBelowEl.style.top = (inlay.bottom - mainRect.top + 16) + 'px';
+  galleryBelowEl.style.bottom = '84px'; // clear of the route / new-light buttons
+  galleryBelowEl.style.width = Math.min(inlay.width, mainRect.width - 24) + 'px';
+  if (tickerStarted) trimTicker();
+}
+
+// "12s" / "4m" / "3h" / "2d"
+function fmtAgo(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+function tickerText(ev) {
+  if (!ev.downloadedAt) return `${placeName(ev.sentGeo)} · in flight ${fmtAgo(Date.now() - (evSentMs(ev) || Date.now()))}`;
+  const sentMs = evSentMs(ev), gotMs = toMs(ev.downloadedAt);
+  const dur = ev.deliveryMs != null ? ev.deliveryMs : (sentMs && gotMs ? gotMs - sentMs : null);
+  return `${placeName(ev.sentGeo)} → ${placeName(ev.downloadGeo)}${dur != null ? ' · ' + fmtDelta(dur) : ''}`;
+}
+function fillTickerRow(row, ev) {
+  row.querySelector('.tmark').className = 'tmark ' + (ev.downloadedAt ? 'recv' : 'flight');
+  const t = row.querySelector('.txt'), text = tickerText(ev);
+  if (t.textContent !== text) t.textContent = text;
+}
+function makeTickerRow(ev, animate) {
+  const row = document.createElement('div');
+  row.className = 'tickerRow' + (animate ? ' enter' : '');
+  row.dataset.key = evKey(ev);
+  row.innerHTML = '<span class="tmark"></span><span class="txt"></span>';
+  fillTickerRow(row, ev);
+  return row;
+}
+// how many rows fit, plus one spare that sits in the bottom fade
+function tickerCapacity() {
+  const first = tickerListEl.firstElementChild;
+  const rowH = first && !first.classList.contains('enter') ? first.offsetHeight + 9 : 21; // 9 = row gap
+  return Math.ceil(galleryBelowEl.clientHeight / rowH) + 1;
+}
+function trimTicker() {
+  const cap = tickerCapacity();
+  while (tickerListEl.children.length > cap) tickerListEl.lastElementChild.remove();
+}
+const activityMs = (ev) => toMs(ev.downloadedAt) || evSentMs(ev) || 0; // landing time, or send time while in flight
+
+function syncTicker() {
+  if (events === tickerEventsRef) return;
+  tickerEventsRef = events;
+  if (!tickerStarted) {
+    // first fill: the most recent activity, newest first, no animation
+    tickerStarted = true;
+    for (const ev of events) { const k = evKey(ev); tickerSeenSent.add(k); if (ev.downloadedAt) tickerSeenLanded.add(k); }
+    const cap = tickerCapacity();
+    for (const ev of events.slice().sort((a, b) => activityMs(b) - activityMs(a)).slice(0, cap)) tickerListEl.appendChild(makeTickerRow(ev, false));
+    return;
+  }
+  // anything new since last time: new sends, and lights that just landed
+  const fresh = [];
+  for (const ev of events) {
+    const k = evKey(ev);
+    if (!tickerSeenSent.has(k)) { tickerSeenSent.add(k); if (ev.downloadedAt) tickerSeenLanded.add(k); fresh.push(ev); }
+    else if (ev.downloadedAt && !tickerSeenLanded.has(k)) { tickerSeenLanded.add(k); fresh.push(ev); }
+  }
+  fresh.sort((a, b) => activityMs(a) - activityMs(b)); // oldest first, so the newest ends up on top
+  for (const ev of fresh) {
+    const old = [...tickerListEl.children].find(r => r.dataset.key === evKey(ev));
+    if (old) old.remove(); // a landing moves its row up to the top
+    tickerListEl.prepend(makeTickerRow(ev, true));
+  }
+  if (fresh.length) trimTicker();
+}
+
+// called from draw(): show/hide, apply new lights, refresh text once a second
+function updateGalleryBelow() {
+  const vis = galleryBelowVisible();
+  galleryBelowEl.classList.toggle('hidden', !vis);
+  if (!vis || !events.length) return;
+  syncTicker();
+  const now = performance.now();
+  if (now - tickerLastText > 1000) {
+    tickerLastText = now;
+    for (const row of tickerListEl.children) { const ev = events.find(e => evKey(e) === row.dataset.key); if (ev) fillTickerRow(row, ev); }
+  }
+}
 
 function handlePointer(mx, my) {
   const hit = (docked || in3D) ? null : hitTestEvents(mx, my); // docked view is look-only; tap in first
@@ -4281,6 +4407,7 @@ async function poll() {
 // resumes at full rate on the very next frame.
 let lastActivity = performance.now();
 let lastDrawAt = 0;
+let lastDrawErrorAt = 0;
 const IDLE_AFTER_MS = 1500, IDLE_DRAW_MS = 1000;
 const wake = () => { lastActivity = performance.now(); };
 ['pointerdown', 'pointermove', 'pointerup', 'touchstart', 'touchmove', 'touchend',
@@ -4302,7 +4429,12 @@ function tick() {
   // routes, pulsing rings) → ~30/sec; anything else (touch, spin, undocked, 3D…) → every frame
   const animating = events.some(ev => project(ev.sentGeo));
   const gap = !isIdle(now) ? 0 : (animating ? 33 : IDLE_DRAW_MS);
-  if (now - lastDrawAt >= gap) { draw(); lastDrawAt = now; }
+  // a thrown error must never stop the loop — that would freeze the flat map
+  // for good (it only redraws from here). Log it (at most once a second) and carry on.
+  if (now - lastDrawAt >= gap) {
+    lastDrawAt = now;
+    try { draw(); } catch (err) { if (now - lastDrawErrorAt > 1000) { lastDrawErrorAt = now; console.error('gallery: draw() failed —', err); } }
+  }
   requestAnimationFrame(tick);
 }
 

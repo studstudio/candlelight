@@ -296,7 +296,7 @@
   #map.faded { opacity: 0; pointer-events: none; }
   #backBtn {
     position: absolute; left: 14px; top: 14px; width: 36px; height: 36px; padding: 0;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 50%;
+    background: var(--panel); border: 0; border-radius: 50%;
     z-index: 3; display: none; align-items: center; justify-content: center;
   }
   #backBtn.visible { display: flex; }
@@ -1764,19 +1764,78 @@ function ensureStreets() {
     }
     for (const [id, src] of Object.entries(style.sources || {})) if (!map.getSource('st-' + id)) map.addSource('st-' + id, src);
     const before = map.getLayer('maptiler-satellite') ? 'maptiler-satellite' : undefined;
+    let recolored = 0;
     for (const layer of style.layers || []) {
       if (layer.type === 'fill-extrusion') continue; // our own building layer covers this
       if (layer.type === 'background') continue;     // no streets background: the classic relief map shows through instead
+      // street names only (text along roads, no shield icon): road shields, POI icons and place names stay
+      if (layer.type === 'symbol' && !STREETS_KEEP_STREET_NAMES && /transportation_name/i.test(layer['source-layer'] || '') && !(layer.layout && layer.layout['icon-image'])) continue;
       const l = JSON.parse(JSON.stringify(layer));
+      if (recolorStreetsLayer(l)) recolored++;
       l.id = 'st-' + layer.id;
       if (l.source) l.source = 'st-' + l.source;
       streetsLayerVis[l.id] = (l.layout && l.layout.visibility) || 'visible';
       l.layout = { ...(l.layout || {}), visibility: 'none' }; // shown by updateSatAuto()
       try { map.addLayer(l, before); streetsLayerIds.push(l.id); } catch (err) { console.warn('gallery: streets layer skipped', l.id, err.message); }
     }
+    console.log(`gallery: streets recoloured ${recolored} layers (grey roads, green base)`);
     streetsState = 'ready'; streetsShown = null;
     applyLayerToggles();
   }).catch(err => { streetsState = 'failed'; console.warn('gallery: streets style failed to load', err); });
+}
+// Streets recolour: white road fills → grey, beige land fills → the classic
+// map's lowland green, so the streets map sits on the same ground colour as
+// the base map. Everything else (parking, water, parks, land use) keeps its
+// own colour. Colours are matched by what they look like, since the style's
+// layer names aren't known ahead of time.
+const STREETS_KEEP_STREET_NAMES = false; // true: keep the streets style's street-name labels too
+const STREETS_ROAD_GREY = '#9d9b96';
+const STREETS_GROUND_GREEN = '#b4c391'; // the classic relief's lowland green (DAY_COLORS.relief)
+function parseColour(str) {
+  if (typeof str !== 'string') return null;
+  const t = str.trim().toLowerCase();
+  let r, g, b, a = 1, m;
+  if ((m = t.match(/^#([0-9a-f]{3,8})$/))) {
+    let h = m[1]; if (h.length === 3 || h.length === 4) h = h.split('').map(c => c + c).join('');
+    r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16); if (h.length === 8) a = parseInt(h.slice(6, 8), 16) / 255;
+  } else if ((m = t.match(/^rgba?\(([^)]+)\)$/))) {
+    const v = m[1].split(/[ ,\/]+/).filter(Boolean).map(parseFloat); [r, g, b] = v; if (v.length > 3) a = v[3];
+  } else if ((m = t.match(/^hsla?\(([^)]+)\)$/))) {
+    const v = m[1].split(/[ ,\/]+/).filter(Boolean).map(parseFloat); if (v.length > 3) a = v[3];
+    return { h: v[0], s: v[1] / 100, l: v[2] / 100, a };
+  } else return null;
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  let h = 0, sat = 0;
+  if (d) { sat = d / (1 - Math.abs(2 * l - 1)); h = mx === r ? 60 * (((g - b) / d) % 6) : mx === g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4); if (h < 0) h += 360; }
+  return { h, s: sat, l, a };
+}
+const withAlpha = (hex, a) => a < 1 ? `rgba(${parseInt(hex.slice(1, 3), 16)},${parseInt(hex.slice(3, 5), 16)},${parseInt(hex.slice(5, 7), 16)},${a})` : hex;
+// swap matching colours anywhere inside a colour value (plain, expression, or old-style stops)
+function swapColours(v, test, to) {
+  let changed = false;
+  const walk = (x) => {
+    if (typeof x === 'string') { const c = parseColour(x); if (c && test(c)) { changed = true; return withAlpha(to, c.a); } return x; }
+    if (Array.isArray(x)) return x.map(walk);
+    if (x && typeof x === 'object') { const o = {}; for (const k in x) o[k] = walk(x[k]); return o; }
+    return x;
+  };
+  const out = walk(v);
+  return changed ? out : null;
+}
+const isWhiteish = (c) => c.l > 0.85 && c.s < 0.3;
+const isBeige = (c) => c.h >= 20 && c.h <= 70 && c.s >= 0.08 && c.l >= 0.72 && c.l <= 0.97;
+function recolorStreetsLayer(l) {
+  if (!l.paint) return false;
+  if (l.type === 'line' && /transport/i.test(l['source-layer'] || '') && l.paint['line-color'] != null) {
+    const v = swapColours(l.paint['line-color'], isWhiteish, STREETS_ROAD_GREY);
+    if (v) { l.paint['line-color'] = v; return true; }
+  }
+  if (l.type === 'fill' && l.paint['fill-color'] != null) {
+    const v = swapColours(l.paint['fill-color'], isBeige, STREETS_GROUND_GREEN);
+    if (v) { l.paint['fill-color'] = v; return true; }
+  }
+  return false;
 }
 function setStreetsVisible(on) {
   if (streetsState !== 'ready' || streetsShown === on) return;
@@ -2959,18 +3018,119 @@ const NIGHT_COLORS = {
   sky:{'sky-color':'#02050d','sky-horizon-blend':0.34,'horizon-color':'#17283c','horizon-fog-blend':0.72,'fog-color':'#08111d','fog-ground-blend':0.72},
   light:{anchor:'viewport',color:'#d9e7ff',intensity:0.18}
 };
-const BUILDING_CITY_GREYS = true; // houses brown, city buildings grey (false: all brown)
+// ---- building colours by region ----
+// Each region has a palette for houses and one for taller city buildings;
+// every building picks its own colour from them (by its id and height), so
+// neighbours differ. The region follows the map centre: buildings only show
+// from zoom 14, when the view is a few km across, so one region at a time
+// works. Listed most specific first; anywhere else uses BUILDING_DEFAULT.
+// Repeating a colour in a list makes it more common.
+const BUILDING_REGION_STYLES = true; // false: one palette everywhere (BUILDING_DEFAULT)
+const BUILDING_DEFAULT = { house: ['#cdb58c', '#d8c19a', '#c4a97c', '#bfa37e'], city: ['#b9b4ab', '#a9a7a2', '#9ba1a6', '#8f99a3'], accent: ['#7d8a91', '#6f9c8a', '#8a6f5a'] };
+// accent: building parts that sit on top of a lower section (towers on podiums,
+// spires, domes, cupolas) get an accent colour; set false to colour them like the rest
+const BUILDING_PART_ACCENTS = true;
+// Houses get a tonal step per storey (1–4): brightness factor for 1, 2, 3, 4 storeys.
+// A storey is taken as ~3.3 m. Set to [1, 1, 1, 1] to switch the steps off.
+const BUILDING_STOREY_TONES = [1.08, 1.0, 0.92, 0.85];
+// Taller buildings get the same kind of steps by height band: [from metres, brightness]
+const BUILDING_TALL_TONES = [[14, 1.06], [25, 1.0], [45, 0.94], [90, 0.88], [180, 0.82]];
+// Real colours: buildings that carry a colour in the map data (from OpenStreetMap
+// tags) use it; everything else keeps its palette colour. Set false to ignore them.
+const BUILDING_OSM_COLOURS = true;
+// scale a colour's brightness inside a style expression (MapLibre can take a colour apart and rebuild it)
+const toneColour = (colourExpr, factorExpr) => ['let', 'c', ['to-rgba', ['to-color', colourExpr]], 'f', factorExpr,
+  ['rgba',
+    ['min', 255, ['*', ['at', 0, ['var', 'c']], ['var', 'f']]],
+    ['min', 255, ['*', ['at', 1, ['var', 'c']], ['var', 'f']]],
+    ['min', 255, ['*', ['at', 2, ['var', 'c']], ['var', 'f']]],
+    ['at', 3, ['var', 'c']]]];
+const BUILDING_REGIONS = [
+  // --- cities (checked first): their own look inside the wider region ---
+  ['Venice', [12.29, 45.42, 12.37, 45.45], { house: ['#e0967a', '#e8b07c', '#d8705a', '#f2d7a8', '#c9a089', '#e8c8a0'], city: ['#e0b090', '#d9a080'], accent: ['#b5583a', '#8a9a90'] }],
+  ['Amsterdam', [4.80, 52.33, 4.98, 52.42], { house: ['#7a3b2a', '#5a2e22', '#9a4a32', '#3e2a24', '#c9b79a', '#6e2f26', '#2f3a3a'], city: ['#8a4a36', '#b8a68a', '#5a3a2e', '#7f98a6'], accent: ['#3a4448', '#6f9c8a'] }],
+  ['Paris', [2.22, 48.81, 2.47, 48.91], { house: ['#e8dcc0', '#ddd0b0', '#efe6cf', '#d6c7a3', '#e4d8bc'], city: ['#e4d8bc', '#d2c39f', '#ece2cc', '#a9bcc6'], accent: ['#7f8c96', '#6e7a84', '#c9a94a'] }],
+  ['London', [-0.35, 51.38, 0.15, 51.62], { house: ['#c9a66b', '#a5553c', '#efe9df', '#8d5a3c', '#b8885a'], city: ['#b9a68a', '#d8d2c4', '#7f98a6', '#9fb3bd', '#c4ccd0'], accent: ['#6f9c8a', '#5e6a72', '#c9a94a'] }],
+  ['Copenhagen', [12.45, 55.62, 12.65, 55.73], { house: ['#e8b84a', '#d9603b', '#4f8a8b', '#e9dfc8', '#b9473a', '#f0d080'], city: ['#e0d8c8', '#c9c0b0', '#9aaab4'], accent: ['#6f9c8a', '#5f8f7a'] }],
+  ['Stockholm', [17.95, 59.28, 18.15, 59.37], { house: ['#e3a857', '#c9603e', '#e6d7b8', '#9e3b2f', '#f0c36a'], city: ['#d9cfc0', '#b8b0a4'], accent: ['#6f9c8a', '#3a4448'] }],
+  ['Prague', [14.35, 50.04, 14.52, 50.12], { house: ['#efe2c0', '#e8c8a0', '#f2d48a', '#d9a07a', '#e8e2d6'], city: ['#e0d8c8', '#c9c0b0'], accent: ['#5f9c7a', '#3a4448', '#c9a94a'] }],
+  ['Rome', [12.40, 41.84, 12.57, 41.95], { house: ['#d98a4e', '#c46d3c', '#e0b06b', '#b5583a', '#e8c48d'], city: ['#d9955a', '#e6bc80', '#c47a48'], accent: ['#9aa3a0', '#b5583a'] }],
+  ['Lisbon', [-9.23, 38.69, -9.09, 38.80], { house: ['#f2d06b', '#f0a8a0', '#f5f0e6', '#8fb3d9', '#e8835f', '#f5f0e6'], city: ['#f0e2c8', '#e8c0a0', '#b9c4cc'], accent: ['#3a6fb0', '#c9a94a'] }],
+  ['Barcelona', [2.05, 41.32, 2.23, 41.47], { house: ['#d9b98c', '#cfa577', '#e8d5b5', '#b88a5e', '#f0e2c8'], city: ['#e0c49c', '#cfae86', '#8fb0c0'], accent: ['#c9a94a', '#5f9c8a', '#b5583a'] }],
+  ['Marrakech', [-8.10, 31.58, -7.92, 31.68], { house: ['#c9573f', '#b84a35', '#d97a5a', '#e0a07a', '#a8402e'], city: ['#c45a40', '#d98a68'], accent: ['#3fa08a', '#e8d6a0'] }],
+  ['Istanbul', [28.85, 40.95, 29.15, 41.12], { house: ['#e8d8bc', '#d9a77a', '#c9c0b0', '#b97a5a', '#f0e8d8'], city: ['#ddd2c0', '#9ab2c0'], accent: ['#8a9aa8', '#5f7a8a', '#c9a94a'] }],
+  ['St Petersburg', [30.10, 59.80, 30.55, 60.05], { house: ['#f2d48a', '#e8b8a8', '#a8d0c0', '#f0ebe0', '#d9c39a', '#e8d6b8'], city: ['#c9c4bc', '#b8b4ae', '#9aaab4'], accent: ['#d9b04a', '#5f9c6a', '#3a6fb0'] }],
+  ['Moscow', [37.35, 55.57, 37.85, 55.92], { house: ['#e8d6b8', '#d9c39a', '#c25a4a', '#f2d48a', '#e8b8a8'], city: ['#c9c4bc', '#8fa3b6', '#c0c8d0'], accent: ['#d9b04a', '#5f9c6a', '#c25a4a', '#3a6fb0'] }],
+  ['Dubai', [55.05, 24.95, 55.45, 25.35], { house: ['#e8d6b4', '#dcc59c', '#f0e6d2'], city: ['#7fb0c8', '#a8cddb', '#5a8fa8', '#c8d8de', '#d9c89a'], accent: ['#c9a94a', '#3fa0a8'] }],
+  ['Jaipur', [75.72, 26.84, 75.88, 26.98], { house: ['#e89a7a', '#d9826a', '#f0b090', '#e6a080'], city: ['#e0957a', '#f0c0a0'], accent: ['#f5f0e6', '#c9a94a'] }],
+  ['Tokyo', [139.55, 35.55, 139.95, 35.82], { house: ['#e9e6df', '#cfccc5', '#b9b6ae', '#d9c7b0', '#e6dccb'], city: ['#c8c8c4', '#a9adb0', '#e0ddd6', '#9fb4c4', '#cfd8de'], accent: ['#c9473a', '#5e6a72'] }],
+  ['Kyoto', [135.68, 34.93, 135.83, 35.08], { house: ['#8a6a50', '#6a5040', '#d9cdb8', '#4a4a48', '#a88a6a'], city: ['#c9c0b0', '#9a8a78'], accent: ['#c9473a', '#3a3a38'] }],
+  ['Hong Kong', [113.95, 22.20, 114.30, 22.40], { house: ['#e6e2da', '#cfcac0', '#b9b4aa', '#e8a888'], city: ['#8fa9b4', '#b4c4ca', '#d9dedd', '#c0bab0'], accent: ['#c9473a', '#5e6a72'] }],
+  ['Singapore', [103.65, 1.22, 104.05, 1.47], { house: ['#f2efe8', '#e0e8e0', '#c9d9cf', '#f0d9b0', '#e8b8a0'], city: ['#9fc4c8', '#c4dcdc', '#6fa0a8', '#e6e2da'], accent: ['#5f9c8a', '#c9a94a'] }],
+  ['Manhattan & Brooklyn', [-74.05, 40.57, -73.85, 40.88], { house: ['#7b4a36', '#9a5b40', '#b07a5a', '#6b5b52', '#a35b45'], city: ['#b9a58c', '#a35b45', '#d6cbb8', '#8aa0b0', '#b8c4cc', '#5d6f7d', '#c9b48a'], accent: ['#6f9c8a', '#c9a94a', '#8a9aa0'] }],
+  ['San Francisco', [-122.52, 37.70, -122.35, 37.82], { house: ['#f2c9b8', '#c9dce8', '#f0e2a8', '#d9c9e8', '#b8d9c4', '#f5f0e6'], city: ['#a9bac4', '#cfd6da', '#e0d8cc'], accent: ['#c25a3a', '#5e6a72'] }],
+  ['Chicago', [-87.80, 41.75, -87.55, 42.00], { house: ['#a85a42', '#c9b49a', '#8a5a44', '#d6d0c4'], city: ['#7f8f9a', '#a9b4bc', '#4f5f6a', '#c9b88a'], accent: ['#6f9c8a', '#3a4448'] }],
+  ['Mexico City', [-99.25, 19.30, -99.05, 19.50], { house: ['#e85a8a', '#f2b84a', '#4fb0a0', '#e8e0d0', '#d97a4a', '#7a6ad9'], city: ['#e0d8cc', '#c9b49a', '#9db4c4'], accent: ['#c9a94a', '#3fa08a'] }],
+  ['Havana', [-82.45, 23.08, -82.30, 23.16], { house: ['#7fc9d9', '#f2a0b4', '#f2d06b', '#a8d98a', '#e8e2d6'], city: ['#e8e2d6', '#c9dce8'], accent: ['#c9a94a'] }],
+  ['Cape Town', [18.38, -33.98, 18.52, -33.88], { house: ['#e8e2d6', '#f2c96b', '#8fb8d9', '#e88a6b', '#b8d98a', '#e8a0c0'], city: ['#e0d8cc', '#9fb0bc'], accent: ['#5f9c8a'] }],
+  // --- regions ---
+  ['Cyclades (Greek islands)', [23.9, 36.2, 26.5, 37.8], { house: ['#f7f7f2', '#f7f7f2', '#f2f2ec', '#f7f7f2', '#eef3f6', '#2f6fb0', '#f7f7f2', '#3a7cc0'], city: ['#f2f2ec', '#e8eef2', '#2f6fb0'] , accent: ['#2f6fb0', '#3a7cc0'] }],
+  ['Greece', [19.3, 34.8, 28.3, 41.8], { house: ['#f5f2ea', '#efe8da', '#f7f7f2', '#e8dcc4', '#3a7cc0', '#f5f2ea'], city: ['#ece6da', '#ddd6ca', '#c9c4bc'] , accent: ['#3a7cc0', '#c9a94a'] }],
+  ['Portugal', [-9.6, 36.9, -6.1, 42.2], { house: ['#f5f0e6', '#f2d06b', '#f0a8a0', '#8fb3d9', '#e8835f', '#f5f0e6'], city: ['#ece4d6', '#d9cfc0', '#b9c4cc'] }],
+  ['Spain', [-9.4, 35.9, 3.4, 43.8], { house: ['#f5f0e6', '#e8d5b5', '#d9b98c', '#cfa577', '#f5f0e6'], city: ['#e0c49c', '#cfae86', '#b9b4ab', '#9fb0bc'] }],
+  ['Italy', [6.6, 36.6, 18.6, 47.1], { house: ['#d98a4e', '#e0b06b', '#c46d3c', '#e8c48d', '#b5583a', '#f0dcb0'], city: ['#d9955a', '#e6bc80', '#b9b4ab'] , accent: ['#b5583a', '#9aa3a0'] }],
+  ['Morocco', [-13.2, 27.6, -1.0, 35.9], { house: ['#c9573f', '#d97a5a', '#e0a07a', '#b84a35', '#f0e2c8'], city: ['#d98a68', '#e6d2b4', '#c9b8a0'] , accent: ['#3fa08a', '#e8d6a0'] }],
+  ['Netherlands & Belgium', [2.5, 49.5, 7.2, 53.6], { house: ['#7a3b2a', '#9a4a32', '#5a2e22', '#b05a40', '#c9b79a', '#3e2a24'], city: ['#8a4a36', '#b8a68a', '#9ba1a6', '#7f98a6'] , accent: ['#3a4448', '#6f9c8a'] }],
+  ['UK & Ireland', [-10.6, 49.8, 1.8, 60.9], { house: ['#a5553c', '#c9a66b', '#efe9df', '#8d5a3c', '#b8885a', '#a5553c'], city: ['#b9a68a', '#d8d2c4', '#9fb3bd', '#7f98a6'] }],
+  ['Iceland', [-24.6, 63.2, -13.4, 66.6], { house: ['#d94e3a', '#3e7cb1', '#f2c14e', '#e8e4da', '#5a9e6f', '#e8e4da'], city: ['#e8e4da', '#c9c4bc', '#9aaab4'] }],
+  ['Scandinavia', [4.5, 54.5, 31.6, 71.2], { house: ['#a8322a', '#e8c24a', '#e8e4da', '#3e6f8f', '#c9673a', '#a8322a'], city: ['#d9cfc0', '#b8b0a4', '#9aaab4'] , accent: ['#6f9c8a', '#3a4448'] }],
+  ['France', [-5.2, 42.3, 8.3, 51.1], { house: ['#e8dcc0', '#ddd0b0', '#efe6cf', '#d6c7a3', '#c9b892'], city: ['#e4d8bc', '#d2c39f', '#a9bcc6', '#8fa9b8'] }],
+  ['Central Europe', [5.8, 45.8, 24.2, 55.1], { house: ['#f0ebe0', '#e6dcc4', '#efe3c8', '#d8cfbf', '#f2d48a'], city: ['#d8d2c4', '#bfb6a5', '#a39b8c', '#9aaab4'] }],
+  ['Japan', [129, 30, 146, 46], { house: ['#e9e6df', '#cfccc5', '#d9c7b0', '#b9b6ae', '#8a6a50'], city: ['#c8c8c4', '#a9adb0', '#cfd8de', '#9fb4c4'] , accent: ['#c9473a', '#3a3a38'] }],
+  ['China & Korea', [100, 18, 131, 46], { house: ['#d6cdbf', '#c9b9a0', '#b8a588', '#9c4a3a', '#e0dcd4'], city: ['#c0bab0', '#a8aaa8', '#9ab6c6', '#c8d6de'] , accent: ['#c9473a', '#3a6f5a'] }],
+  ['Eastern Europe & Russia', [24.2, 41, 180, 78], { house: ['#e8d6b8', '#f2d48a', '#e8b8a8', '#f0ebe0', '#c9c0b0'], city: ['#c9c4bc', '#b8b4ae', '#a8aaa8', '#8fa3b6'] , accent: ['#d9b04a', '#5f9c6a', '#c25a4a'] }],
+  ['Gulf & Arabia', [34, 12, 60, 32], { house: ['#e8d6b4', '#f0e6d2', '#dcc59c', '#f5efe4'], city: ['#e6dcc6', '#7fb0c8', '#a8cddb', '#5a8fa8', '#c8d8de'] , accent: ['#3fa0a8', '#c9a94a'] }],
+  ['North Africa & Egypt', [-17, 15, 34, 35], { house: ['#d9c09a', '#c9a87a', '#e6d5b8', '#b8956a'], city: ['#e0cfae', '#cbb28a', '#b9b4ab'] }],
+  ['India', [68, 6, 97, 36], { house: ['#e6d5c0', '#e8a87a', '#8fb3a0', '#f2d06b', '#e89a7a', '#c9c0b4'], city: ['#d9cfc4', '#c4ced4', '#9ab0c0'] , accent: ['#f5f0e6', '#c9473a', '#c9a94a'] }],
+  ['Southeast Asia', [92, -11, 141, 23], { house: ['#f2efe6', '#f2d06b', '#e8a0a0', '#a0c8e8', '#e8c8a0', '#c9e0a8'], city: ['#e6e2da', '#c4dcdc', '#9fc4c8'] , accent: ['#c9a94a', '#c9473a'] }],
+  ['Caribbean', [-85, 10, -59, 24], { house: ['#7fc9d9', '#f2a0b4', '#f2d06b', '#a8d98a', '#e8e2d6'], city: ['#e8e2d6', '#c9dce8', '#b9c4cc'] }],
+  ['Mexico & Central America', [[-117.2, 14.5, -86.7, 26.0], [-115.0, 26.0, -100.5, 31.5], [-92.5, 7, -77, 18.5]], { house: ['#e85a8a', '#f2b84a', '#4fb0a0', '#e8e0d0', '#d97a4a', '#7a6ad9'], city: ['#e0d8cc', '#c9b49a', '#9db4c4'] }],
+  ['South America', [-82, -56, -34, 13], { house: ['#f0e8d8', '#e8c8a0', '#d9a87a', '#bfd9cf', '#e8835f'], city: ['#e0d8cc', '#c9c0b4', '#9fbcc8'] }],
+  ['USA & Canada', [-170, 24, -52, 72], { house: ['#f2efe8', '#c9ccc6', '#b8c4cc', '#d9cdb5', '#a8b8a0', '#8a9aa8', '#e8e0d0'], city: ['#a85a42', '#c9b49a', '#8aa0b0', '#b8c4cc', '#6f7f8a'] }],
+  ['Australia & NZ', [112, -48, 179, -10], { house: ['#e8dcc8', '#f0ebe2', '#c9785a', '#d8c09a', '#b8735a'], city: ['#e0d8cc', '#9fbccc', '#c6d6de'] }],
+  ['Sub-Saharan Africa', [-18, -35, 52, 15], { house: ['#d9b894', '#c9a07a', '#e8e2d6', '#f2c96b', '#8fb8d9', '#b8735a'], city: ['#d9d2c6', '#b9b4ab', '#9fb0bc'] }],
+];
+let buildingRegion = null; // { name, house, city }
+function buildingRegionAt(lng, lat) {
+  if (BUILDING_REGION_STYLES) for (const [name, area, pal] of BUILDING_REGIONS) {
+    const boxes = Array.isArray(area[0]) ? area : [area]; // one box or several
+    if (boxes.some(([w, s, e, n]) => lng >= w && lng <= e && lat >= s && lat <= n)) return { name, ...BUILDING_DEFAULT, ...pal };
+  }
+  return { name: 'default', ...BUILDING_DEFAULT };
+}
+// re-colour when the map centre moves into another region
+function updateBuildingRegion() {
+  if (!terrainMapInstance) return;
+  const c = terrainMapInstance.getCenter(), r = buildingRegionAt(c.lng, c.lat);
+  if (buildingRegion && r.name === buildingRegion.name) return;
+  buildingRegion = r;
+  console.log('gallery: building colours —', r.name);
+  applyBuildingPalette();
+}
+// one colour per building from a palette, mixing its id with its height so neighbours differ
+const pickByBuilding = (h, arr) => ['at', ['%', ['abs', ['round', ['+', ['to-number', ['id'], 0], ['*', h, 13.7]]]], arr.length], ['literal', arr]];
+const BUILDING_CITY_GREYS = true; // houses and city buildings get separate palettes (false: houses' palette for all)
 const BUILDING_HOUSE_MAX_M = 14;  // up to ~4 storeys counts as a house
 function applyBuildingPalette() {
   if (!terrainMapInstance || !terrainMapInstance.getLayer('maptiler-3d-buildings')) return;
   // The extrusion renderer supplies directional shading and its own vertical
   // gradient. These palettes set the material family; the height stops give
   // the upper faces a distinct highlight tone without adding another layer.
-  // One palette for every base map (satellite, streets, classic): houses in the
-  // classic brown, bigger city buildings in greys. There's no building-type
-  // field in the map data, so height stands in for it: under
+  // Same palettes on every base map (satellite, streets, classic): the current
+  // region's house colours for low buildings, its city colours for taller
+  // ones, each building picking its own (see BUILDING_REGIONS). There's no
+  // building-type field in the map data, so height stands in for it: under
   // BUILDING_HOUSE_MAX_M reads as a house, above as a city building.
-  // Set BUILDING_CITY_GREYS = false to have everything in the brown again.
   const night = nightModeOn;
   const h = ['coalesce', ['get', 'render_height'], ['get', 'height'], 0];
   let color, opacity;
@@ -2983,9 +3143,16 @@ function applyBuildingPalette() {
     ];
     opacity = 0.98;
   } else {
-    const brown = ['interpolate', ['linear'], h, 0, '#cdb58c', 50, '#d8c19a', 160, '#b77d61', 350, '#a95f4d'];
-    const greys = ['interpolate', ['linear'], h, BUILDING_HOUSE_MAX_M, '#b9b4ab', 40, '#a9a7a2', 120, '#9ba1a6', 300, '#8f99a3'];
-    color = BUILDING_CITY_GREYS ? ['case', ['<', h, BUILDING_HOUSE_MAX_M], brown, greys] : brown;
+    if (!buildingRegion) { const c = terrainMapInstance.getCenter(); buildingRegion = buildingRegionAt(c.lng, c.lat); }
+    const T = BUILDING_STOREY_TONES, storeyTone = ['step', h, T[0], 4.5, T[1], 7.5, T[2], 10.5, T[3]]; // 1 / 2 / 3 / 4 storeys
+    const tallTone = ['step', h, BUILDING_TALL_TONES[0][1], ...BUILDING_TALL_TONES.slice(1).flat()]; // brightness by height band
+    const house = toneColour(pickByBuilding(h, buildingRegion.house), storeyTone), city = toneColour(pickByBuilding(h, buildingRegion.city), tallTone);
+    const body = BUILDING_CITY_GREYS ? ['case', ['<', h, BUILDING_HOUSE_MAX_M], house, city] : house;
+    // a raised base means this is an upper part of a building (tower, spire, dome)
+    const raised = ['>', ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0], 2];
+    const palette = BUILDING_PART_ACCENTS ? ['case', raised, pickByBuilding(h, buildingRegion.accent), body] : body;
+    // a real colour from the data wins when it's a valid colour; otherwise to-color falls through to the palette
+    color = BUILDING_OSM_COLOURS ? ['to-color', ['get', 'colour'], palette] : palette;
     opacity = 0.92;
   }
   terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-color', color);
@@ -3486,6 +3653,8 @@ function initTerrainMap() {
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('zoom', updateSatAuto);    // satellite → base map fade as you zoom past the imagery's real depth
   terrainMapInstance.on('moveend', requestSatProbe); // re-check the imagery depth for each new area
+  terrainMapInstance.on('moveend', updateBuildingRegion); // building colours follow the region you're looking at
+  terrainMapInstance.on('moveend', requestStreetRoutes);  // fetch street routes for lights starting in view
   terrainMapInstance.on('click', onTerrainMapClick);
   // Diagnostic: MapLibre has its own internal ResizeObserver watching the
   // container and auto-resizing when it detects a change — the console
@@ -3908,7 +4077,7 @@ const MARKER_LAYOUT = {
   'icon-allow-overlap': true, 'icon-ignore-placement': true,
 };
 let lightLayersReady = false;
-let lights3DEventsRef = null, lights3DSelected;
+let lights3DEventsRef = null, lights3DSelected, lights3DLastEvents = null;
 function addLightLayers3D() {
   const map = terrainMapInstance;
   if (!map || map.getSource('lights-routes')) return;
@@ -3940,15 +4109,20 @@ function syncLights3D() {
   const map = terrainMapInstance;
   if (!in3D || !map || !lightLayersReady) return;
   if (events !== lights3DEventsRef) {
+    if (events !== lights3DLastEvents) { lights3DLastEvents = events; requestStreetRoutes(); } // new lights: maybe new routes to fetch
     lights3DEventsRef = events;
     const routes = [], markers = [], circles = new Map(), inFlight = new Set();
     for (const ev of events) {
       const key = evKey(ev), group = groupKeyOf(ev);
       const s = lightLonLat(ev, 'sent'), r = lightLonLat(ev, 'received');
       if (s && r) {
-        // straight Mercator line, taking the short way across the 180° line
-        const rLon = r[0] + 360 * Math.round((s[0] - r[0]) / 360);
-        routes.push({ type: 'Feature', properties: { key, group }, geometry: { type: 'LineString', coordinates: [s, [rLon, r[1]]] } });
+        // street route out of the sender's city (if fetched), then a straight
+        // Mercator line to the destination, taking the short way across the 180° line
+        const street = streetRouteFor(s, r);
+        const head = street && street.length > 1 ? [s, ...street] : [s];
+        const last = head[head.length - 1];
+        const rLon = r[0] + 360 * Math.round((last[0] - r[0]) / 360);
+        routes.push({ type: 'Feature', properties: { key, group }, geometry: { type: 'LineString', coordinates: [...head, [rLon, r[1]]] } });
       }
       if (s && !circles.has(group)) circles.set(group, { key, s }); // one sent circle per sender group
       if (!ev.downloadedAt) inFlight.add(group);
@@ -3973,6 +4147,111 @@ function syncLights3D() {
       ['all', ['==', ['get', 'part'], 'sent'], ['==', ['get', 'group'], circleG]],
       ['all', ['==', ['get', 'part'], 'received'], routeCond]]);
   }
+}
+
+
+// ============================================================
+// STREET ROUTES (3D): each light leaves its sender's city along real streets
+// before heading straight for the destination. A route is fetched from the
+// Stadia Maps routing API (Valhalla, OpenStreetMap roads) from the sender's
+// spot to a point ROUTE_EXIT_KM out toward the destination (or all the way,
+// if the destination is that close), then the line continues straight.
+// Requests only happen in your browser while the page is open, and only:
+//   - in 3D, zoomed in to ROUTE_MIN_ZOOM or closer (where streets are visible)
+//   - for lights that start inside the current view
+//   - once per route: results are kept in this browser (localStorage)
+//   - at most ROUTE_MAX_PER_VISIT per page load, one at a time
+// If anything fails (quota, network), lights just keep their straight lines.
+// ============================================================
+const STREET_ROUTES = true;
+const ROUTE_COSTING = 'pedestrian'; // Valhalla profile: 'pedestrian' (walking streets, old-town lanes) or 'auto' (driving roads)
+const ROUTE_EXIT_KM = 10;          // how far out of the city the street part runs
+const ROUTE_MIN_ZOOM = 11;
+const ROUTE_MAX_PER_VISIT = 80;
+const ROUTE_CACHE_KEY = 'gallery.streetRoutes.v1';
+let routeCache = {}; // key -> encoded polyline (precision 6), or '' for "no route"
+try { routeCache = JSON.parse(localStorage.getItem(ROUTE_CACHE_KEY) || '{}') || {}; } catch (e) { routeCache = {}; }
+const routeDecoded = new Map(), routePending = new Set();
+let routeQueue = [], routeBusy = false, routeRequested = 0, routeStopped = false;
+function saveRouteCache() { try { localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(routeCache)); } catch (e) {} }
+// Google/Valhalla encoded polyline → [[lon, lat], ...]
+function decodePolyline(str, precision = 6) {
+  const out = [], f = Math.pow(10, precision); let i = 0, lat = 0, lon = 0;
+  while (i < str.length) {
+    for (const k of [0, 1]) {
+      let shift = 0, result = 0, b;
+      do { b = str.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      const d = (result & 1) ? ~(result >> 1) : (result >> 1);
+      if (k === 0) lat += d; else lon += d;
+    }
+    out.push([lon / f, lat / f]);
+  }
+  return out;
+}
+// where the street part should end: ROUTE_EXIT_KM along the way to the destination (or the destination itself)
+function routeTarget(s, r) {
+  const km = d3.geoDistance(s, r) * 6371;
+  return km <= ROUTE_EXIT_KM * 1.5 ? { to: r, whole: true } : { to: d3.geoInterpolate(s, r)(ROUTE_EXIT_KM / km), whole: false };
+}
+// cache key: the sender's spot plus the rough direction (30° sectors) — lights from one
+// sender heading the same way share a street route
+function routeKey(s, r) {
+  const brg = (Math.atan2(r[0] - s[0], r[1] - s[1]) * 180 / Math.PI + 360) % 360;
+  const near = d3.geoDistance(s, r) * 6371 <= ROUTE_EXIT_KM * 1.5;
+  return `${s[0].toFixed(4)},${s[1].toFixed(4)}|${near ? r[0].toFixed(4) + ',' + r[1].toFixed(4) : Math.round(brg / 30) % 12}|${ROUTE_COSTING}`;
+}
+// street points for a light, or null if none (yet)
+function streetRouteFor(s, r) {
+  if (!STREET_ROUTES) return null;
+  const key = routeKey(s, r);
+  if (routeDecoded.has(key)) return routeDecoded.get(key);
+  const enc = routeCache[key];
+  if (enc === undefined || enc === '') return null;
+  const pts = decodePolyline(enc); routeDecoded.set(key, pts);
+  return pts;
+}
+// queue routes for lights starting inside the view (called when the 3D view settles)
+function requestStreetRoutes() {
+  const map = terrainMapInstance;
+  if (!STREET_ROUTES || routeStopped || !in3D || !map || map.getZoom() < ROUTE_MIN_ZOOM) return;
+  const b = map.getBounds();
+  for (const ev of events) {
+    const s = lightLonLat(ev, 'sent'), r = lightLonLat(ev, 'received');
+    if (!s || !r || !b.contains(s)) continue;
+    const key = routeKey(s, r);
+    if (key in routeCache || routePending.has(key)) continue;
+    routePending.add(key); routeQueue.push({ key, s, r });
+  }
+  pumpRouteQueue();
+}
+async function pumpRouteQueue() {
+  if (routeBusy) return;
+  routeBusy = true;
+  while (routeQueue.length && !routeStopped) {
+    if (routeRequested >= ROUTE_MAX_PER_VISIT) { console.log('gallery: street routes — per-visit cap reached'); routeStopped = true; break; }
+    const { key, s, r } = routeQueue.shift();
+    const { to } = routeTarget(s, r);
+    routeRequested++;
+    try {
+      const res = await fetch(`https://api.stadiamaps.com/route/v1?api_key=${STADIA_API_KEY}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ locations: [{ lon: s[0], lat: s[1], type: 'break' }, { lon: to[0], lat: to[1], type: 'break' }], costing: ROUTE_COSTING, units: 'kilometers', directions_type: 'none' }),
+      });
+      if (res.status === 401 || res.status === 403 || res.status === 429) { console.warn('gallery: street routes stopped (HTTP ' + res.status + ')'); routeStopped = true; routePending.delete(key); break; }
+      const data = res.ok ? await res.json() : null;
+      const shape = data && data.trip && data.trip.legs && data.trip.legs[0] && data.trip.legs[0].shape;
+      routeCache[key] = shape || ''; // '' = no road route here (e.g. island, no streets): keep the straight line, don't ask again
+    } catch (err) {
+      console.warn('gallery: street route failed', err); routePending.delete(key); // network hiccup: may retry on a later view
+      await new Promise(rs => setTimeout(rs, 1500));
+      continue;
+    }
+    routePending.delete(key);
+    saveRouteCache();
+    lights3DEventsRef = null; // redraw the 3D routes with the new street part
+    await new Promise(rs => setTimeout(rs, 300)); // gentle pacing
+  }
+  routeBusy = false;
 }
 
 // screen point (relative to the map container) of a light's sent/received
@@ -4694,6 +4973,9 @@ function tick() {
 // undocks/enters 3D first; already in 3D it just flies there.
 // ============================================================
 const TEST_SPOTS = [
+  // heavily 3D-mapped places where real building colours are tagged in OpenStreetMap
+  ['Real colours', [['Moscow — Kremlin', 55.7519, 37.6200], ['Moscow — St Basil’s', 55.7525, 37.6231], ['Pavlovsk palace (near St Petersburg)', 59.6862, 30.4321],
+    ['Kyiv — Mother Ukraine', 50.4265, 30.5632], ['London — St George Wharf', 51.4862, -0.1253], ['Manhattan — Midtown', 40.7549, -73.9840], ['Pyongyang — Kim Il Sung Sq.', 39.0194, 125.7381]]],
   ['Switzerland', [['Zurich old town', 47.3717, 8.5423], ['Lucerne Chapel Bridge', 47.0516, 8.3075], ['Zermatt', 46.0207, 7.7491]]],
   ['Netherlands', [['Amsterdam canal ring', 52.3667, 4.8897], ['Rotterdam Markthal', 51.9201, 4.4888], ['Kinderdijk windmills', 51.8846, 4.6385]]],
   ['France', [['Paris — Notre-Dame', 48.8530, 2.3499], ['Vieux Lyon', 45.7622, 4.8270], ['Mont-Saint-Michel', 48.6361, -1.5115], ['Marseille old port', 43.2951, 5.3740]]],

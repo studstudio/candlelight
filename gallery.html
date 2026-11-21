@@ -199,6 +199,8 @@
       radial-gradient(circle at 8% 82%, rgba(193,214,227,0.45) 0%, transparent 46%);
   }
   #terrainMap.active { opacity: 1; pointer-events: auto; }
+  /* isometric mode: the map is drawn at low resolution and scaled up with hard pixel edges */
+  #terrainMap.isoPixel .maplibregl-canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
   /* detail card for a tapped light: sits at the bottom of the map area so it
      never covers the docked inlay, and works the same docked or undocked */
   #eventCard {
@@ -288,27 +290,6 @@
     z-index: 3; display: none; align-items: center; justify-content: center;
   }
   #backBtn.visible { display: flex; }
-  /* isometric city maps: chip top-left (right of the 3D back button), list below it */
-  #isoChip {
-    position: absolute; left: 14px; top: 14px; z-index: 5; display: none;
-    background: var(--panel); border: 1px solid var(--ember-dim); border-radius: 8px;
-    padding: 7px 11px; font-size: 11px; color: var(--ember); cursor: pointer; touch-action: manipulation;
-    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; font-weight: 300; letter-spacing: 0.03em;
-  }
-  #isoChip.visible { display: block; }
-  #isoChip.in3d, #isoPanel.in3d { left: 60px; }
-  #isoPanel {
-    position: absolute; left: 14px; top: 52px; z-index: 5; display: none; flex-direction: column;
-    max-width: min(300px, calc(100% - 28px)); max-height: 55vh; overflow-y: auto; touch-action: pan-y;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 0;
-    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace; font-weight: 300; font-size: 10.5px;
-  }
-  #isoPanel * { touch-action: pan-y; }
-  #isoPanel.open { display: flex; }
-  #isoPanel .isoCity { color: var(--cream-dim); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 12px 2px; }
-  #isoPanel a { display: flex; justify-content: space-between; gap: 12px; padding: 5px 12px; color: var(--cream); text-decoration: none; }
-  #isoPanel a .h { color: var(--ember); white-space: nowrap; }
-  #isoPanel a.isoSrc { color: var(--cream-dim); font-size: 9px; padding-top: 8px; }
   #backBtn svg { display: block; }
   /* strip MapLibre's own attribution/logo chrome down to something minimal
      and on-theme rather than its default styling */
@@ -331,11 +312,10 @@
     <div id="poleFade"></div>
     <canvas id="map"></canvas>
     <canvas id="solarOverlay"></canvas>
-    <button id="isoChip"></button>
-    <div id="isoPanel"></div>
     <div id="galleryBelow" class="hidden"><div id="tickerList"></div></div>
     <div id="terrainMap"></div>
     <div id="layerToggles">
+      <button id="toggleIsoBtn" class="layerToggle" aria-pressed="false">isometric</button>
       <button id="toggleLabelsBtn" class="layerToggle">labels</button>
       <button id="toggleLinesBtn" class="layerToggle">terrain lines</button>
       <button id="toggleBathymetryBtn" class="layerToggle">bathymetry</button>
@@ -1063,7 +1043,6 @@ function draw() {
 
   drawSolarOverlay();
   updateGalleryBelow();
-  updateIsoChip();
 
   drawEvents(lw, pr);
   if (in3D) syncLights3D();
@@ -1615,6 +1594,7 @@ function dockMap() { dockWithFade(); } // initial-load call sites — same mecha
 // and read when the layers are first created in initTerrainMap().
 function applyLayerToggles() {
   if (!terrainMapInstance) return;
+  if (isoOn) return; // isometric mode owns layer visibility while it's on
   try {
     // Keep Classic on the original Mapterhorn terrain geometry and Satellite
     // on MapTiler Terrain RGB. This is important for both responsiveness and
@@ -1725,6 +1705,410 @@ toggleBuildingsBtn.onclick = () => {
   toggleBuildingsBtn.setAttribute('aria-pressed', String(buildingsOn));
   applyLayerToggles();
 };
+
+// ============================================================
+// ISOMETRIC MODE (3D view): turns the whole 3D map, anywhere in the world,
+// into a SimCity-style pixel-art diorama built from the same open map data.
+//  - camera locked to the isometric angle (35.26° above the ground, turned
+//    45°) with the perspective narrowed as far as MapLibre allows
+//  - drawn at 1/ISO_PIXEL_SIZE resolution and scaled up without smoothing,
+//    so every art pixel is a crisp ISO_PIXEL_SIZE x ISO_PIXEL_SIZE block
+//  - its own flat palette: pixel patterns for woods, fields, parks, sand and
+//    wetland; water styled by type (sea, lakes/ponds, rivers, canals/docks,
+//    pools, streams, drains, dry beds); foam outlines on every shore
+//  - it moves: water flows (sea, rivers, canals drift; lakes sparkle), gusts
+//    of wind roll across grass, parks, fields and trees, and rooftop glints
+//    twinkle on tall buildings — all by swapping pixel-pattern frames
+//  - buildings coloured per building from a "vibe": each listed city has its
+//    own building palettes (low-rise / mid-rise / towers) and its own river
+//    colour (city rivers are murkier); everywhere else gets a regional vibe
+//    (nordic, mediterranean, desert, tropical, east asian, temperate). The
+//    vibe follows the map centre.
+// The normal map's layers are hidden while it's on and restored after.
+// ============================================================
+const ISO_PIXEL_SIZE = 2;          // CSS px per art pixel (bigger = chunkier)
+const ISO_PITCH = 54.74, ISO_BEARING = 45; // true isometric: 35.26° elevation
+const ISO_FOV = 12;                // degrees; MapLibre's default is ~37 (lower = flatter)
+const ISO_USE_OSM_COLOURS = false; // true: buildings tagged with a colour in OSM use it
+const ISO_PR = 1 / ISO_PIXEL_SIZE; // render pixel ratio (and pattern image pixel ratio)
+const toggleIsoBtn = document.getElementById('toggleIsoBtn');
+let isoOn = false, isoSnapshot = {}, isoSaved = null, isoVibeKey = '', isoPal = null, isoFrame = 0, isoAnimTimer = 0, isoFrames = {};
+
+// ---- palettes ----
+const ISO_BASE = {
+  ground: '#a8c878', residential: '#d6cfba', commercial: '#cfc5b0', industrial: '#b9b1a1', civic: '#ddd2a8', cemetery: '#8fb07a', pitch: '#6fbf4f',
+  grass: '#9fd06a', park: '#7fc05a', parkHi: '#a8e07a', wood: '#3f8a3f', woodHi: '#5fae4f', woodLo: '#2c662c',
+  farmA: '#c9d07a', farmB: '#a9c262', sand: '#ecd9a0', sandLo: '#d6bd7e', ice: '#eef6f8', rock: '#a8a49a', wetland: '#6fa080',
+  ocean: '#3f7fbf', oceanHi: '#7fb8e8', lake: '#4f9fc9', lakeHi: '#a8dcf0', river: '#4f8fbf', riverHi: '#8fc4e8',
+  canal: '#5a7a5e', canalLo: '#465e48', ditch: '#7a7a52', pool: '#4fd9e8', foam: '#e2f2f7',
+  road: '#7f7d78', roadMajor: '#6f6d68', street: '#9a9890', edge: '#cfc8b6', marking: '#f2e6a0', path: '#d9c49a', rail: '#5a4a3a',
+  sky: '#bfe0f0',
+  bLow: ['#d8c8b0', '#c9a888', '#a85a42', '#e6dccb', '#b9a48a'], bMid: ['#cfc6b6', '#b8ad9c', '#e0d8c8'], bTall: ['#8fa8b8', '#b0c0c8', '#6f8898'],
+};
+const ISO_REGIONS = {
+  temperate: {},
+  nordic: { ground: '#9ab87a', grass: '#93bd6e', wood: '#2f6f45', woodHi: '#4a8f5c', woodLo: '#22553a', ocean: '#2f6a9a', lake: '#3f86b0',
+    bLow: ['#a8322a', '#e8c24a', '#e8e4da', '#3e6f8f', '#c9673a', '#2f2f2f'], bMid: ['#d9cfc0', '#b8b0a4', '#e8e0d0'] },
+  mediterranean: { ground: '#c9c08a', grass: '#b5c47a', wood: '#5f8a45', woodHi: '#7fa85a', woodLo: '#4a6e36', ocean: '#2f86c9', oceanHi: '#7fc8f0',
+    bLow: ['#f2ead8', '#e8c89a', '#d98a5a', '#f5f0e6', '#e0b080'], bMid: ['#ece2cc', '#d9c4a0', '#f5efe2'] },
+  desert: { ground: '#e0c99a', residential: '#e6d4ac', grass: '#b8c27a', park: '#8fb85a', wood: '#6f8a4a', sand: '#ecd59a',
+    bLow: ['#d9c09a', '#c9a87a', '#e6d5b8', '#b8956a', '#f0e2c4'], bMid: ['#e0cfae', '#cbb28a', '#ece0c8'] },
+  tropical: { ground: '#8fcf6a', grass: '#8fd66a', park: '#5fbf4f', wood: '#2f8a3a', woodHi: '#4fae4a', woodLo: '#1f6a2c', ocean: '#2a9ac9', oceanHi: '#8fe0f0', lake: '#3fb0c0',
+    bLow: ['#f2efe6', '#e8c8a0', '#9fd0c0', '#f2a08a', '#f0d06b', '#c9e0f0'], bMid: ['#ece6da', '#d9e6e0', '#f0dcc0'] },
+  eastasia: { ground: '#a8c080', residential: '#d4d0c6', bLow: ['#e0dcd4', '#c9c4bc', '#a8a49c', '#d9c8b0', '#bfc4c8'], bMid: ['#d6d2ca', '#b9b6b0', '#e6e2da'] },
+};
+function isoRegion(lng, lat) {
+  const a = Math.abs(lat);
+  if (a > 55) return 'nordic';
+  if ((lat > 15 && lat < 35 && lng > -17 && lng < 60) || (lat > 25 && lat < 37 && lng > -118 && lng < -100) || (lat > -32 && lat < -18 && lng > 118 && lng < 145)) return 'desert';
+  if (lat > 30 && lat < 46 && lng > -10 && lng < 40) return 'mediterranean';
+  if (lat > 20 && lat < 46 && lng > 100 && lng < 146) return 'eastasia';
+  if (a < 23.5) return 'tropical';
+  return 'temperate';
+}
+// [name, lat, lon, overrides] — building palettes are low-rise, mid-rise, towers; river = city river colour
+const ISO_CITY_VIBES = [
+  ['Paris', 48.857, 2.352, { bLow: ['#e8dcc0', '#ddd0b0', '#efe6cf', '#d6c7a3', '#c9b892'], bMid: ['#e4d8bc', '#d2c39f', '#ece2cc'], bTall: ['#8fa9b8', '#a9bcc6', '#6f8a9c'], river: '#6f8f7a', road: '#8a857c' }],
+  ['London', 51.507, -0.128, { bLow: ['#c9a66b', '#a5553c', '#efe9df', '#8d5a3c', '#b8885a'], bMid: ['#b9a68a', '#d8d2c4', '#7d6e5d'], bTall: ['#7f98a6', '#9fb3bd', '#5e7686', '#c4ccd0'], river: '#7a7458' }],
+  ['Amsterdam', 52.37, 4.90, { bLow: ['#7a3b2a', '#5a2e22', '#9a4a32', '#3e2a24', '#c9b79a', '#6e2f26'], bMid: ['#8a4a36', '#b8a68a', '#5a3a2e'], river: '#5e6e4e', canal: '#4e5e40', canalLo: '#3c4a32' }],
+  ['New York', 40.73, -73.99, { bLow: ['#7b4a36', '#9a5b40', '#b07a5a', '#6b5b52', '#a35b45'], bMid: ['#b9a58c', '#a35b45', '#d6cbb8', '#8a6a52'], bTall: ['#8aa0b0', '#b8c4cc', '#5d6f7d', '#c9b48a', '#9a9a96'], river: '#56707a', road: '#6a6864', marking: '#f2c84a' }],
+  ['Tokyo', 35.68, 139.76, { bLow: ['#e9e6df', '#cfccc5', '#b9b6ae', '#d9c7b0', '#e6dccb'], bMid: ['#c8c8c4', '#a9adb0', '#e0ddd6'], bTall: ['#9fb4c4', '#cfd8de', '#7d8f9c'], river: '#5f7f86', road: '#8f8f8c' }],
+  ['Kyoto', 35.01, 135.77, { bLow: ['#8a6a50', '#6a5040', '#d9cdb8', '#4a4a48', '#a88a6a'], bMid: ['#c9c0b0', '#9a8a78', '#e0d8c8'], river: '#5f8a80' }],
+  ['Seoul', 37.57, 126.98, { bLow: ['#e6e0d8', '#cfc9bf', '#b5b0a8', '#d9c4b0'], bTall: ['#9ab2c2', '#c6d2da', '#7a90a0'], river: '#5b8a96' }],
+  ['Beijing', 39.90, 116.40, { bLow: ['#c9b9a0', '#b8a588', '#9c4a3a', '#d9cdb8', '#8a8a86'], bTall: ['#9aaab2', '#c0cacf'], river: '#6b7d6a' }],
+  ['Shanghai', 31.23, 121.47, { bLow: ['#d6cdbf', '#bfb5a5', '#a89a88'], bTall: ['#9ab6c6', '#c8d6de', '#6f8f9f', '#d9c8a0'], river: '#6b7d6a' }],
+  ['Hong Kong', 22.32, 114.17, { bLow: ['#e6e2da', '#cfcac0', '#b9b4aa'], bMid: ['#d9d4ca', '#c0bab0', '#e8a888'], bTall: ['#8fa9b4', '#b4c4ca', '#d9dedd'], ocean: '#3d7a8f' }],
+  ['Singapore', 1.29, 103.85, { bLow: ['#f2efe8', '#e0e8e0', '#c9d9cf', '#f0d9b0', '#e8b8a0'], bTall: ['#9fc4c8', '#c4dcdc', '#6fa0a8'], river: '#4f8a86' }],
+  ['Bangkok', 13.75, 100.50, { bLow: ['#e8e2d6', '#d9b080', '#c9c0b0', '#e8c060'], bTall: ['#9fb8c4', '#c4d0d6'], river: '#8a7a50' }],
+  ['Hanoi', 21.03, 105.85, { bLow: ['#f2d06b', '#e8a0a0', '#a0c8e8', '#e8e8e0', '#c9e0a8'], river: '#8a7050' }],
+  ['Ho Chi Minh City', 10.78, 106.70, { bLow: ['#f2d06b', '#e8a0a0', '#a0c8e8', '#e8e8e0', '#f0b878'], bTall: ['#9ab8c4'], river: '#7a6e4a' }],
+  ['Mumbai', 19.07, 72.88, { bLow: ['#e6d5c0', '#d9b38c', '#c9c0b4', '#8fb3a0', '#e8a87a'], bTall: ['#9ab0c0', '#c4ced4'] }],
+  ['Jaipur', 26.91, 75.79, { bLow: ['#e89a7a', '#d9826a', '#f0b090', '#e6a080'], bMid: ['#e0957a', '#f0c0a0'] }],
+  ['Dubai', 25.20, 55.27, { bLow: ['#e8d6b4', '#dcc59c', '#f0e6d2'], bMid: ['#e6dcc6', '#d0c0a0'], bTall: ['#7fb0c8', '#a8cddb', '#5a8fa8', '#c8d8de', '#d9c89a'], ocean: '#3ea0b8' }],
+  ['Cairo', 30.04, 31.24, { bLow: ['#d9c09a', '#c9a87a', '#b8956a', '#e6d5b8', '#a88a6a'], river: '#4f7f7a' }],
+  ['Marrakech', 31.63, -7.99, { bLow: ['#c9573f', '#b84a35', '#d97a5a', '#e0a07a', '#a8402e'], bMid: ['#c45a40', '#d98a68'] }],
+  ['Istanbul', 41.01, 28.98, { bLow: ['#e8d8bc', '#d9a77a', '#c9c0b0', '#b97a5a', '#f0e8d8'], bTall: ['#9ab2c0'], ocean: '#3f7aa0' }],
+  ['Athens', 37.98, 23.73, { bLow: ['#f0ebe0', '#e6dfd2', '#d9d0c0', '#efe8dc'] }],
+  ['Santorini', 36.42, 25.43, { bLow: ['#f7f7f2', '#f0f0ea', '#e8eef2', '#2f6fb0', '#f7f7f2'], ocean: '#1f6fb8' }],
+  ['Rome', 41.90, 12.50, { bLow: ['#d98a4e', '#c46d3c', '#e0b06b', '#b5583a', '#e8c48d'], bMid: ['#d9955a', '#e6bc80', '#c47a48'], river: '#7f7a4f' }],
+  ['Venice', 45.44, 12.33, { bLow: ['#e0967a', '#e8b07c', '#d8705a', '#f2d7a8', '#c9a089'], river: '#4f7d6e', canal: '#4f7d6e', canalLo: '#3e6a5c', lake: '#4f8a80' }],
+  ['Florence', 43.77, 11.25, { bLow: ['#e8c890', '#d9a870', '#c98a5a', '#f0dcb0'] }],
+  ['Barcelona', 41.39, 2.17, { bLow: ['#d9b98c', '#cfa577', '#e8d5b5', '#b88a5e'], bMid: ['#e0c49c', '#cfae86'], bTall: ['#8fb0c0'] }],
+  ['Madrid', 40.42, -3.70, { bLow: ['#d6b48c', '#e6d2b4', '#b9875e', '#f0e6d4'] }],
+  ['Lisbon', 38.72, -9.14, { bLow: ['#f2d06b', '#f0a8a0', '#f5f0e6', '#8fb3d9', '#e8835f'], bMid: ['#f0e2c8', '#e8c0a0'], river: '#5a86a0' }],
+  ['Porto', 41.15, -8.61, { bLow: ['#e8835f', '#f2d06b', '#8fb3d9', '#f5f0e6', '#b85a40'], river: '#4f7a8a' }],
+  ['Berlin', 52.52, 13.405, { bLow: ['#d8d2c4', '#bfb6a5', '#a39b8c', '#e6e0d2', '#8f8576'], bTall: ['#9aaab4'], river: '#5e6f63' }],
+  ['Prague', 50.08, 14.44, { bLow: ['#efe2c0', '#e8c8a0', '#f2d48a', '#d9a07a', '#e8e2d6'], river: '#5f7d72' }],
+  ['Vienna', 48.21, 16.37, { bLow: ['#efe3c8', '#e8d8b0', '#f3ecdc', '#d8c39a'], river: '#5f7f80' }],
+  ['Copenhagen', 55.68, 12.57, { bLow: ['#e8b84a', '#d9603b', '#4f8a8b', '#e9dfc8', '#b9473a'], ocean: '#4e6f86' }],
+  ['Stockholm', 59.33, 18.07, { bLow: ['#e3a857', '#c9603e', '#e6d7b8', '#9e3b2f', '#f0c36a'] }],
+  ['Reykjavik', 64.15, -21.94, { bLow: ['#d94e3a', '#3e7cb1', '#f2c14e', '#e8e4da', '#5a9e6f'] }],
+  ['Edinburgh', 55.95, -3.19, { bLow: ['#8a8278', '#a39a8e', '#6e675f', '#b8ad9e'] }],
+  ['Dublin', 53.35, -6.26, { bLow: ['#9a4a36', '#b05a40', '#e8e0d0', '#7a3a2c'], river: '#5a6a58' }],
+  ['Moscow', 55.76, 37.62, { bLow: ['#e8d6b8', '#d9c39a', '#c25a4a', '#b8a88e'], bTall: ['#8fa3b6', '#c0c8d0'], river: '#5f7068' }],
+  ['San Francisco', 37.77, -122.42, { bLow: ['#f2c9b8', '#c9dce8', '#f0e2a8', '#d9c9e8', '#b8d9c4', '#f5f0e6'], bTall: ['#a9bac4', '#cfd6da'], ocean: '#4f7f99' }],
+  ['Los Angeles', 34.05, -118.24, { bLow: ['#f0e6d4', '#e8d0b0', '#d9b894', '#f5efe4', '#c9a888'], bTall: ['#9db4c4'] }],
+  ['Chicago', 41.88, -87.63, { bLow: ['#a85a42', '#c9b49a', '#8a5a44', '#d6d0c4'], bTall: ['#7f8f9a', '#a9b4bc', '#4f5f6a', '#c9b88a'], river: '#4f7f6f' }],
+  ['Toronto', 43.65, -79.38, { bLow: ['#b8735a', '#e0d8cc', '#c9a68a'], bTall: ['#7fa8b8', '#9fc0cc', '#5f7f8f'] }],
+  ['Vancouver', 49.28, -123.12, { bLow: ['#e0d8cc', '#c9b49a', '#a8b8b0'], bTall: ['#7fb0b8', '#a8ccd0', '#5f8f98'] }],
+  ['Mexico City', 19.43, -99.13, { bLow: ['#e85a8a', '#f2b84a', '#4fb0a0', '#e8e0d0', '#d97a4a', '#7a6ad9'] }],
+  ['Havana', 23.11, -82.37, { bLow: ['#7fc9d9', '#f2a0b4', '#f2d06b', '#a8d98a', '#e8e2d6'] }],
+  ['Rio de Janeiro', -22.91, -43.17, { bLow: ['#f0e8d8', '#e8c8a0', '#d9a87a', '#bfd9cf'], bTall: ['#9fbcc8'] }],
+  ['Buenos Aires', -34.60, -58.38, { bLow: ['#e8dcc8', '#d9c4a8', '#c9a888', '#b8b0a4'], river: '#8a7a5a' }],
+  ['Cape Town', -33.92, 18.42, { bLow: ['#e8e2d6', '#f2c96b', '#8fb8d9', '#e88a6b', '#b8d98a'] }],
+  ['Sydney', -33.87, 151.21, { bLow: ['#e8dcc8', '#c9785a', '#f0ebe2', '#d8c09a'], bTall: ['#9fbccc', '#c6d6de'], ocean: '#3a7fa6' }],
+  ['Melbourne', -37.81, 144.96, { bLow: ['#d8c8b0', '#b8735a', '#e8e0d0'], bTall: ['#8fa8b8', '#b8c8d0'], river: '#6a7a5a' }],
+];
+const ISO_CITY_RADIUS_KM = 30;
+function isoMix(a, b, t) {
+  const p = (h) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)), A = p(a), B = p(b);
+  return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join('');
+}
+// palette for the map centre: base → region → city (cities also get murkier rivers by default)
+function isoVibeAt(lng, lat) {
+  const region = isoRegion(lng, lat);
+  const pal = { ...ISO_BASE, ...ISO_REGIONS[region] };
+  let city = null, best = Infinity;
+  for (const c of ISO_CITY_VIBES) { const km = d3.geoDistance([lng, lat], [c[2], c[1]]) * 6371; if (km < ISO_CITY_RADIUS_KM && km < best) { best = km; city = c; } }
+  if (city) {
+    Object.assign(pal, city[3]);
+    if (!city[3].river) pal.river = isoMix(pal.river, '#7a6a4a', 0.35); // city rivers run murkier
+    if (!city[3].canal) { pal.canal = isoMix(pal.river, '#4a5a3a', 0.4); pal.canalLo = isoMix(pal.canal, '#2a3424', 0.3); }
+  }
+  pal.riverHi = isoMix(pal.river, '#ffffff', 0.35);
+  pal.oceanHi = pal.oceanHi || isoMix(pal.ocean, '#ffffff', 0.4);
+  return { key: city ? city[0] : region, label: city ? city[0] : region, pal };
+}
+
+// ---- pixel patterns (16x16 art pixels; seeded so they never change between redraws) ----
+const ISO_PAT = 16;
+function isoPattern(seed, paint) {
+  const c = document.createElement('canvas'); c.width = c.height = ISO_PAT;
+  const x = c.getContext('2d'), rnd = mulberry32(seed);
+  const px = (col, i, j) => { x.fillStyle = col; x.fillRect(((i % ISO_PAT) + ISO_PAT) % ISO_PAT, ((j % ISO_PAT) + ISO_PAT) % ISO_PAT, 1, 1); };
+  paint(x, px, rnd);
+  return x.getImageData(0, 0, ISO_PAT, ISO_PAT);
+}
+const isoFill = (x, col) => { x.fillStyle = col; x.fillRect(0, 0, ISO_PAT, ISO_PAT); };
+function isoBuildPatterns(P) {
+  // each entry: list of frames (ImageData). Animated ones cycle in isoAnimate().
+  const frames = (n, fn) => Array.from({ length: n }, (_, f) => fn(f));
+  const lighten = (c, t) => isoMix(c, '#ffffff', t);
+  // a soft gust: a lighter diagonal band that travels across the tile, frame by frame
+  const gust = (f, n, i, j) => { const b = Math.round(f * 16 / n); const d = (((i + j - b) % 16) + 16) % 16; return d < 3; };
+  const ocean = (f) => isoPattern(11, (x, px, r) => {
+    isoFill(x, P.ocean);
+    for (let k = 0; k < 6; k++) { const i = (r() * 16 | 0) + f, j = r() * 16 | 0; px(P.oceanHi, i, j); px(P.oceanHi, i + 1, j); if (k % 2) px(P.oceanHi, i + 2, j); }
+  });
+  const lake = (f) => isoPattern(21, (x, px, r) => {
+    isoFill(x, P.lake);
+    for (let k = 0; k < 6; k++) { const i = r() * 16 | 0, j = r() * 16 | 0, on = (k + f) % 4; if (on === 0) { px(P.lakeHi, i, j); px(P.lakeHi, i + 1, j); } else if (on === 1) px(P.lakeHi, i, j); }
+  });
+  const river = (f) => isoPattern(31, (x, px, r) => {
+    isoFill(x, P.river);
+    for (let k = 0; k < 5; k++) { const i = (r() * 16 | 0) + f, j = (r() * 16 | 0) + f; px(P.riverHi, i, j); px(P.riverHi, i + 1, j); }
+  });
+  const canal = (f) => isoPattern(41, (x, px, r) => {
+    isoFill(x, P.canal);
+    for (let k = 0; k < 7; k++) { const i = (r() * 16 | 0) + (f >> 1), j = r() * 16 | 0; px(P.canalLo, i, j); px(P.canalLo, i + 1, j); }
+    px(lighten(P.canal, 0.25), (r() * 16 | 0) + f, r() * 16 | 0);
+  });
+  const grass = (f, n) => isoPattern(111, (x, px, r) => {
+    isoFill(x, P.grass);
+    for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) if (gust(f, n, i, j)) px(lighten(P.grass, 0.14), i, j);
+    for (let k = 0; k < 7; k++) { const i = r() * 16 | 0, j = r() * 16 | 0, lean = gust(f, n, i, j) ? 1 : 0; px(lighten(P.grass, 0.3), i + lean, j - 1); px(isoMix(P.grass, P.wood, 0.35), i, j); }
+  });
+  const park = (f, n) => isoPattern(61, (x, px, r) => {
+    isoFill(x, P.park);
+    for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) if (gust(f, n, i, j)) px(lighten(P.park, 0.12), i, j);
+    for (let k = 0; k < 6; k++) { const i = r() * 16 | 0, j = r() * 16 | 0; px(P.parkHi, i + (gust(f, n, i, j) ? 1 : 0), j); }
+    const i = r() * 16 | 0, j = r() * 16 | 0, sway = gust(f, n, i, j) ? 1 : 0;
+    for (const [a, b] of [[0, 0], [1, 0], [0, 1], [1, 1]]) px(P.wood, i + a + (b === 0 ? sway : 0), j + b);
+    px(P.woodLo, i + 1, j + 2);
+  });
+  const farm = (f, n) => isoPattern(71, (x, px) => {
+    for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) { const base = (j >> 2) % 2 ? P.farmA : P.farmB; px(gust(f, n, i, j) ? lighten(base, 0.16) : base, i, j); } // wheat waves
+  });
+  const wood = (f, n) => isoPattern(51, (x, px, r) => {
+    isoFill(x, P.wood);
+    for (let k = 0; k < 4; k++) { const i = r() * 16 | 0, j = r() * 16 | 0, sway = gust(f, n, i, j) ? 1 : 0;
+      for (const [a, b] of [[0, -1], [-1, 0], [0, 0], [1, 0], [0, 1]]) px(P.woodHi, i + a + (b < 1 ? sway : 0), j + b);
+      px(P.woodLo, i + 1, j + 1); px(P.woodLo, i, j + 2); }
+  });
+  const N = 8; // frames in one gust cycle
+  return {
+    'iso-pat-ocean': frames(16, ocean),
+    'iso-pat-lake': frames(4, lake),
+    'iso-pat-river': frames(16, river),
+    'iso-pat-canal': frames(16, canal),
+    'iso-pat-grass': frames(N, f => grass(f, N)),
+    'iso-pat-park': frames(N, f => park(f, N)),
+    'iso-pat-farm': frames(N, f => farm(f, N)),
+    'iso-pat-wood': frames(N, f => wood(f, N)),
+    'iso-pat-sand': [isoPattern(81, (x, px, r) => { isoFill(x, P.sand); for (let k = 0; k < 8; k++) px(P.sandLo, r() * 16 | 0, r() * 16 | 0); })],
+    'iso-pat-wetland': [isoPattern(91, (x, px, r) => { isoFill(x, P.wetland); for (let k = 0; k < 5; k++) { const i = r() * 16 | 0, j = r() * 16 | 0; px(P.lake, i, j); px(P.lake, i + 1, j); px(P.woodHi, i + 3, j - 1); px(P.woodHi, i + 3, j - 2); } })],
+    'iso-pat-dry': [isoPattern(101, (x, px, r) => { isoFill(x, P.sand); for (let k = 0; k < 6; k++) { const i = r() * 16 | 0, j = r() * 16 | 0; px(P.lake, i, j); px(P.sandLo, i + 1, j + 1); } })],
+  };
+}
+// how many animation ticks (ISO_TICK_MS each) every pattern holds a frame: water flows, grass breathes
+const ISO_TICK_MS = 160;
+const ISO_ANIM_TICKS = { 'iso-pat-ocean': 3, 'iso-pat-lake': 4, 'iso-pat-river': 2, 'iso-pat-canal': 5, 'iso-pat-grass': 2, 'iso-pat-park': 2, 'iso-pat-farm': 2, 'iso-pat-wood': 3 };
+// rooftop glints: 4 sparkle images, each twinkling at its own moment; every tall building uses one
+const ISO_GLINT_SHAPES = [[], [[0, 0]], [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]], [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1], [-2, 0], [2, 0], [0, -2], [0, 2]]];
+const ISO_GLINT_SEQ = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // one twinkle per cycle
+const isoGlintImages = ISO_GLINT_SHAPES.map(shape => {
+  const c = document.createElement('canvas'); c.width = c.height = 5; const x = c.getContext('2d');
+  shape.forEach(([a, b], k) => { x.fillStyle = k === 0 ? '#ffffff' : 'rgba(255,250,215,0.85)'; x.fillRect(2 + a, 2 + b, 1, 1); });
+  return x.getImageData(0, 0, 5, 5);
+});
+let isoTick = 0;
+function isoAnimate() {
+  const map = terrainMapInstance;
+  if (!isoOn || document.hidden || !map) return;
+  isoTick++;
+  for (const [name, every] of Object.entries(ISO_ANIM_TICKS)) {
+    const f = isoFrames[name];
+    if (f && f.length > 1 && isoTick % every === 0 && map.hasImage(name)) map.updateImage(name, f[(isoTick / every | 0) % f.length]);
+  }
+  for (let g = 0; g < 4; g++) { const name = 'iso-glint-' + g; if (map.hasImage(name)) map.updateImage(name, isoGlintImages[ISO_GLINT_SEQ[(isoTick + g * 6) % ISO_GLINT_SEQ.length]]); }
+}
+// glints sit on the roof: lift each one up the screen by its building's height. icon-offset can't be
+// computed per feature, so heights are bucketed (10 m steps) and the lift interpolated over zoom
+function isoGlintOffset(lat) {
+  const h = ['coalesce', ['get', 'render_height'], ['get', 'height'], 6];
+  const k = (z) => Math.sin(ISO_PITCH * Math.PI / 180) * 512 * Math.pow(2, z) / (40075016 * Math.max(0.1, Math.cos(lat * Math.PI / 180)));
+  const at = (z) => { const st = ['step', h, ['literal', [0, -Math.round(35 * k(z))]]]; for (let b = 40; b <= 400; b += 10) st.push(b, ['literal', [0, -Math.round((b + 5) * k(z))]]); return st; };
+  return ['interpolate', ['exponential', 2], ['zoom'], 15, at(15), 20, at(20)];
+}
+
+// ---- layers ----
+const ISO_SRC = 'maptilerBuildings'; // MapTiler OpenMapTiles vector data (already used for the buildings layer)
+const isoW = (artPx) => { const a = artPx * ISO_PIXEL_SIZE; return ['interpolate', ['exponential', 2], ['zoom'], 12, a * 0.3, 15, a * 0.8, 17, a * 2, 19, a * 5]; };
+const notTunnel = ['!=', ['get', 'brunnel'], 'tunnel'];
+// width per class that also grows with zoom: MapLibre needs the zoom curve outermost,
+// so each zoom stop holds its own per-class match. pairs: [[labels, artPx], ...]
+const isoWByClass = (pairs, fallbackArtPx) => {
+  const stops = [[12, 0.3], [15, 0.8], [17, 2], [19, 5]], out = ['interpolate', ['exponential', 2], ['zoom']];
+  for (const [z, f] of stops) {
+    const m = ['match', ['get', 'class']];
+    for (const [labels, a] of pairs) m.push(labels, a * ISO_PIXEL_SIZE * f);
+    m.push(fallbackArtPx * ISO_PIXEL_SIZE * f);
+    out.push(z, m);
+  }
+  return out;
+};
+function isoBuildingColor(P) {
+  const h = ['coalesce', ['get', 'render_height'], ['get', 'height'], 6];
+  // per-building pick: mixes the feature id with its height so neighbours differ
+  const pick = (arr) => ['at', ['%', ['abs', ['round', ['+', ['to-number', ['id'], 0], ['*', h, 13.7]]]], arr.length], ['literal', arr]];
+  const byTier = ['case', ['>=', h, 60], pick(P.bTall), ['>=', h, 22], pick(P.bMid), pick(P.bLow)];
+  return ISO_USE_OSM_COLOURS ? ['to-color', ['get', 'colour'], byTier] : byTier;
+}
+// every iso layer with its paint as a function of the palette
+const ISO_LAYERS = [
+  { id: 'iso-ground', type: 'background', paint: P => ({ 'background-color': P.ground }) },
+  { id: 'iso-landuse', type: 'fill', 'source-layer': 'landuse', minzoom: 10, paint: P => ({ 'fill-color': ['match', ['get', 'class'],
+      ['residential', 'suburb', 'neighbourhood', 'quarter'], P.residential, ['commercial', 'retail'], P.commercial, ['industrial', 'railway', 'garages'], P.industrial,
+      ['school', 'university', 'college', 'kindergarten', 'hospital', 'library'], P.civic, 'cemetery', P.cemetery, ['pitch', 'stadium', 'playground'], P.pitch, P.ground] }) },
+  { id: 'iso-landcover', type: 'fill', 'source-layer': 'landcover', filter: ['match', ['get', 'class'], ['ice', 'rock'], true, false],
+    paint: P => ({ 'fill-color': ['match', ['get', 'class'], 'ice', P.ice, P.rock] }) },
+  { id: 'iso-landcover-pat', type: 'fill', 'source-layer': 'landcover',
+    filter: ['any', ['match', ['get', 'class'], ['wood', 'farmland', 'sand', 'wetland', 'grass'], true, false], ['match', ['get', 'subclass'], ['park', 'garden'], true, false]],
+    paint: () => ({ 'fill-pattern': ['match', ['get', 'subclass'], ['park', 'garden'], 'iso-pat-park',
+      ['match', ['get', 'class'], 'wood', 'iso-pat-wood', 'farmland', 'iso-pat-farm', 'sand', 'iso-pat-sand', 'grass', 'iso-pat-grass', 'iso-pat-wetland']] }) },
+  { id: 'iso-park', type: 'fill', 'source-layer': 'park', paint: () => ({ 'fill-pattern': 'iso-pat-park' }) },
+  { id: 'iso-water-ocean', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'class'], 'ocean'], paint: () => ({ 'fill-pattern': 'iso-pat-ocean' }) },
+  { id: 'iso-water-lake', type: 'fill', 'source-layer': 'water', filter: ['all', ['match', ['get', 'class'], ['lake', 'pond'], true, false], ['!=', ['get', 'intermittent'], 1]], paint: () => ({ 'fill-pattern': 'iso-pat-lake' }) },
+  { id: 'iso-water-river', type: 'fill', 'source-layer': 'water', filter: ['all', ['==', ['get', 'class'], 'river'], ['!=', ['get', 'intermittent'], 1]], paint: () => ({ 'fill-pattern': 'iso-pat-river' }) },
+  { id: 'iso-water-canal', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'class'], 'dock'], paint: () => ({ 'fill-pattern': 'iso-pat-canal' }) },
+  { id: 'iso-water-pool', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'class'], 'swimming_pool'], paint: P => ({ 'fill-color': P.pool }) },
+  { id: 'iso-water-dry', type: 'fill', 'source-layer': 'water', filter: ['==', ['get', 'intermittent'], 1], paint: () => ({ 'fill-pattern': 'iso-pat-dry' }) },
+  { id: 'iso-water-shore', type: 'line', 'source-layer': 'water', minzoom: 12, filter: ['!=', ['get', 'class'], 'swimming_pool'], paint: P => ({ 'line-color': P.foam, 'line-width': ISO_PIXEL_SIZE, 'line-opacity': 0.85 }) },
+  { id: 'iso-waterway', type: 'line', 'source-layer': 'waterway', filter: notTunnel, layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: P => ({ 'line-color': ['match', ['get', 'class'], 'river', P.river, 'canal', P.canal, 'stream', P.lake, P.ditch],
+      'line-width': isoWByClass([['river', 4], ['canal', 3], ['stream', 1.5]], 1) }) },
+  { id: 'iso-road-edge', type: 'line', 'source-layer': 'transportation', minzoom: 11, filter: ['all', notTunnel, ['match', ['get', 'class'], ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'minor', 'service'], true, false]],
+    layout: { 'line-cap': 'butt', 'line-join': 'miter' },
+    paint: P => ({ 'line-color': P.edge, 'line-width': isoWByClass([[['motorway', 'trunk'], 6], [['primary', 'secondary'], 5], ['tertiary', 4]], 3) }) },
+  { id: 'iso-road', type: 'line', 'source-layer': 'transportation', minzoom: 11, filter: ['all', notTunnel, ['match', ['get', 'class'], ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'minor', 'service'], true, false]],
+    layout: { 'line-cap': 'butt', 'line-join': 'miter' },
+    paint: P => ({ 'line-color': ['match', ['get', 'class'], ['motorway', 'trunk'], P.roadMajor, ['minor', 'service'], P.street, P.road],
+      'line-width': isoWByClass([[['motorway', 'trunk'], 4], [['primary', 'secondary'], 3], ['tertiary', 2.5]], 1.5) }) },
+  { id: 'iso-road-mark', type: 'line', 'source-layer': 'transportation', minzoom: 15, filter: ['all', notTunnel, ['match', ['get', 'class'], ['motorway', 'trunk', 'primary', 'secondary'], true, false]],
+    paint: P => ({ 'line-color': P.marking, 'line-width': ISO_PIXEL_SIZE, 'line-dasharray': [2, 2] }) },
+  { id: 'iso-path', type: 'line', 'source-layer': 'transportation', minzoom: 14, filter: ['all', notTunnel, ['match', ['get', 'class'], ['path', 'track'], true, false]],
+    paint: P => ({ 'line-color': P.path, 'line-width': ISO_PIXEL_SIZE, 'line-dasharray': [1, 1] }) },
+  { id: 'iso-rail', type: 'line', 'source-layer': 'transportation', minzoom: 12, filter: ['all', notTunnel, ['match', ['get', 'class'], ['rail', 'transit'], true, false]],
+    paint: P => ({ 'line-color': P.rail, 'line-width': isoW(1.5), 'line-dasharray': [1, 1] }) },
+  { id: 'iso-buildings', type: 'fill-extrusion', 'source-layer': 'building', minzoom: 13, filter: ['!=', ['get', 'hide_3d'], true],
+    paint: P => ({ 'fill-extrusion-color': isoBuildingColor(P),
+      // heights snapped to ~one storey, so roofs line up in steps like pixel art
+      'fill-extrusion-height': ['*', ['ceil', ['/', ['coalesce', ['get', 'render_height'], ['get', 'height'], 6], 3.2]], 3.2],
+      'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0],
+      'fill-extrusion-vertical-gradient': true, 'fill-extrusion-opacity': 1 }) },
+  { id: 'iso-glints', type: 'symbol', 'source-layer': 'building', minzoom: 15,
+    filter: ['all', ['!=', ['get', 'hide_3d'], true], ['>=', ['coalesce', ['get', 'render_height'], ['get', 'height'], 0], 30]],
+    layout: { 'symbol-placement': 'point', 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-pitch-alignment': 'viewport',
+      'icon-image': ['concat', 'iso-glint-', ['to-string', ['%', ['abs', ['round', ['to-number', ['id'], 0]]], 4]]] },
+    paint: () => ({ 'icon-opacity': 0.95 }) },
+];
+function isoEnsureLayers(P) {
+  const map = terrainMapInstance;
+  const pats = isoBuildPatterns(P); isoFrames = pats;
+  for (const [name, frames] of Object.entries(pats)) { if (map.hasImage(name)) map.updateImage(name, frames[0]); else map.addImage(name, frames[0], { pixelRatio: ISO_PR }); }
+  for (let g = 0; g < 4; g++) if (!map.hasImage('iso-glint-' + g)) map.addImage('iso-glint-' + g, isoGlintImages[0], { pixelRatio: ISO_PR });
+  if (map.getLayer('iso-ground')) return;
+  const before = map.getStyle().layers.find(l => l.id.startsWith('lights-'));
+  for (const L of ISO_LAYERS) {
+    const def = { id: L.id, type: L.type, layout: { visibility: 'none', ...(L.layout || {}) }, paint: L.paint(P) };
+    if (L.type !== 'background') { def.source = ISO_SRC; def['source-layer'] = L['source-layer']; }
+    if (L.filter) def.filter = L.filter;
+    if (L.minzoom) def.minzoom = L.minzoom;
+    try { map.addLayer(def, before && before.id); } catch (err) { console.warn('gallery: iso layer skipped', L.id, err.message); }
+  }
+}
+function isoApplyPalette(P) {
+  const map = terrainMapInstance;
+  const pats = isoBuildPatterns(P); isoFrames = pats;
+  for (const [name, frames] of Object.entries(pats)) if (map.hasImage(name)) map.updateImage(name, frames[0]);
+  if (map.getLayer('iso-glints')) { try { map.setLayoutProperty('iso-glints', 'icon-offset', isoGlintOffset(map.getCenter().lat)); } catch (err) { console.warn('gallery: glint offset', err.message); } }
+  for (const L of ISO_LAYERS) {
+    if (!map.getLayer(L.id)) continue;
+    for (const [k, v] of Object.entries(L.paint(P))) { try { map.setPaintProperty(L.id, k, v); } catch (err) { console.warn('gallery: iso paint', L.id, k, err.message); } }
+  }
+  try { map.setSky({ 'sky-color': P.sky, 'horizon-color': P.sky, 'fog-color': P.sky, 'sky-horizon-blend': 0.5, 'horizon-fog-blend': 0.5, 'fog-ground-blend': 0.9 }); } catch (e) {}
+}
+// pick the vibe for the map centre; re-styles only when it changes
+function isoUpdateVibe() {
+  if (!isoOn || !terrainMapInstance) return;
+  const c = terrainMapInstance.getCenter(), v = isoVibeAt(c.lng, c.lat);
+  if (v.key === isoVibeKey) return;
+  isoVibeKey = v.key; isoPal = v.pal;
+  isoApplyPalette(v.pal);
+  toggleIsoBtn.textContent = 'isometric · ' + v.label;
+}
+function isoSetFov(deg) { // MapLibre has no public field-of-view setting; use the internal one if it exists
+  const t = terrainMapInstance && terrainMapInstance.transform;
+  try {
+    if (t && typeof t.setFov === 'function') t.setFov(deg);
+    else if (t && 'fov' in t) t.fov = deg;
+    terrainMapInstance.triggerRepaint();
+  } catch (e) { console.warn('gallery: field of view not adjustable here', e); }
+}
+function isoGetFov() { const t = terrainMapInstance && terrainMapInstance.transform; try { return t && typeof t.fov === 'number' ? t.fov : null; } catch (e) { return null; } }
+
+function setIso(on) {
+  const map = terrainMapInstance;
+  if (on === isoOn) return;
+  if (on && (!map || !map.isStyleLoaded())) { if (map) map.once('idle', () => setIso(true)); return; }
+  isoOn = on;
+  toggleIsoBtn.classList.toggle('active', on); toggleIsoBtn.setAttribute('aria-pressed', String(on));
+  if (on) {
+    const c = map.getCenter(), v = isoVibeAt(c.lng, c.lat);
+    isoVibeKey = v.key; isoPal = v.pal;
+    isoEnsureLayers(v.pal);
+    isoApplyPalette(v.pal);
+    toggleIsoBtn.textContent = 'isometric · ' + v.label;
+    // hide every normal layer (remembering its visibility), show the iso ones
+    isoSnapshot = {};
+    for (const l of map.getStyle().layers) {
+      if (l.id.startsWith('lights-')) continue;
+      if (l.id.startsWith('iso-')) { map.setLayoutProperty(l.id, 'visibility', 'visible'); continue; }
+      isoSnapshot[l.id] = map.getLayoutProperty(l.id, 'visibility') || 'visible';
+      map.setLayoutProperty(l.id, 'visibility', 'none');
+    }
+    isoSaved = { pitch: map.getPitch(), bearing: map.getBearing(), pixelRatio: map.getPixelRatio ? map.getPixelRatio() : null, fov: isoGetFov(), light: map.getLight ? map.getLight() : null, sky: map.getSky ? map.getSky() : null };
+    if (map.setPixelRatio) map.setPixelRatio(ISO_PR);
+    document.getElementById('terrainMap').classList.add('isoPixel');
+    try { map.setLight({ anchor: 'viewport', position: [1.5, 315, 45], color: '#ffffff', intensity: 0.5 }); } catch (e) {}
+    isoSetFov(ISO_FOV);
+    map.dragRotate.disable(); map.touchZoomRotate.disableRotation(); map.touchPitch.disable();
+    map.easeTo({ pitch: ISO_PITCH, bearing: ISO_BEARING, duration: 700 });
+    clearInterval(isoAnimTimer); isoAnimTimer = setInterval(isoAnimate, ISO_TICK_MS);
+  } else {
+    clearInterval(isoAnimTimer);
+    toggleIsoBtn.textContent = 'isometric';
+    if (map) {
+      for (const l of map.getStyle().layers) if (l.id.startsWith('iso-')) map.setLayoutProperty(l.id, 'visibility', 'none');
+      for (const [id, vis] of Object.entries(isoSnapshot)) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+      isoSnapshot = {};
+      if (isoSaved) {
+        if (map.setPixelRatio) map.setPixelRatio(isoSaved.pixelRatio || window.devicePixelRatio || 1);
+        if (isoSaved.fov) isoSetFov(isoSaved.fov);
+        try { if (isoSaved.light) map.setLight(isoSaved.light); } catch (e) {}
+        try { if (isoSaved.sky) map.setSky(isoSaved.sky); } catch (e) {}
+        map.easeTo({ pitch: isoSaved.pitch, bearing: isoSaved.bearing, duration: 600 });
+      }
+      document.getElementById('terrainMap').classList.remove('isoPixel');
+      map.dragRotate.enable(); map.touchZoomRotate.enableRotation(); map.touchPitch.enable();
+      // let the normal toggles re-assert themselves
+      satVisShown = null; streetsShown = null; satFadeKey = '';
+      applyLayerToggles(); applyBuildingPalette();
+    }
+    isoVibeKey = '';
+  }
+}
+toggleIsoBtn.onclick = () => setIso(!isoOn);
 
 // ============================================================
 // OPEN AERIAL IMAGERY (satellite mode): free government aerial photos,
@@ -1925,7 +2309,7 @@ function requestSatProbe() {
 let satFadeKey = '', satVisShown = null;
 function updateSatAuto() {
   const map = terrainMapInstance;
-  if (!map || !map.getLayer('maptiler-satellite')) return;
+  if (!map || !map.getLayer('maptiler-satellite') || isoOn) return;
   const z = map.getZoom();
   // map zoom where the native satellite tiles start being enlarged (256px tiles sit one level above map zoom)
   const start = satNativeHere - 0.5, end = satNativeHere + 0.5;
@@ -3532,6 +3916,7 @@ function initTerrainMap() {
   terrainMapInstance.on('zoom', autoExitCheck);
   terrainMapInstance.on('zoom', updateSatAuto);    // satellite → streets fade as you zoom past the imagery's real depth
   terrainMapInstance.on('moveend', requestSatProbe); // re-check the imagery depth for each new area
+  terrainMapInstance.on('moveend', isoUpdateVibe);   // isometric mode: switch city/regional vibe
   terrainMapInstance.on('click', onTerrainMapClick);
   // Diagnostic: MapLibre has its own internal ResizeObserver watching the
   // container and auto-resizing when it detects a change — the console
@@ -3834,6 +4219,7 @@ function autoExitCheck() {
 
 function exit3D() {
   if (!in3D) return;
+  if (isoOn) setIso(false); // isometric is a 3D-only view: restore the normal map before leaving
   in3D = false;
   syncFlatMapToMapLibre();
   document.getElementById('terrainMap').classList.remove('active');
@@ -4363,307 +4749,6 @@ function openCard(ev, part, x, y) {
 function closeCard() { selectedKey = null; selectedGroup = null; cardEl.classList.remove('grouped'); cardAnchor = null; cancelAnimationFrame(revealRaf); endReveal(); cardEl.classList.remove('open'); }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCard(); });
 
-// ============================================================
-// ISOMETRIC CITY MAPS: since Isometric NYC (Jan 2026), people have been
-// making SimCity-style pixel-art maps of their own cities. When the map is
-// centred on a city that has any (flat map undocked, or 3D), a small chip
-// appears top-left (3D view only); tap it for the list, each opening the map in a new tab.
-// List: snapshot of the isometriccities.com directory (132 maps, 98 cities,
-// Nov 2026). Their maps are the makers' own work, so they're linked, never
-// copied or embedded.
-// ============================================================
-const ISO_CITIES = {
-  "Brasília": [-15.79, -47.88],
-  "Ericeira": [38.963, -9.417],
-  "Milton Keynes": [52.04, -0.76],
-  "Imphal": [24.817, 93.937],
-  "Albuquerque": [35.084, -106.65],
-  "Ankara": [39.93, 32.86],
-  "Barcelona": [41.39, 2.17],
-  "Berlin": [52.52, 13.405],
-  "Islamabad": [33.68, 73.05],
-  "Kinderdijk": [51.884, 4.64],
-  "Kraków": [50.06, 19.94],
-  "Los Angeles": [34.05, -118.24],
-  "Luxembourg": [49.61, 6.13],
-  "Malta": [35.9, 14.45],
-  "Miami": [25.77, -80.19],
-  "Milwaukee": [43.04, -87.91],
-  "Mumbai": [19.07, 72.88],
-  "New York": [40.73, -73.99],
-  "Paris": [48.857, 2.352],
-  "Rome": [41.9, 12.5],
-  "San Francisco": [37.77, -122.42],
-  "Seattle": [47.61, -122.33],
-  "Singapore": [1.29, 103.85],
-  "State College": [40.79, -77.86],
-  "Vancouver": [49.28, -123.12],
-  "Vienna": [48.21, 16.37],
-  "Tel Aviv": [32.08, 34.78],
-  "Helenaveen": [51.39, 5.9],
-  "Tokyo": [35.68, 139.76],
-  "São Paulo": [-23.55, -46.63],
-  "Vigo": [42.24, -8.72],
-  "Chennai": [13.08, 80.27],
-  "Coimbatore": [11.02, 76.96],
-  "Vitória": [-20.32, -40.34],
-  "Seoul": [37.57, 126.98],
-  "Rosario": [-32.95, -60.65],
-  "Athens": [37.98, 23.73],
-  "Belo Horizonte": [-19.92, -43.94],
-  "Curitiba": [-25.43, -49.27],
-  "Frankfurt": [50.11, 8.68],
-  "Lisbon": [38.72, -9.14],
-  "Madrid": [40.42, -3.7],
-  "Orindiúva": [-20.18, -49.35],
-  "Prague": [50.08, 14.44],
-  "Tirana": [41.33, 19.82],
-  "Toronto": [43.65, -79.38],
-  "Valencia": [39.47, -0.38],
-  "Lyon": [45.76, 4.84],
-  "São Bernardo do Campo": [-23.69, -46.56],
-  "Warsaw": [52.23, 21.01],
-  "Yellowknife": [62.45, -114.37],
-  "Łódź": [51.76, 19.46],
-  "Rotterdam": [51.92, 4.48],
-  "Cincinnati": [39.1, -84.51],
-  "Amsterdam": [52.37, 4.9],
-  "Bielsko-Biała": [49.82, 19.04],
-  "Edirne": [41.68, 26.56],
-  "Istanbul": [41.01, 28.98],
-  "London": [51.507, -0.128],
-  "Málaga": [36.72, -4.42],
-  "Juiz de Fora": [-21.76, -43.35],
-  "Leuven": [50.88, 4.7],
-  "Ho Chi Minh City": [10.78, 106.7],
-  "Belgrade": [44.79, 20.45],
-  "Brussels": [50.85, 4.35],
-  "Casablanca": [33.57, -7.59],
-  "Goiânia": [-16.69, -49.26],
-  "Rio de Janeiro": [-22.91, -43.17],
-  "Stockholm": [59.33, 18.07],
-  "João Pessoa": [-7.12, -34.86],
-  "Montreal": [45.5, -73.57],
-  "Adelaide": [-34.93, 138.6],
-  "Perth": [-31.95, 115.86],
-  "León": [21.12, -101.68],
-  "Ottawa": [45.42, -75.7],
-  "Victoria": [48.43, -123.37],
-  "Gold Coast": [-28.02, 153.4],
-  "Melbourne": [-37.81, 144.96],
-  "Sunshine Coast": [-26.65, 153.07],
-  "Sydney": [-33.87, 151.21],
-  "Brisbane": [-27.47, 153.03],
-  "Atlanta": [33.75, -84.39],
-  "Abidjan": [5.32, -4.02],
-  "Buenos Aires": [-34.6, -58.38],
-  "Mexico City": [19.43, -99.13],
-  "Beijing": [39.9, 116.4],
-  "Burlington": [44.48, -73.21],
-  "Tehran": [35.69, 51.39],
-  "Philadelphia": [39.95, -75.17],
-  "Mississauga": [43.59, -79.64],
-  "Neuquén": [-38.95, -68.06],
-  "Raleigh": [35.78, -78.64],
-  "Detroit": [42.33, -83.05],
-  "Florianópolis": [-27.6, -48.55],
-  "Geneva": [46.2, 6.14],
-  "Pyongyang": [39.04, 125.76],
-  "Tashkent": [41.3, 69.24],
-  "Venice": [45.44, 12.33]
-};
-// [name, city, url, how it was made]
-const ISO_MAPS = [
-  ["Brasília Isocity", "Brasília", "https://brasilia.isocity.fyi", "AI"],
-  ["Ericeira Map", "Ericeira", "https://ericeira.com/map", "AI"],
-  ["ICanSee.MK", "Milton Keynes", "https://icansee.mk", "AI"],
-  ["Imphal - Isometric Map", "Imphal", "https://manipur.oinam.com", "open data"],
-  ["Isometric Albuquerque", "Albuquerque", "https://huggingface.co/spaces/jonhebert/isometric-albuquerque", "open data"],
-  ["Isometric Ankara", "Ankara", "https://isometric-ankara.pages.dev", "open data"],
-  ["Isometric Barcelona", "Barcelona", "https://isometriccities.com/maps/barcelona/", "open data"],
-  ["Isometric Berlin", "Berlin", "https://isometricberlin.com", "3D"],
-  ["Isometric Islamabad", "Islamabad", "https://isometric-islamabad.netlify.app/islamabad/", "AI"],
-  ["Isometric Kinderdijk", "Kinderdijk", "https://sezlab.dev/kinderdijk/", "AI"],
-  ["Isometric Kraków", "Kraków", "https://sergiocarcamo.com/krakow/", "open data"],
-  ["Isometric Los Angeles", "Los Angeles", "https://isometric.la", "AI"],
-  ["Isometric Luxembourg", "Luxembourg", "https://isometric.lu", "AI"],
-  ["Isometric Malta", "Malta", "https://thatsmalta.com", "AI"],
-  ["Isometric Miami", "Miami", "https://vicecityisometric.com", "AI"],
-  ["Isometric Milwaukee", "Milwaukee", "https://tinymke.com", "AI"],
-  ["Isometric Mumbai", "Mumbai", "https://isometricmumbai.com", "AI"],
-  ["Isometric New York", "New York", "https://isometricnewyork.com", "AI"],
-  ["Isometric Paris", "Paris", "https://isometriccities.com/maps/paris/", "open data"],
-  ["Isometric Rome", "Rome", "https://isometriccities.com/maps/rome/", "open data"],
-  ["Isometric San Francisco", "San Francisco", "https://isometricsanfrancisco.com", "AI"],
-  ["Isometric Seattle", "Seattle", "https://isometricseattle.fun", "AI"],
-  ["Isometric SF", "San Francisco", "https://isometricsf.com", "AI"],
-  ["Isometric Singapore", "Singapore", "https://isometriccities.com/maps/singapore/", "open data"],
-  ["Isometric State College", "State College", "https://tiny.college", "AI"],
-  ["Isometric Vancouver", "Vancouver", "https://vancouver.isoworld.xyz", "AI"],
-  ["Isometric Vienna", "Vienna", "https://isometriccities.com/maps/vienna/", "open data"],
-  ["Isometric World: Tel Aviv-Yafo", "Tel Aviv", "https://isometricworld.dmytrokrasun.com/tel-aviv-yafo", "AI"],
-  ["Isometrisch Helenaveen", "Helenaveen", "https://helenaveen.com/3d", "open data"],
-  ["isotokyo", "Tokyo", "https://isotokyo.xwx.cat", "AI"],
-  ["MiniSP", "São Paulo", "https://minisp.marceloeduardo.com", "AI"],
-  ["NaviVigo", "Vigo", "https://navivigo.vercel.app/demo/", "AI"],
-  ["Petit Paris", "Paris", "https://petitparis.app", "3D"],
-  ["Pixel Chennai", "Chennai", "https://pixelchennai.com", "AI"],
-  ["Pixel Coimbatore", "Coimbatore", "https://pixelcbe.com", "AI"],
-  ["Pixel ES", "Vitória", "https://tinyvix.chamatt.dev", "open data"],
-  ["Pixel Singapore", "Singapore", "https://yadongxie.com/lab/singapore", "AI"],
-  ["Postcard Roads: Paris", "Paris", "https://postcardroads.com/paris", "3D"],
-  ["Seoul Miniature: Gyeongbokgung", "Seoul", "https://midagedev.github.io/seoul-miniature/", "open data"],
-  ["SimRosario", "Rosario", "https://urbagus.com/simrosario/", "AI"],
-  ["tiny athens", "Athens", "https://angelopoulosk.github.io/tiny-athens/", "AI"],
-  ["Tiny Barcelona", "Barcelona", "https://tiny-barcelona.agenturl.dev", "AI"],
-  ["Tiny BH", "Belo Horizonte", "https://tinybh.com", "AI"],
-  ["Tiny Curitiba (minicwb.com)", "Curitiba", "https://minicwb.com", "AI"],
-  ["Tiny Curitiba (tinycuritiba.com)", "Curitiba", "https://tinycuritiba.com", "open data"],
-  ["tiny frankfurt", "Frankfurt", "https://tinyfrankfurt.de", "AI"],
-  ["Tiny Lisbon", "Lisbon", "https://tinylisbon.com", "AI"],
-  ["Tiny Madrid", "Madrid", "https://tinymadrid.app", "AI"],
-  ["Tiny Orindiúva", "Orindiúva", "https://mateusfrmacedo.github.io/tiny_orindiuva/", "open data"],
-  ["Tiny Paris", "Paris", "https://tiny.paris", "AI"],
-  ["Tiny Prague (tinyprague.srsen.me)", "Prague", "https://tinyprague.srsen.me", "AI"],
-  ["Tiny Rome", "Rome", "https://tinyrome.com", "AI"],
-  ["Tiny Tirana", "Tirana", "https://tirana.fyi", "AI"],
-  ["Tiny Toronto (tinytoronto.ca)", "Toronto", "https://tinytoronto.ca", "AI"],
-  ["Tiny Toronto (toronto.rickyzhang.me)", "Toronto", "https://toronto.rickyzhang.me", "AI"],
-  ["Tiny València", "Valencia", "https://tinyvalencia.com", "AI"],
-  ["TinyLyon", "Lyon", "https://tinylyon.com", "AI"],
-  ["TinySBC", "São Bernardo do Campo", "https://tinysbc.vercel.app", "AI"],
-  ["TinySP", "São Paulo", "https://tinysp.vercel.app", "AI"],
-  ["Warsaw in voxels", "Warsaw", "https://p.migdal.pl/warsaw-vibe-voxel/", "3D"],
-  ["Yellowknife.app", "Yellowknife", "https://yellowknife.app", "open data"],
-  ["Ziemia Pikselowa", "Łódź", "https://ziemiapikselowa.pl", "open data"],
-  ["010", "Rotterdam", "https://010.jjpcodes.com", "3D"],
-  ["Hype Seoul", "Seoul", "https://hypeseoul.xyz", "AI"],
-  ["Iso Cincy", "Cincinnati", "https://isocincy.com", "3D"],
-  ["Isometric Amsterdam", "Amsterdam", "https://sezlab.dev/amsterdam/", "open data"],
-  ["Isometric Bielsko-Biała", "Bielsko-Biała", "https://bb.jest.pro", "3D"],
-  ["Isometric Edirne", "Edirne", "https://bozukartr.github.io/edirne-isometric/", "open data"],
-  ["Isometric Istanbul", "Istanbul", "https://isometricistanbul.com", "AI"],
-  ["Isometric London", "London", "https://arikhanacademic-cpu.github.io/isometric-london/", "open data"],
-  ["Isometric Málaga", "Málaga", "https://isometric-malaga.xiangminf.com", "AI"],
-  ["Isometric NYC (in code)", "New York", "https://nyc.infinite.games", "3D"],
-  ["Isometric Toronto", "Toronto", "https://iso.sloptoronto.ca", "AI"],
-  ["Isometric Warsaw", "Warsaw", "https://bedirhanyildirim.com/warsaw-izo/", "open data"],
-  ["JF em Pixels", "Juiz de Fora", "https://jfpx.pages.dev", "AI"],
-  ["Kraków w pikselach", "Kraków", "https://cracowpixelmap.com", "3D"],
-  ["leuven.social", "Leuven", "https://leuven.exe.xyz", "3D"],
-  ["MiniDF", "Brasília", "https://cadeoflavio.marceloeduardo.com/mini_df/", "AI"],
-  ["Saigon Rush Hour", "Ho Chi Minh City", "https://0xabys.github.io/saigon-rush-hour/", "3D"],
-  ["Tiny Belgrade", "Belgrade", "https://tinybelgrade.com", "AI"],
-  ["Tiny Brussels", "Brussels", "https://tiny.brussels", "3D"],
-  ["Tiny Casablanca", "Casablanca", "https://loumizhu.github.io/casablanca-pixel-map/", "AI"],
-  ["Tiny Goiânia", "Goiânia", "https://tinygyn.com", "AI"],
-  ["Tiny Prague (tinyprague.com)", "Prague", "https://tinyprague.com", "open data"],
-  ["Tiny Prague (tinyprague.cz)", "Prague", "https://tinyprague.cz", "3D"],
-  ["Tiny Rio", "Rio de Janeiro", "https://tinyrj.com", "AI"],
-  ["Tiny Stockholm", "Stockholm", "https://tinysthlm.com", "AI"],
-  ["tiny.london", "London", "https://tiny.london", "AI"],
-  ["Earth to Pixels: João Pessoa", "João Pessoa", "https://earthtopixels.com/joao-pessoa", "AI"],
-  ["Isometric Montreal", "Montreal", "https://sam10155.github.io/isometric-cities/montreal/", "AI"],
-  ["North Beach Isometric", "San Francisco", "https://justinchavez.github.io/sf-isometric-demo/", "AI"],
-  ["Pixel Adelaide", "Adelaide", "https://pixeladelaide.com", "open data"],
-  ["Pixel Perth", "Perth", "https://pixelperth.com", "open data"],
-  ["SimLeón", "León", "https://enrique-am.github.io/simleon/", "AI"],
-  ["Isometric Ottawa", "Ottawa", "https://sam10155.github.io/isometric-cities/ottawa/", "AI"],
-  ["Isometric Toronto (sam10155)", "Toronto", "https://sam10155.github.io/isometric-cities/toronto/", "AI"],
-  ["Isometric Victoria", "Victoria", "https://sam10155.github.io/isometric-cities/victoria/", "AI"],
-  ["Isopolis San Francisco", "San Francisco", "https://sf.isopolis.city", "AI"],
-  ["London, drawn", "London", "https://sheets.works/data-viz/london", "AI"],
-  ["Pixel Gold Coast", "Gold Coast", "https://pixelgoldcoast.com", "open data"],
-  ["Pixel Melbourne", "Melbourne", "https://pixelmelbourne.com", "open data"],
-  ["Pixel Sunshine Coast", "Sunshine Coast", "https://pixelsunshinecoast.com", "open data"],
-  ["Pixel Sydney", "Sydney", "https://pixelsydney.com", "open data"],
-  ["Pixel Brisbane", "Brisbane", "https://pixelbrisbane.com", "open data"],
-  ["Isometric Atlanta", "Atlanta", "https://dgbenner.github.io/isometric-atlanta/", "AI"],
-  ["Isometric NYC", "New York", "https://isometric.nyc", "AI"],
-  ["Abidjan Plateau", "Abidjan", "https://abidjan.opriel.com", "AI"],
-  ["CABA Isométrica", "Buenos Aires", "https://caba.nicolaspoore.com", "AI"],
-  ["CDMX Isométrico", "Mexico City", "https://cdmxisometrico.com", "open data"],
-  ["Isometric Beijing", "Beijing", "https://isometric-beijing.pages.dev", "3D"],
-  ["Isometric Burlington", "Burlington", "https://isoburlington.com", "AI"],
-  ["Isometric Istanbul — Day & Night", "Istanbul", "https://isometric-istanbul.vercel.app", "open data"],
-  ["Isometric Tehran", "Tehran", "https://amirdaraee.github.io/isometric-tehran/", "AI"],
-  ["Isometric Vancouver (sam10155)", "Vancouver", "https://sam10155.github.io/isometric-cities/vancouver/", "AI"],
-  ["IsoPhilly", "Philadelphia", "https://isophilly.horv.co", "open data"],
-  ["Little Mississauga", "Mississauga", "https://sauga.mohameda.li", "AI"],
-  ["Neuquén Isométrico", "Neuquén", "https://neuquen.melendez.com.ar", "AI"],
-  ["Paris en pixels", "Paris", "https://parisenpixels.fr", "AI"],
-  ["Pixel Berlin", "Berlin", "https://pixelberlin.com", "AI"],
-  ["Raleigh Terrarium", "Raleigh", "https://raleighterrarium.com", "3D"],
-  ["Tiny Detroit", "Detroit", "https://tinydetroit.com", "AI"],
-  ["Tiny Floripa", "Florianópolis", "https://tinyfloripa.com.br", "3D"],
-  ["Tiny Geneva", "Geneva", "https://tiny-geneva.pages.dev", "3D"],
-  ["Tiny Montréal", "Montreal", "https://tinymtl.com", "AI"],
-  ["tiny pyongyang", "Pyongyang", "https://tinypyongyang.live", "AI"],
-  ["Tiny SP", "São Paulo", "https://tiny-sp.agenturl.dev", "AI"],
-  ["Tiny Tashkent", "Tashkent", "https://tinytashkent.uz", "AI"],
-  ["Tiny Vancouver", "Vancouver", "https://tinyvancouver.com", "AI"],
-  ["Tiny Venezia", "Venice", "https://tiny-venezia.vercel.app", "AI"],
-  ["Tiny Warsaw", "Warsaw", "https://tinywarsaw.app", "3D"],
-  ["tiny.ottawa", "Ottawa", "https://tinyottawa.com", "AI"],
-  ["Wedding, gezeichnet", "Berlin", "https://chillchamp1.github.io/wedding-gezeichnet/", "AI"]
-];
-const ISO_3D_ONLY = true; // the chip only appears in the 3D view
-const ISO_RADIUS_KM = 30; // the map centre within this distance of a city counts as "in" it
-const isoChipEl = document.getElementById('isoChip'), isoPanelEl = document.getElementById('isoPanel');
-let isoLastCheck = 0, isoSig = '';
-
-// lon/lat at the centre of whatever map is showing, or null when docked
-function viewCenterLonLat() {
-  if (in3D && terrainMapInstance) { const c = terrainMapInstance.getCenter(); return [c.lng, c.lat]; }
-  if (ISO_3D_ONLY || docked || !projection.invert) return null;
-  // undo what screenPointFor() applies: zoom/pan transform, then the spin around discCenter
-  const sx = (canvas.clientWidth / 2 - transform.x) / transform.k, sy = (canvas.clientHeight / 2 - transform.y) / transform.k;
-  const rad = -rotationGamma * Math.PI / 180, dx = sx - discCenter.x, dy = sy - discCenter.y;
-  const bx = dx * Math.cos(rad) - dy * Math.sin(rad) + discCenter.x, by = dx * Math.sin(rad) + dy * Math.cos(rad) + discCenter.y;
-  const ll = projection.invert([bx, by]);
-  return ll && isFinite(ll[0]) && isFinite(ll[1]) ? ll : null;
-}
-function isoCitiesNear(ll) {
-  if (!ll) return [];
-  const out = [];
-  for (const [city, [lat, lon]] of Object.entries(ISO_CITIES)) {
-    const km = d3.geoDistance(ll, [lon, lat]) * 6371;
-    if (km <= ISO_RADIUS_KM) out.push({ city, km });
-  }
-  return out.sort((a, b) => a.km - b.km);
-}
-function renderIsoPanel(near) {
-  isoPanelEl.textContent = '';
-  for (const { city } of near) {
-    const h = document.createElement('div'); h.className = 'isoCity'; h.textContent = city; isoPanelEl.appendChild(h);
-    for (const [name, c, url, how] of ISO_MAPS) {
-      if (c !== city) continue;
-      const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener';
-      a.innerHTML = '<span class="n"></span><span class="h"></span>';
-      a.querySelector('.n').textContent = name; a.querySelector('.h').textContent = how + ' ↗';
-      isoPanelEl.appendChild(a);
-    }
-  }
-  const src = document.createElement('a'); src.className = 'isoSrc'; src.href = 'https://isometriccities.com/'; src.target = '_blank'; src.rel = 'noopener';
-  src.textContent = 'all maps: isometriccities.com ↗'; isoPanelEl.appendChild(src);
-}
-// called from draw(); re-checks the centre at most every 400 ms
-function updateIsoChip() {
-  const now = performance.now();
-  if (now - isoLastCheck < 400) return;
-  isoLastCheck = now;
-  const near = (transitioning ? [] : isoCitiesNear(viewCenterLonLat()));
-  const sig = near.map(n => n.city).join('|') + (in3D ? '|3d' : '');
-  if (sig === isoSig) return;
-  isoSig = sig;
-  if (!near.length) { isoChipEl.classList.remove('visible'); isoPanelEl.classList.remove('open'); return; }
-  const count = ISO_MAPS.filter(m => near.some(n => n.city === m[1])).length;
-  isoChipEl.textContent = `▦ isometric ${near[0].city}${near.length > 1 ? ' +' + (near.length - 1) : ''} · ${count}`;
-  isoChipEl.classList.add('visible');
-  isoChipEl.classList.toggle('in3d', in3D); isoPanelEl.classList.toggle('in3d', in3D); // sits right of the 3D back button
-  renderIsoPanel(near);
-}
-isoChipEl.addEventListener('click', (e) => { e.stopPropagation(); isoPanelEl.classList.toggle('open'); wake(); });
 
 // ============================================================
 // TICKER (docked view only): fills the space under the globe with a list of

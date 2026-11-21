@@ -1648,7 +1648,7 @@ function applyLayerToggles() {
       terrainMapInstance.setLayoutProperty('classic-hillshade', 'visibility', classicBaseVisible() ? 'visible' : 'none');
     }
     if (terrainMapInstance.getLayer('maptiler-hillshade')) {
-      terrainMapInstance.setLayoutProperty('maptiler-hillshade', 'visibility', usesMaptilerSurface() && !satFadedOut ? 'visible' : 'none');
+      terrainMapInstance.setLayoutProperty('maptiler-hillshade', 'visibility', maptilerSatelliteOn && !satFadedOut ? 'visible' : 'none');
     }
   } catch (err) {
     console.warn('gallery: layer toggle failed', err);
@@ -1716,58 +1716,6 @@ toggleBuildingsBtn.onclick = () => {
 };
 
 // ============================================================
-// OPEN AERIAL IMAGERY (satellite mode): free government aerial photos,
-// sharper than the satellite layer, laid over it inside their own country.
-// Each one sits directly above the MapTiler satellite layer, limited to its
-// bounding box and to zoom >= AERIAL_MINZOOM (from there out the satellite
-// is just as good). Inside one of these areas the satellite → streets fade
-// uses the aerial's depth instead of the satellite probe. Any tile a service
-// doesn't have (or a service that's down) simply shows the satellite below.
-// Licences: all allow free use with attribution (credited in the map's
-// attribution line).
-// ============================================================
-const AERIAL_MINZOOM = 12;
-const AERIAL_SOURCES = [
-  { id: 'aerial-ch', name: 'Switzerland — swisstopo SWISSIMAGE (10–25 cm)', bounds: [5.95, 45.81, 10.50, 47.81], maxzoom: 20,
-    tiles: ['https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg'],
-    attribution: '© <a href="https://www.swisstopo.admin.ch/" target="_blank">swisstopo</a>' },
-  { id: 'aerial-nl', name: 'Netherlands — PDOK Luchtfoto HR (≈8 cm)', bounds: [3.31, 50.75, 7.23, 53.56], maxzoom: 21,
-    tiles: ['https://service.pdok.nl/hwh/luchtfotorgb/wmts/v1_0/Actueel_orthoHR/EPSG:3857/{z}/{x}/{y}.jpeg'],
-    attribution: '© <a href="https://www.pdok.nl/" target="_blank">PDOK / Beeldmateriaal.nl</a> (CC BY 4.0)' },
-  { id: 'aerial-fr', name: 'France — IGN BD ORTHO (20 cm)', bounds: [-5.20, 41.30, 9.60, 51.12], maxzoom: 20,
-    tiles: ['https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=ORTHOIMAGERY.ORTHOPHOTOS&STYLE=normal&TILEMATRIXSET=PM&FORMAT=image/jpeg&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}'],
-    attribution: '© <a href="https://www.ign.fr/" target="_blank">IGN</a> (Licence Ouverte)' },
-  { id: 'aerial-at', name: 'Austria — basemap.at Orthofoto (15–29 cm)', bounds: [9.53, 46.37, 17.16, 49.02], maxzoom: 20,
-    tiles: ['https://mapsneu.wien.gv.at/basemap/bmaporthofoto30cm/normal/google3857/{z}/{y}/{x}.jpeg'],
-    attribution: 'Data source: <a href="https://basemap.at/" target="_blank">basemap.at</a>' },
-  { id: 'aerial-es', name: 'Spain — IGN PNOA (25 cm)', bounds: [-9.40, 35.90, 3.40, 43.80], maxzoom: 20,
-    tiles: ['https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&VERSION=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}'],
-    attribution: '© <a href="https://www.scne.es/" target="_blank">PNOA / IGN España</a> (CC BY 4.0)' },
-];
-function addAerialLayers() {
-  const map = terrainMapInstance;
-  if (!map || !map.getLayer('maptiler-satellite') || map.getSource(AERIAL_SOURCES[0].id)) return;
-  // insert right above the satellite layer: before whatever layer follows it
-  const ids = map.getStyle().layers.map(l => l.id), next = ids[ids.indexOf('maptiler-satellite') + 1];
-  for (const a of AERIAL_SOURCES) {
-    map.addSource(a.id, { type: 'raster', tiles: a.tiles, tileSize: 256, bounds: a.bounds, minzoom: AERIAL_MINZOOM, maxzoom: a.maxzoom, attribution: a.attribution });
-    map.addLayer({ id: a.id, type: 'raster', source: a.id, minzoom: AERIAL_MINZOOM,
-      layout: { visibility: 'none' }, // shown by updateSatAuto() together with the satellite
-      paint: { 'raster-fade-duration': 0, 'raster-resampling': 'linear' } }, next);
-  }
-  satFadeKey = ''; satVisShown = null; updateSatAuto();
-}
-// the aerial whose area contains this point (the deepest, if areas overlap), or null
-function aerialAt(lng, lat) {
-  let best = null;
-  for (const a of AERIAL_SOURCES) {
-    const [w, s, e, n] = a.bounds;
-    if (lng >= w && lng <= e && lat >= s && lat <= n && (!best || a.maxzoom > best.maxzoom)) best = a;
-  }
-  return best;
-}
-
-// ============================================================
 // STREETS BASE MAP + SATELLITE → BASE MAP AUTO-FADE
 // Three base maps: satellite, streets (MapTiler Streets v4), or classic
 // (both off). Satellite and streets are exclusive: turning one on turns the
@@ -1818,6 +1766,7 @@ function ensureStreets() {
     const before = map.getLayer('maptiler-satellite') ? 'maptiler-satellite' : undefined;
     for (const layer of style.layers || []) {
       if (layer.type === 'fill-extrusion') continue; // our own building layer covers this
+      if (layer.type === 'background') continue;     // no streets background: the classic relief map shows through instead
       const l = JSON.parse(JSON.stringify(layer));
       l.id = 'st-' + layer.id;
       if (l.source) l.source = 'st-' + l.source;
@@ -1883,11 +1832,6 @@ function requestSatProbe() {
   const map = terrainMapInstance;
   if (!map || !in3D || !maptilerSatelliteOn) return;
   const c = map.getCenter(), [ax, ay] = lngLatToTile(c.lng, c.lat, 11), key = ax + '/' + ay;
-  const aerial = aerialAt(c.lng, c.lat);
-  if (aerial) { // open aerial imagery here: its depth decides the fade, no need to probe the satellite
-    if (satNativeHere !== aerial.maxzoom) console.log(`gallery: aerial imagery here (${aerial.name}), depth z${aerial.maxzoom}`);
-    satNativeHere = aerial.maxzoom; updateSatAuto(); return;
-  }
   if (satNativeByArea.has(key)) { satNativeHere = satNativeByArea.get(key); updateSatAuto(); return; }
   satProbeWanted = { key, lng: c.lng, lat: c.lat };
   if (satProbeBusy) return;
@@ -1915,7 +1859,7 @@ let satFadeKey = '', satVisShown = null;
 // show it); zooming back out switches them off again, unless the user has
 // touched the toggle meanwhile.
 let satBaseShown = false, satFadedOut = false, buildingsAutoOn = false;
-const classicBaseVisible = () => !usesMaptilerSurface() || (maptilerSatelliteOn && satBaseShown);
+const classicBaseVisible = () => !usesMaptilerSurface() || streetsOn || (maptilerSatelliteOn && satBaseShown); // classic mode, under streets, and under a fading satellite
 function setBuildings(on) {
   buildingsOn = on;
   toggleBuildingsBtn.classList.toggle('active', on);
@@ -1940,7 +1884,6 @@ function updateSatAuto() {
       satFadeKey = key;
       const curve = ['interpolate', ['linear'], ['zoom'], start, 1, end, 0];
       map.setPaintProperty('maptiler-satellite', 'raster-opacity', curve);
-      for (const a of AERIAL_SOURCES) if (map.getLayer(a.id)) map.setPaintProperty(a.id, 'raster-opacity', curve); // aerial photos fade with it
     }
   }
   if (streetsVisible) ensureStreets();
@@ -1951,7 +1894,7 @@ function updateSatAuto() {
   }
   if (fadedOut !== satFadedOut) {
     satFadedOut = fadedOut;
-    if (map.getLayer('maptiler-hillshade')) map.setLayoutProperty('maptiler-hillshade', 'visibility', usesMaptilerSurface() && !satFadedOut ? 'visible' : 'none');
+    if (map.getLayer('maptiler-hillshade')) map.setLayoutProperty('maptiler-hillshade', 'visibility', maptilerSatelliteOn && !satFadedOut ? 'visible' : 'none');
     applyBuildingPalette();
   }
   // buildings on for the fade; back off afterwards if we were the ones who turned them on
@@ -1960,7 +1903,6 @@ function updateSatAuto() {
   if (satVisible !== satVisShown) {
     satVisShown = satVisible;
     map.setLayoutProperty('maptiler-satellite', 'visibility', satVisible ? 'visible' : 'none');
-    for (const a of AERIAL_SOURCES) if (map.getLayer(a.id)) map.setLayoutProperty(a.id, 'visibility', satVisible ? 'visible' : 'none');
   }
 }
 
@@ -3017,24 +2959,23 @@ const NIGHT_COLORS = {
   sky:{'sky-color':'#02050d','sky-horizon-blend':0.34,'horizon-color':'#17283c','horizon-fog-blend':0.72,'fog-color':'#08111d','fog-ground-blend':0.72},
   light:{anchor:'viewport',color:'#d9e7ff',intensity:0.18}
 };
+const BUILDING_CITY_GREYS = true; // houses brown, city buildings grey (false: all brown)
+const BUILDING_HOUSE_MAX_M = 14;  // up to ~4 storeys counts as a house
 function applyBuildingPalette() {
   if (!terrainMapInstance || !terrainMapInstance.getLayer('maptiler-3d-buildings')) return;
   // The extrusion renderer supplies directional shading and its own vertical
   // gradient. These palettes set the material family; the height stops give
   // the upper faces a distinct highlight tone without adding another layer.
-  const satellite = usesMaptilerSurface() && !(maptilerSatelliteOn && satFadedOut); // satellite/streets: light palette; once satellite has faded to the base map, the base palette
+  // One palette for every base map (satellite, streets, classic): houses in the
+  // classic brown, bigger city buildings in greys. There's no building-type
+  // field in the map data, so height stands in for it: under
+  // BUILDING_HOUSE_MAX_M reads as a house, above as a city building.
+  // Set BUILDING_CITY_GREYS = false to have everything in the brown again.
   const night = nightModeOn;
+  const h = ['coalesce', ['get', 'render_height'], ['get', 'height'], 0];
   let color, opacity;
-  if (satellite) {
-    color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
-      0, '#e9e5dc',
-      60, '#f1eee7',
-      180, '#f7f4ec',
-      400, '#fffdf5'
-    ];
-    opacity = 0.72;
-  } else if (night) {
-    color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
+  if (night) {
+    color = ['interpolate', ['linear'], h,
       0, '#6f3f32',
       50, '#824a38',
       160, '#a66048',
@@ -3042,12 +2983,9 @@ function applyBuildingPalette() {
     ];
     opacity = 0.98;
   } else {
-    color = ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
-      0, '#cdb58c',
-      50, '#d8c19a',
-      160, '#b77d61',
-      350, '#a95f4d'
-    ];
+    const brown = ['interpolate', ['linear'], h, 0, '#cdb58c', 50, '#d8c19a', 160, '#b77d61', 350, '#a95f4d'];
+    const greys = ['interpolate', ['linear'], h, BUILDING_HOUSE_MAX_M, '#b9b4ab', 40, '#a9a7a2', 120, '#9ba1a6', 300, '#8f99a3'];
+    color = BUILDING_CITY_GREYS ? ['case', ['<', h, BUILDING_HOUSE_MAX_M], brown, greys] : brown;
     opacity = 0.92;
   }
   terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-color', color);
@@ -3528,8 +3466,11 @@ function initTerrainMap() {
   });
   terrainMapInstance.on('load', () => {
     addWeatherLayerIfReady();
+    // classic relief at the bottom of the stack: the satellite fades out on top
+    // of it, and streets draws over it (its own background is left out)
+    for (const id of ['color-relief', 'classic-hillshade']) if (terrainMapInstance.getLayer(id)) terrainMapInstance.moveLayer(id, 'maptiler-satellite'); // order: relief, its hillshade, then satellite
     addLightLayers3D();
-    addAerialLayers();  // open government aerial photos where available
+    applyBuildingPalette(); // building colours from the start, not only after a toggle
     requestSatProbe(); // find how deep the satellite imagery goes here
     applyLayerToggles();
     if (DEBUG_DISABLE_BATHYMETRY) {
@@ -4748,8 +4689,8 @@ function tick() {
 })();
 
 // ============================================================
-// TEST SPOTS (dev aid): one tap flies to places where the open aerial photos
-// should be sharpest, straight into 3D at full zoom. From the flat map it
+// TEST SPOTS (dev aid): one tap flies to places with very sharp satellite
+// imagery, straight into 3D at full zoom. From the flat map it
 // undocks/enters 3D first; already in 3D it just flies there.
 // ============================================================
 const TEST_SPOTS = [

@@ -1601,6 +1601,12 @@ function dockMap() { dockWithFade(); } // initial-load call sites — same mecha
 // with getLayer() + try/catch since it can run before the 3D map (or its
 // style) exists yet — in that case the booleans above are just remembered
 // and read when the layers are first created in initTerrainMap().
+// Satellite and streets drape over the classic map's elevation (Mapterhorn)
+// instead of MapTiler's. MapTiler's elevation includes skyscraper heights in
+// some cities (Manhattan rose into lumpy "hills" with the photo smeared over
+// them); Mapterhorn uses bare-earth lidar ground models where available.
+// Set false to go back to MapTiler's elevation for satellite/streets.
+const SATELLITE_USES_CLASSIC_TERRAIN = true;
 function applyLayerToggles() {
   if (!terrainMapInstance) return;
   try {
@@ -1610,7 +1616,7 @@ function applyLayerToggles() {
     // layers while leaving MapTiler DEM active still makes Classic download
     // and process the newer terrain pyramid.
     if (terrainMapInstance.setTerrain) {
-      const desiredTerrainSource = usesMaptilerSurface() ? 'terrainSource' : 'classicTerrainSource';
+      const desiredTerrainSource = usesMaptilerSurface() && !SATELLITE_USES_CLASSIC_TERRAIN ? 'terrainSource' : 'classicTerrainSource';
       const currentTerrain = terrainMapInstance.getTerrain && terrainMapInstance.getTerrain();
       if (!currentTerrain || currentTerrain.source !== desiredTerrainSource) {
         terrainMapInstance.setTerrain({ source: desiredTerrainSource, exaggeration: 1 });
@@ -1899,7 +1905,7 @@ function requestSatProbe() {
     while (satProbeWanted) {
       const job = satProbeWanted; satProbeWanted = null;
       let n = SAT_FALLBACK_NATIVE;
-      try { n = await probeSatNative(job.lng, job.lat); console.log(`gallery: satellite depth here = z${n} (fades out from map zoom ${(n - 0.5).toFixed(1)} to ${(n + 0.5).toFixed(1)})`); }
+      try { n = await probeSatNative(job.lng, job.lat); console.log(`gallery: satellite depth here = z${n} (fades to the base map from zoom ${(n - 0.5 + SAT_FADE_SHIFT).toFixed(1)} to ${(n - 0.5 + SAT_FADE_SHIFT + SAT_FADE_SPAN).toFixed(2)})`); }
       catch (err) { console.warn('gallery: satellite depth probe failed, using fallback z' + SAT_FALLBACK_NATIVE, err); }
       satNativeByArea.set(job.key, n);
       const c = terrainMapInstance && terrainMapInstance.getCenter();
@@ -1918,6 +1924,11 @@ let satFadeKey = '', satVisShown = null;
 // show it); zooming back out switches them off again, unless the user has
 // touched the toggle meanwhile.
 let satBaseShown = false, satFadedOut = false, buildingsAutoOn = false;
+// when and how fast the satellite gives way to the green base map while zooming in:
+// SAT_FADE_SHIFT moves the fade relative to where the imagery starts to blur
+// (negative = earlier, at a lower zoom); SAT_FADE_SPAN is how many zoom levels it takes
+const SAT_FADE_SHIFT = 0;
+const SAT_FADE_SPAN = 0.35;
 const classicBaseVisible = () => !usesMaptilerSurface() || streetsOn || (maptilerSatelliteOn && satBaseShown); // classic mode, under streets, and under a fading satellite
 function setBuildings(on) {
   buildingsOn = on;
@@ -1930,7 +1941,7 @@ function updateSatAuto() {
   if (!map || !map.getLayer('maptiler-satellite')) return;
   const z = map.getZoom();
   // map zoom where the native satellite tiles start being enlarged (256px tiles sit one level above map zoom)
-  const start = satNativeHere - 0.5, end = satNativeHere + 0.5;
+  const start = satNativeHere - 0.5 + SAT_FADE_SHIFT, end = start + SAT_FADE_SPAN;
   let satVisible = false, streetsVisible = false, baseVisible = false, fadedOut = false, inFade = false;
   if (streetsOn) { streetsVisible = true; }
   else if (maptilerSatelliteOn) {
@@ -3037,7 +3048,7 @@ const BUILDING_STOREY_TONES = [1.08, 1.0, 0.92, 0.85];
 const BUILDING_TALL_TONES = [[14, 1.06], [25, 1.0], [45, 0.94], [90, 0.88], [180, 0.82]];
 // Real colours: buildings that carry a colour in the map data (from OpenStreetMap
 // tags) use it; everything else keeps its palette colour. Set false to ignore them.
-const BUILDING_OSM_COLOURS = true;
+const BUILDING_OSM_COLOURS = false;
 // scale a colour's brightness inside a style expression (MapLibre can take a colour apart and rebuild it)
 const toneColour = (colourExpr, factorExpr) => ['let', 'c', ['to-rgba', ['to-color', colourExpr]], 'f', factorExpr,
   ['rgba',
@@ -3118,7 +3129,9 @@ function updateBuildingRegion() {
   applyBuildingPalette();
 }
 // one colour per building from a palette, mixing its id with its height so neighbours differ
-const pickByBuilding = (h, arr) => ['at', ['%', ['abs', ['round', ['+', ['to-number', ['id'], 0], ['*', h, 13.7]]]], arr.length], ['literal', arr]];
+// (to-color matters: an item taken from a list is typed as text, and a building colour rule
+// must produce a colour — without it MapLibre rejects the whole rule and buildings stay default)
+const pickByBuilding = (h, arr) => ['to-color', ['at', ['%', ['abs', ['round', ['+', ['to-number', ['id'], 0], ['*', h, 13.7]]]], arr.length], ['literal', arr]]];
 const BUILDING_CITY_GREYS = true; // houses and city buildings get separate palettes (false: houses' palette for all)
 const BUILDING_HOUSE_MAX_M = 14;  // up to ~4 storeys counts as a house
 function applyBuildingPalette() {
@@ -3155,7 +3168,8 @@ function applyBuildingPalette() {
     color = BUILDING_OSM_COLOURS ? ['to-color', ['get', 'colour'], palette] : palette;
     opacity = 0.92;
   }
-  terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-color', color);
+  try { terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-color', color); }
+  catch (err) { console.warn('gallery: building colour rule rejected', err); }
   terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-opacity', opacity);
   terrainMapInstance.setPaintProperty('maptiler-3d-buildings', 'fill-extrusion-vertical-gradient', true);
 }
@@ -3617,7 +3631,7 @@ function initTerrainMap() {
           paint: { 'raster-opacity': 1, 'raster-contrast': -0.6, 'raster-fade-duration': 0 }
         },
       ],
-      terrain: { source: (maptilerSatelliteOn || streetsOn) ? 'terrainSource' : 'classicTerrainSource', exaggeration: 1 },
+      terrain: { source: (maptilerSatelliteOn || streetsOn) && !SATELLITE_USES_CLASSIC_TERRAIN ? 'terrainSource' : 'classicTerrainSource', exaggeration: 1 },
       sky: {
         'sky-color': '#18BFFF',
         'sky-horizon-blend': 0.28,
